@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import sys
 
 from coypu_builder import PROTOCOL_VERSION, __version__
@@ -38,8 +40,17 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_inspect(args.path, crs=args.crs, spacing=args.spacing)
     if args.command == "serve":
-        print("serve: IPC server is not implemented yet (Phase 0 step 5)", file=sys.stderr)
-        return 2
+        from coypu_builder.server import serve as ws_serve
+
+        async def _run() -> None:
+            server = await ws_serve(port=args.port, token=args.token)
+            port = server.sockets[0].getsockname()[1]
+            print(json.dumps({"port": port}), flush=True)
+            async with server:
+                await server.serve_forever()
+
+        asyncio.run(_run())
+        return 0
     return 1
 
 
