@@ -1,0 +1,63 @@
+# Python / uv
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+backend/.venv/
+backend/dist/
+backend/build/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+*.coverage
+htmlcov/
+
+# Godot
+client/.godot/
+client/export/
+client/*.tmp
+*.import.tmp
+
+# Local tooling (installed by tools/install_godot.ps1)
+tools/godot/
+
+# Project runtime data
+cache/
+*.coypub-wal
+*.coypub-shm
+*.log
+
+# Private / proprietary reference data — never commit. Only synthetic or open (OSM/ODbL, ČÚZK) fixtures
+# are allowed in the repository; keep vendor or infrastructure-manager files outside it or under private/.
+private/
+**/private/**
+*geotel*
+*GeoTel*
+*GEOTEL*
+*SZ*
+*_sz_*
+*[Ss]prava*
+*[Ss]práva*
+*TTP*
+*Tab6b*
+*Classified*
+*SampleAlignment*
+*.dwg
+*.dxf
+*.dgn
+*.rsm
+*.rspm
+*.rsk
+*.ifc
+*.ifczip
+*.tif
+*.tiff
+*.geotiff
+*.las
+*.laz
+
+# OS / editors
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,45 @@
+[project]
+name = "coypu-builder-backend"
+version = "0.1.0"
+description = "COYPU Builder backend service: float64 railway domain kernel, GIS, IFC 4.3 and the .coypub document, served to the Godot client over local IPC."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "numpy>=2.2",
+  "scipy>=1.15",
+  "pyproj>=3.7",
+  "networkx>=3.4",
+  "msgspec>=0.19",
+  "websockets>=14",
+]
+
+[project.optional-dependencies]
+gis = ["rasterio>=1.4", "OWSLib>=0.32", "shapely>=2.1", "requests>=2.32", "pillow>=11"]
+ifc = ["ifcopenshell>=0.8"]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.25", "ruff>=0.9"]
+
+[project.scripts]
+coypu-builder-backend = "coypu_builder.__main__:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coypu_builder"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:coypu_builder.*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "NPY"]

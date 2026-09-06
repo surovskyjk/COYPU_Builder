@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  backend:
+    name: backend (pytest, ruff)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run pytest -q
+
+  # client:
+  #   name: client (gdUnit4 headless)
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: chickensoft-games/setup-godot@v2
+  #       with: { version: 4.7.2, use-dotnet: false }
+  #     - run: godot --headless --path client --import
+  #     - run: godot --headless --path client -s addons/gdUnit4/bin/GdUnitCmdTool.gd --add res://tests

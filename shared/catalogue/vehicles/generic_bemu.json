@@ -1,0 +1,35 @@
+{
+  "schema": "coypu-builder.vehicle-spec/1",
+  "name": "Generic BEMU",
+  "aliases": ["generic_bemu"],
+  "mode": "heavy_rail",
+  "gauge_mm": 1435,
+  "cars": [
+    {
+      "name": "BEMU car A",
+      "length_m": 26.45,
+      "width_m": 2.9,
+      "height_m": 4.1,
+      "floor_height_m": 0.6,
+      "bogie_pivot_distance_m": 19.0,
+      "bogie_wheelbase_m": 2.5,
+      "wheel_diameter_m": 0.85,
+      "mesh": null,
+      "color": "#0055a4"
+    },
+    {
+      "name": "BEMU car B",
+      "length_m": 26.45,
+      "width_m": 2.9,
+      "height_m": 4.1,
+      "floor_height_m": 0.6,
+      "bogie_pivot_distance_m": 19.0,
+      "bogie_wheelbase_m": 2.5,
+      "wheel_diameter_m": 0.85,
+      "mesh": null,
+      "color": "#0055a4"
+    }
+  ],
+  "coupling_gap_m": 0.0,
+  "provenance": "Two-car set whose total length matches the COYPU vehicle catalogue (lengthM=52.9). Dimensions are placeholders for the procedural Phase 1 mesh."
+}
