@@ -21,6 +21,14 @@ $uv = (Get-Command uv -ErrorAction SilentlyContinue).Source
 if (-not $uv) {
     $uv = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\uv.exe"
 }
+if (-not (Test-Path $uv)) {
+    # winget's Links shim isn't always present; fall back to the versioned Packages install directory.
+    $packaged = Get-ChildItem (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages") `
+        -Filter "uv.exe" -Recurse -Depth 1 -ErrorAction SilentlyContinue |
+        Where-Object { $_.Directory.Name -like "astral-sh.uv_*" } |
+        Select-Object -First 1
+    if ($packaged) { $uv = $packaged.FullName }
+}
 if (-not (Test-Path $uv)) { throw "uv not found; install with: winget install --id astral-sh.uv -e" }
 
 if (-not $NoBackend) {

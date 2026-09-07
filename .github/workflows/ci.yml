@@ -25,12 +25,21 @@ jobs:
       - run: uv run ruff check .
       - run: uv run pytest -q
 
-  # client:
-  #   name: client (gdUnit4 headless)
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: chickensoft-games/setup-godot@v2
-  #       with: { version: 4.7.2, use-dotnet: false }
-  #     - run: godot --headless --path client --import
-  #     - run: godot --headless --path client -s addons/gdUnit4/bin/GdUnitCmdTool.gd --add res://tests
+  client:
+    name: client (Godot headless IPC tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync
+        working-directory: backend
+      - uses: chickensoft-games/setup-godot@v2
+        with: { version: 4.7.2, use-dotnet: false }
+      # Builds client/.godot/global_script_class_cache.cfg (editor-only step). Without it, headless
+      # scripts referencing cross-file `class_name` types (IpcEnvelope, IpcWebSocketClient, ...) fail
+      # to parse with "Could not find type X in the current scope".
+      - run: godot --headless --editor --path client --quit
+      - run: godot --headless --path client --script res://tests/run_ipc_tests.gd
