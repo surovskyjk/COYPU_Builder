@@ -22,11 +22,13 @@ jobs:
           python-version: "3.13"
           enable-cache: true
       - run: uv sync
-      - run: uv run ruff check .
+      - run: uv run ruff check . ../tools
+      - run: uv run ruff format --check . ../tools
       - run: uv run pytest -q
+      - run: uv run python ../tools/gen_protocol_docs.py --check
 
   client:
-    name: client (Godot headless IPC tests)
+    name: client (Godot headless gdUnit4 tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,4 +44,7 @@ jobs:
       # scripts referencing cross-file `class_name` types (IpcEnvelope, IpcWebSocketClient, ...) fail
       # to parse with "Could not find type X in the current scope".
       - run: godot --headless --editor --path client --quit
-      - run: godot --headless --path client --script res://tests/run_ipc_tests.gd
+      # gdUnit4's CLI tool refuses to run headless without this flag regardless of CI having no
+      # display (the check only matters for suites simulating UI input, which ours never do); its own
+      # exit code fails the job on any test failure.
+      - run: godot --headless --path client -s addons/gdUnit4/bin/GdUnitCmdTool.gd -a tests --ignoreHeadlessMode

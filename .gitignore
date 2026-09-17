@@ -17,6 +17,8 @@ client/.godot/
 client/export/
 client/*.tmp
 *.import.tmp
+# gdUnit4 writes one report_N/ per run
+client/reports/
 
 # Local tooling (installed by tools/install_godot.ps1)
 tools/godot/

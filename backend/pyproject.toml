@@ -37,9 +37,13 @@ asyncio_mode = "auto"
 filterwarnings = ["error::DeprecationWarning:coypu_builder.*"]
 
 [tool.ruff]
+# This is the one ruff config for the whole repo: CI runs `ruff check . ../tools` and
+# `ruff format --check . ../tools` from this directory, so `../tools` is governed by these same settings
+# (ruff resolves config from the invocation's working directory, not per-file) — do not add a second
+# ruff.toml/pyproject.toml `[tool.ruff]` block for `tools/`.
 line-length = 110
 target-version = "py313"
-src = ["src", "tests"]
+src = ["src", "tests", "../tools"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "NPY"]

@@ -21,6 +21,14 @@ window/size/viewport_width=1600
 window/size/viewport_height=900
 window/stretch/aspect="expand"
 
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/gdUnit4/plugin.cfg")
+
+[gdunit4]
+
+report/godot/push_error=true
+
 [rendering]
 
 renderer/rendering_method="forward_plus"
