@@ -39,7 +39,9 @@ cd backend; uv sync; uv run pytest           # backend + golden tests
 ## Status
 
 Phase 0 (bootstrap): domain kernel, multi-dialect LandXML reader, `.coypu` reader and golden tests against the
-Kralupy–Neratovice fixture are in place. See `docs/adr/` and the roadmap in `CLAUDE.md`.
+Kralupy–Neratovice fixture are in place. Phase 1 (playback visualizer + spatial context) is specified and
+under way — see [`ROADMAP.md`](ROADMAP.md) for milestones and [`docs/adr/`](docs/adr/) for the decisions
+behind them.
 
 ## License
 
