@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from coypu_builder.protocol.messages import (
     AlignmentFrameTableResult,
     AlignmentSummary,
     BasePointDTO,
+    ErrorCode,
     ImportLandxmlParams,
     ImportLandxmlResult,
     ProjectInfoResult,
@@ -33,6 +35,8 @@ from coypu_builder.protocol.messages import (
     RunGetParams,
     SessionHelloParams,
     SessionHelloResult,
+    SessionPingParams,
+    SessionPingResult,
 )
 from coypu_builder.server.session import AlignmentEntry, ProjectState, Session
 
@@ -41,7 +45,7 @@ Handler = Callable[[Session, "dict[str, Any] | None"], HandlerResult]
 
 
 class ProtocolError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: ErrorCode, message: str):
         super().__init__(message)
         self.code = code
         self.message = message
@@ -51,18 +55,18 @@ def _convert(params: dict[str, Any] | None, kind: type) -> Any:
     try:
         return msgspec.convert(params or {}, type=kind)
     except msgspec.ValidationError as exc:
-        raise ProtocolError("E_BAD_PARAMS", str(exc)) from exc
+        raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
 
 
 def _require_hello(session: Session) -> None:
     if not session.hello_received:
-        raise ProtocolError("E_NO_SESSION", "session.hello must be sent first")
+        raise ProtocolError(ErrorCode.NO_SESSION, "session.hello must be sent first")
 
 
 def _require_project(session: Session) -> ProjectState:
     _require_hello(session)
     if session.project is None:
-        raise ProtocolError("E_NO_PROJECT", "no project open; call project.new first")
+        raise ProtocolError(ErrorCode.NO_PROJECT, "no project open; call project.new first")
     return session.project
 
 
@@ -101,11 +105,18 @@ def _project_info(project: ProjectState) -> ProjectInfoResult:
 def handle_session_hello(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     req = _convert(params, SessionHelloParams)
     if session.expected_token and req.token != session.expected_token:
-        raise ProtocolError("E_UNAUTHORIZED", "token mismatch")
+        raise ProtocolError(ErrorCode.UNAUTHORIZED, "token mismatch")
     session.hello_received = True
     result = SessionHelloResult(
         session_id=session.session_id, protocol_version=PROTOCOL_VERSION, server_version=__version__
     )
+    return msgspec.to_builtins(result), {}
+
+
+def handle_session_ping(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    _require_hello(session)
+    req = _convert(params, SessionPingParams)
+    result = SessionPingResult(client_time_ms=req.client_time_ms, server_time_ms=time.time_ns() // 1_000_000)
     return msgspec.to_builtins(result), {}
 
 
@@ -132,16 +143,16 @@ def handle_import_landxml(session: Session, params: dict[str, Any] | None) -> Ha
     req = _convert(params, ImportLandxmlParams)
     path = Path(req.path)
     if not path.is_file():
-        raise ProtocolError("E_NOT_FOUND", f"no such file: {path}")
+        raise ProtocolError(ErrorCode.NOT_FOUND, f"no such file: {path}")
     raws = read_landxml(path)
     if not raws:
-        raise ProtocolError("E_EMPTY", "file carries no <Alignment> elements")
+        raise ProtocolError(ErrorCode.EMPTY, "file carries no <Alignment> elements")
 
     crs = ProjectCRS(req.crs) if req.crs else project.crs
     if crs is None:
         epsg = raws[0].epsg
         if epsg is None:
-            raise ProtocolError("E_CRS_REQUIRED", "file carries no CRS; pass crs")
+            raise ProtocolError(ErrorCode.CRS_REQUIRED, "file carries no CRS; pass crs")
         crs = ProjectCRS(f"EPSG:{epsg}")
     if project.crs is None:
         project.crs = crs
@@ -175,7 +186,7 @@ def handle_alignment_frame_table(session: Session, params: dict[str, Any] | None
     req = _convert(params, AlignmentFrameTableParams)
     entry = project.alignments.get(req.alignment_id)
     if entry is None:
-        raise ProtocolError("E_NOT_FOUND", f"unknown alignment_id '{req.alignment_id}'")
+        raise ProtocolError(ErrorCode.NOT_FOUND, f"unknown alignment_id '{req.alignment_id}'")
     pivot = RotationPivot(req.pivot) if req.pivot else None
     table = bake_frame_table(entry.alignment, spacing_m=req.spacing_m, pivot=pivot)
     base = project.base_point or BasePoint(0.0, 0.0, 0.0)
@@ -206,11 +217,14 @@ def handle_alignment_frame_table(session: Session, params: dict[str, Any] | None
 def handle_run_get(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     _require_project(session)
     req = _convert(params, RunGetParams)
-    raise ProtocolError("E_NOT_FOUND", f"no run '{req.run_id}': kinematics runs are not implemented yet")
+    raise ProtocolError(
+        ErrorCode.NOT_FOUND, f"no run '{req.run_id}': kinematics runs are not implemented yet"
+    )
 
 
 DISPATCH: dict[str, Handler] = {
     "session.hello": handle_session_hello,
+    "session.ping": handle_session_ping,
     "project.new": handle_project_new,
     "project.get": handle_project_get,
     "import.landxml": handle_import_landxml,

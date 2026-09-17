@@ -10,13 +10,13 @@ from websockets.asyncio.server import serve as ws_serve
 from websockets.exceptions import ConnectionClosed
 
 from coypu_builder import PROTOCOL_VERSION
-from coypu_builder.protocol.messages import Envelope, ErrorInfo
+from coypu_builder.protocol.messages import Envelope, ErrorCode, ErrorInfo
 from coypu_builder.server.codec import decode_frame, encode_frame, pack_blobs
 from coypu_builder.server.handlers import DISPATCH, ProtocolError
 from coypu_builder.server.session import Session
 
 
-def _error_frame(request_id: str, method: str, code: str, message: str) -> bytes:
+def _error_frame(request_id: str, method: str, code: ErrorCode, message: str) -> bytes:
     envelope = Envelope(
         v=PROTOCOL_VERSION, id=request_id, type="err", method=method, error=ErrorInfo(code, message)
     )
@@ -27,7 +27,7 @@ def _dispatch(session: Session, envelope: Envelope) -> bytes:
     handler = DISPATCH.get(envelope.method)
     if handler is None:
         return _error_frame(
-            envelope.id, envelope.method, "E_UNKNOWN_METHOD", f"unknown method '{envelope.method}'"
+            envelope.id, envelope.method, ErrorCode.UNKNOWN_METHOD, f"unknown method '{envelope.method}'"
         )
     try:
         result, blobs = handler(session, envelope.params)
@@ -49,7 +49,7 @@ async def _handle_connection(ws: ServerConnection, token: str) -> None:
             try:
                 envelope, _tail = decode_frame(bytes(raw))
             except (msgspec.DecodeError, ValueError) as exc:
-                await ws.send(_error_frame("", "", "E_BAD_FRAME", str(exc)))
+                await ws.send(_error_frame("", "", ErrorCode.BAD_FRAME, str(exc)))
                 continue
             await ws.send(_dispatch(session, envelope))
     except ConnectionClosed:

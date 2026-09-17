@@ -22,3 +22,9 @@ Status: accepted (2026-09-06)
 
 gRPC/ZeroMQ (no first-class Godot support), shared memory (needs GDExtension), Godot `var_to_bytes`
 (no Python codec), MessagePack/FlatBuffers (extra dependencies on the Godot side for no gain at local latency).
+
+## Status of implementation
+
+T-101 built the generator side: `protocol/messages.py` now exports `ErrorCode`, `BlobSpec`, `MethodSpec` and
+the `METHODS` registry as the actual SSOT (not just a stated intent), `tools/gen_protocol_docs.py` renders
+`docs/protocol/ipc.md` from it, and CI runs `--check` in the `backend` job so a stale doc fails the build.
