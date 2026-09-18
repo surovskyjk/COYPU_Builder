@@ -313,7 +313,7 @@ def _horizontal(
         scale_dev = float(np.max(np.abs(horizontal.station_scale - 1.0)))
         if scale_dev > 1e-3:
             report.warnings.append(f"element lengths differ from staStart spans by up to {scale_dev:.2%}")
-    for j in horizontal.junctions():
+    for j in horizontal.discontinuities():
         report.max_heading_jump_rad = max(report.max_heading_jump_rad, j.heading_jump_rad)
         if j.gap_m > CHAIN_TOLERANCE_M:
             report.warnings.append(f"gap of {j.gap_m:.3f} m before element {j.index}")

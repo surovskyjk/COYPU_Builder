@@ -121,7 +121,7 @@ def test_horizontal_alignment_chain_and_lookup():
     h = HorizontalAlignment((line, spiral, arc), station_start=1000.0)
     assert h.stations.tolist() == pytest.approx([1000.0, 1100.0, 1140.0, 1260.0])
     assert h.length == pytest.approx(260.0)
-    for j in h.junctions():
+    for j in h.discontinuities():
         assert j.gap_m < 1e-9
         assert j.heading_jump_rad < 1e-12
     idx, local = h.locate([1000.0, 1099.999, 1100.0, 1140.0, 1260.0, 5000.0])

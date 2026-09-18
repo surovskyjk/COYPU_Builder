@@ -37,7 +37,7 @@ def _curvature_of(seg, s_local: np.ndarray) -> np.ndarray:
 
 
 @dataclass(frozen=True)
-class Junction:
+class SegmentDiscontinuity:
     index: int
     gap_m: float
     heading_jump_rad: float
@@ -123,12 +123,12 @@ class HorizontalAlignment:
     def segment_index(self, s) -> np.ndarray:
         return self.locate(s)[0]
 
-    def junctions(self) -> list[Junction]:
+    def discontinuities(self) -> list[SegmentDiscontinuity]:
         """Geometric continuity between consecutive segments (C0 gap, C1 heading jump, C2 curvature jump)."""
         out = []
         for i in range(1, len(self.segments)):
             prev, cur = self.segments[i - 1], self.segments[i]
             gap = float(np.hypot(*(cur.start - prev.end)))
             jump = float(abs(wrap_angle(cur.heading_start - prev.heading_end)))
-            out.append(Junction(i, gap, jump, float(cur.curvature_start - prev.curvature_end)))
+            out.append(SegmentDiscontinuity(i, gap, jump, float(cur.curvature_start - prev.curvature_end)))
         return out

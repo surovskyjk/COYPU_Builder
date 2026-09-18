@@ -5,6 +5,7 @@ import pytest
 from coypu_builder.domain.crs import ProjectCRS
 from coypu_builder.io.coypu import read_coypu
 from coypu_builder.io.landxml import read_landxml, to_alignment
+from fixtures.synthetic.tram_loop import build_tram_loop
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -44,3 +45,18 @@ def kralupy(kralupy_raw, krovak):
 @pytest.fixture(scope="session")
 def kralupy_project(kralupy_coypu):
     return read_coypu(kralupy_coypu)
+
+
+@pytest.fixture(scope="session")
+def tram_fixture():
+    return build_tram_loop()
+
+
+@pytest.fixture(scope="session")
+def tram_network(tram_fixture):
+    return tram_fixture[0]
+
+
+@pytest.fixture(scope="session")
+def tram_alignments(tram_fixture):
+    return tram_fixture[1]
