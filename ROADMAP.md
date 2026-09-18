@@ -5,7 +5,7 @@ has (or will have) a self-contained specification in [`docs/tasks/`](docs/tasks/
 
 **Status legend** — `done` · `in progress` · `ready` (spec written, not started) · `planned` (no spec yet)
 
-Last reviewed: 2026-09-17 against `7a48725` plus the uncommitted T-101 change set.
+Last reviewed: 2026-09-18. T-101 through T-111 are committed; M1 continues at T-113.
 
 ---
 
@@ -25,12 +25,12 @@ msgspec/blob IPC on both sides, and two golden vector files.
 
 | # | Debt | Retired by |
 |---|---|---|
-| D1 | `docs/data-contracts/coordinate-conventions.md` cites `client/core/Origin.gd`, which does not exist | T-103 |
+| D1 | ~~`docs/data-contracts/coordinate-conventions.md` cites `client/core/Origin.gd`, which does not exist~~ | **retired by T-103** |
 | D2 | ~~ADR 0003 promised `tools/gen_protocol_docs.py`, `docs/protocol/ipc.md` and a CI freshness gate — all missing~~ | **retired by T-101** |
-| D3 | `run.get` raises `E_NOT_FOUND`; `domain/kinematics`, `topology`, `sections`, `analysis`, `io/gis`, `io/mesh`, `io/project` are 0-line packages; `domain/model` is `modes.py` alone | T-110, T-111, T-114 |
+| D3 | *(partly retired by T-110 and T-111 — `domain/model`, `topology` and `kinematics` are populated; `run.get` and the empty `io/` packages remain)* `run.get` raises `E_NOT_FOUND`; `domain/kinematics`, `topology`, `sections`, `analysis`, `io/gis`, `io/mesh`, `io/project` are 0-line packages; `domain/model` is `modes.py` alone | T-110, T-111, T-114 |
 | D4 | ~~gdUnit4 is not vendored; `CLAUDE.md` documents a command that cannot run~~ | **retired by T-102** |
-| D5 | `tools/run_dev.ps1` passes `--backend-url` / `--backend-token`; nothing reads them | T-103 |
-| D6 | ADR 0006 requires a non-heavy-rail fixture before Phase 2 authoring ships | T-110 |
+| D5 | ~~`tools/run_dev.ps1` passes `--backend-url` / `--backend-token`; nothing reads them~~ | **retired by T-103** |
+| D6 | ~~ADR 0006 requires a non-heavy-rail fixture before Phase 2 authoring ships~~ | **retired by T-110** |
 
 ---
 
@@ -52,29 +52,29 @@ orbit, wayside and cab cameras. Read-only: no authoring, no editing, no IFC.
 4. **Tram fixture** — a synthetic tram loop with one junction is seeded in **M1**, not at the Phase 2
    boundary, so that mode-specific assumptions never become cheap to introduce.
 
-### P1.M0 — Foundations & harness · `ready`
+### P1.M0 — Foundations & harness · `done`
 
 *Goal:* the client becomes an application, and the two ADR promises that are cheapest to keep now get kept.
 
 | Task | Title | Status | Depends on | Spec |
 |---|---|---|---|---|
-| T-101 | Protocol method registry, doc generator, CI gate | `done` (2026-09-17, uncommitted) | — | [task_101](docs/tasks/task_101_protocol_registry_and_docs.md) |
-| T-102 | Vendor gdUnit4, port the client suite, CI switch | `done` (2026-09-17, uncommitted) | — | [task_102](docs/tasks/task_102_gdunit4_harness.md) |
-| T-103 | Client app shell: main scene, autoloads, connection lifecycle | `ready` | T-101, T-102 | [task_103](docs/tasks/task_103_client_app_shell.md) |
+| T-101 | Protocol method registry, doc generator, CI gate | `done` (2026-09-17) | — | [task_101](docs/tasks/task_101_protocol_registry_and_docs.md) |
+| T-102 | Vendor gdUnit4, port the client suite, CI switch | `done` (2026-09-17) | — | [task_102](docs/tasks/task_102_gdunit4_harness.md) |
+| T-103 | Client app shell: main scene, autoloads, connection lifecycle | `done` (2026-09-18) | T-101, T-102 | [task_103](docs/tasks/task_103_client_app_shell.md) |
 
 **Exit criteria.** `docs/protocol/ipc.md` is generated and CI fails when stale · gdUnit4 runs the client suite
 in CI with no loss of assertion coverage · `godot --path client` boots a scene that spawns the backend,
 completes `session.hello`, heartbeats, and survives a backend kill by reconnecting · `Origin` is validated
 against `shared/golden/origin_mapping.json` · D1, D2, D4, D5 retired.
 
-### P1.M1 — Run domain · `ready`
+### P1.M1 — Run domain · `in progress`
 
 *Goal:* kinematics becomes a first-class domain concept, and the client can mirror baked tables.
 
 | Task | Title | Status | Depends on | Spec |
 |---|---|---|---|---|
-| T-110 | ADR 0006 entity model, topology graph, tram fixture | `ready` | — | [task_110](docs/tasks/task_110_domain_model_and_topology.md) |
-| T-111 | `KinematicsRun` normalisation and `RunTable` baking | `ready` | — | [task_111](docs/tasks/task_111_kinematics_domain.md) |
+| T-110 | ADR 0006 entity model, topology graph, tram fixture | `done` (2026-09-18) | — | [task_110](docs/tasks/task_110_domain_model_and_topology.md) |
+| T-111 | `KinematicsRun` normalisation and `RunTable` baking | `done` (2026-09-18) | — | [task_111](docs/tasks/task_111_kinematics_domain.md) |
 | T-112 | Trainset chain reference + `trainset_chain.json` golden | `ready` | T-110, T-113 | [task_112](docs/tasks/task_112_trainset_chain.md) |
 | T-113 | Vehicle catalogue schema, loader, COYPU vehicle import | `ready` | — | [task_113](docs/tasks/task_113_vehicle_catalogue.md) |
 | T-114 | Protocol surface for runs, catalogue and `.coypu` import | `ready` | T-101, T-111, T-113 | [task_114](docs/tasks/task_114_protocol_run_surface.md) |
@@ -158,6 +158,9 @@ ramps, doubling as a visual regression check on the kernel.
 | F2 | ~~gdUnit4 writes `client/reports/report_N/` on every run and it was not git-ignored~~ | T-102 review | **closed 2026-09-17** — `client/reports/` added to `.gitignore`, two accumulated report directories removed |
 | F3 | gdUnit4's CLI refuses `--headless` without `--ignoreHeadlessMode` (all versions v5.1.1–v6.2.1). Every invocation in `CLAUDE.md`, `client/README.md` and CI now carries the flag | T-102 | Closed; noted here so no later task "cleans up" the flag |
 | F4 | gdUnit4 v6.2.1 declares a Godot 4.5 floor, not the 4.4+ the spec asked for — no release satisfies both "declares 4.4+" and "compiles on 4.7.2" (v5.1.1 fails to compile: `FileAccess.get_as_text()` arity). v6.2.1 verified working empirically | T-102 | Accepted deviation. Revisit only if a Godot upgrade breaks the addon |
+| F5 | ~~The in-flight disconnect test raced a 0.01 s kill against a ~2 ms `session.ping`, failing 3/3 and stranding the two tests declared after it~~ | T-103 review | **closed 2026-09-18.** Replaced by an `alignment.frame_table` request at `spacing_m = 0.002` (~9M rows, ~8 s of synchronous bake) so no reply can exist at the 0.1 s kill. Re-verified here: 29/29, three consecutive green runs, 0 orphans |
+| F7 | COYPU's kinematics grid overshoots the alignment: `station_m.max()` is `18185.0` against a `station_end` of `18184.971666` (its fixed 1 m simulation grid is not clipped to the exact alignment length). Harmless here, but T-112 and T-123 will pose a consist past the end and must clamp — both contracts already require it | T-111 | Standing data property, not a defect. Verify the clamp actually fires when T-123 plays the final seconds |
+| F6 | `topology.validate(network)` cannot check "links whose station range leaves the alignment" — the signature sees only `alignment_id`, never the `Alignment`. The spec asked for a check the contract structurally forbids | T-110 | Spec error, correctly declined. The check belongs to a caller holding both; documented in `docs/data-contracts/entity-model.md`. Revisit when T-145 assembles projects |
 
 ---
 

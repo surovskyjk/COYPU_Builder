@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import json
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from coypu_builder.domain.kinematics.run import KinematicsRun, Stop, normalise_run
 
 NDARRAY_MARKER = "__ndarray__"
 
@@ -62,6 +65,28 @@ class CoypuProject:
         return {
             name: np.asarray(self.data_storage[key]) for name, key in keys.items() if key in self.data_storage
         }
+
+    def kinematics_run(self, index: int, *, stops: Sequence[Stop] = ()) -> KinematicsRun:
+        raw = self.kinematics(index)
+        required = ("station_m", "time_s", "speed_ms", "accel_ms2")
+        missing = [key for key in required if key not in raw]
+        if missing:
+            raise ValueError(f"vehicle {index}: archive kinematics is missing required arrays: {missing}")
+        return normalise_run(
+            raw["station_m"],
+            raw["time_s"],
+            raw["speed_ms"],
+            raw["accel_ms2"],
+            f_traction_kn=raw.get("f_trac_kn"),
+            f_braking_kn=raw.get("f_brake_kn"),
+            f_resistance_kn=raw.get("f_res_kn"),
+            dwell_s=raw.get("dwell_s"),
+            stops=stops,
+            vehicle_index=index,
+        )
+
+    def kinematics_runs(self, *, stops: Sequence[Stop] = ()) -> tuple[KinematicsRun, ...]:
+        return tuple(self.kinematics_run(i, stops=stops) for i in range(self.vehicle_count))
 
 
 def read_coypu(path: str | Path) -> CoypuProject:

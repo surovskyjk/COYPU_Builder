@@ -19,12 +19,17 @@ from coypu_builder.domain.crs import (
     points_to_godot,
     quaternion_from_matrix,
 )
+from coypu_builder.domain.kinematics import bake_run_table
 from coypu_builder.domain.lrs import frames
+from coypu_builder.io.coypu import read_coypu
+from coypu_builder.io.coypu.kinematics_csv import read_stops_csv
 from coypu_builder.io.landxml import read_landxml, to_alignment
 
 ROOT = Path(__file__).resolve().parents[1]
 GOLDEN = ROOT / "shared" / "golden"
 KRALUPY = ROOT / "backend" / "tests" / "fixtures" / "kralupy" / "kralupy_neratovice_092.xml"
+KRALUPY_COYPU = ROOT / "backend" / "tests" / "fixtures" / "kralupy" / "kralupy_neratovice_092.coypu"
+KRALUPY_STOPS_CSV = ROOT / "backend" / "tests" / "fixtures" / "kralupy" / "kralupy_neratovice_092_stops.csv"
 
 
 def origin_mapping() -> dict:
@@ -95,9 +100,56 @@ def frame_eval() -> dict:
     }
 
 
+def run_table() -> dict:
+    project = read_coypu(KRALUPY_COYPU)
+    stops = read_stops_csv(KRALUPY_STOPS_CSV)
+    run = project.kinematics_run(0, stops=stops)
+    table = bake_run_table(run)
+
+    grid_t = np.arange(len(table), dtype=np.float64) * table.dt
+    grid_t[-1] = table.duration
+
+    n = len(table)
+    max_speed_index = int(np.argmax(table.speed))
+
+    dwell_index = None
+    if table.stops:
+        stop_station = table.stops[0].station_m
+        near = np.nonzero((np.abs(table.station - stop_station) < 0.5) & (table.speed < 0.05))[0]
+        if len(near) > 0:
+            dwell_index = int(near[len(near) // 2])
+
+    spread = np.linspace(0, n - 1, 18, dtype=np.int64).tolist()
+    indices = sorted({*spread, max_speed_index, *([dwell_index] if dwell_index is not None else [])})
+
+    return {
+        "source": f"{KRALUPY_COYPU.name} vehicle 0",
+        "dt": table.dt,
+        "row_count": n,
+        "duration": table.duration,
+        "max_speed_index": max_speed_index,
+        "dwell_index": dwell_index,
+        "samples": [
+            {
+                "index": i,
+                "t": float(grid_t[i]),
+                "station": float(table.station[i]),
+                "speed": float(table.speed[i]),
+                "accel": float(table.accel[i]),
+            }
+            for i in indices
+        ],
+    }
+
+
 def main() -> None:
     GOLDEN.mkdir(parents=True, exist_ok=True)
-    for name, payload in (("origin_mapping.json", origin_mapping()), ("frame_eval.json", frame_eval())):
+    payloads = (
+        ("origin_mapping.json", origin_mapping()),
+        ("frame_eval.json", frame_eval()),
+        ("run_table.json", run_table()),
+    )
+    for name, payload in payloads:
         (GOLDEN / name).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(f"wrote {GOLDEN / name}")
 
