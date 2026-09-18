@@ -58,6 +58,19 @@ func is_running() -> bool:
 	return _pid != -1 and OS.is_process_running(_pid)
 
 
+## Test-only (T-103 `test_connection_lifecycle.gd`): the spawned process id, or -1 if none is running.
+func pid() -> int:
+	return _pid if is_running() else -1
+
+
+## Test-only (T-103 `test_connection_lifecycle.gd`): kills the process the same way an external crash
+## would, without clearing bookkeeping first — unlike [method stop], so the next [method _process] poll
+## still finds it dead and emits [signal backend_crashed] exactly like a real crash.
+func debug_kill() -> void:
+	if is_running():
+		_kill_process_tree(_pid)
+
+
 func _process(_delta: float) -> void:
 	if _waiting_for_port:
 		_poll_for_port()

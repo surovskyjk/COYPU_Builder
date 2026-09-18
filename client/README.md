@@ -19,6 +19,39 @@ assets/         placeholder materials/icons; vehicle glTF later
 
 Open with `tools\godot\Godot_v4.7.2-stable_win64.exe --path client --editor` after `tools\install_godot.ps1`.
 
+## Autoloads (`core/`)
+
+Four singletons, in the order `project.godot` registers them:
+
+- **`Origin`** — the Project Base Point and the domain (E, N, H) ⇄ Godot axis mapping (ADR 0004). It does
+  *not* transform incoming geometry — the backend already maps everything it sends into Godot axes
+  relative to the base point, so re-mapping here would double-apply the transform (ADR 0001). It exists
+  so the client has one place that knows the convention: readouts, the inspector and (later) picking map
+  a Godot position *back* to (E, N, H) through `Origin.from_godot`, pinned to the backend by
+  `shared/golden/origin_mapping.json`.
+- **`EventBus`** — typed cross-cutting signals only, no logic, no state. UI and tooling that need to react
+  to backend/session changes without depending on `Backend`/`Session` directly listen here.
+- **`Backend`** — owns the one `IpcProcessSupervisor` and one `IpcWebSocketClient` and is the only object
+  that talks to them. `state()` walks `DISCONNECTED → SPAWNING/CONNECTING → HANDSHAKING → READY`, with
+  `RECONNECTING` (backoff 1/2/4/8/10 s, then `FAILED` in spawn mode; unlimited in attach mode, since the
+  developer may be restarting the backend under a debugger) on any lost connection. `request()` is a
+  coroutine that always resolves — a dead connection or a timeout comes back as a synthetic `err`
+  envelope (`E_DISCONNECTED` / `E_TIMEOUT`) rather than hanging forever.
+- **`Session`** — the client's read-only mirror of backend document state. T-103 populates only what
+  `project.get`/`project.new`/`import.landxml` return; T-115 adds runs, layers and the entity registry.
+
+`core/cli_args.gd` (`CliArgs`, not an autoload) parses the arguments after `--` on the command line:
+`--backend-url`, `--backend-token`, `--project`.
+
+## Launch modes
+
+- **Spawn mode** (no `--backend-url`): `Backend` locates `uv`, spawns
+  `coypu-builder-backend serve --port 0 --token <token>` itself, and owns its lifecycle — killing it on
+  shutdown and respawning it if it crashes. This is what a bare `godot --path client` does.
+- **Attach mode** (`--backend-url` given, as `tools\run_dev.ps1` does): `Backend` never spawns or kills a
+  process; it only connects. A lost connection still retries, since the developer may be restarting the
+  backend under a debugger.
+
 ## Tests
 
 `addons/gdUnit4` is vendored at **v6.2.1** (from

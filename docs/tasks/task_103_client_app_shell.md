@@ -213,3 +213,63 @@ tools\run_dev.ps1
 State: the final autoload APIs if they deviated from this contract and why; how in-flight requests are
 resolved on disconnect; measured reconnect behaviour after a forced backend kill; whether anything in
 `client/ipc/*.gd` had to change; and any place where the ADRs and the code disagreed.
+
+---
+
+## Follow-up F5 — remove the race from the in-flight disconnect test
+
+*Added 2026-09-18 after the T-103 review. Must land before T-115 starts, because it leaves the client
+suite red and two acceptance criteria unexecuted.*
+
+`test_in_flight_request_resolves_with_disconnected_when_backend_is_killed` arms a 0.01 s `SceneTreeTimer`
+to kill the backend, then awaits `Backend.request("session.ping", …)`. A `session.ping` round trip takes
+roughly 1–5 ms — the cheapest call in the protocol — so the real `res` envelope reliably arrives *before*
+the kill fires. Reviewed on 2026-09-18: the test fails 3 runs out of 3, asserting `err` against a `res`.
+
+The test's comment states that the timer "reliably fires while it is still awaiting its reply". That holds
+only when the reply is slower than the timer, which is precisely what `session.ping` is not.
+
+Two consequences, the second more serious than the first:
+
+1. The client suite is red: 29 test functions are defined, 27 execute, 2 assertions fail.
+2. gdUnit4 stops the suite at the failure, so `test_killing_the_backend_process_reconnects_and_returns_to_ready`
+   and `test_shutdown_leaves_no_orphaned_backend_process` — declared after it — **never run**. Acceptance
+   criteria 4 and 8 are therefore unverified, despite being reported as passing.
+
+### Deliverables
+
+| Path | Action |
+|---|---|
+| `client/tests/integration/test_connection_lifecycle.gd` | make the in-flight test deterministic |
+| `client/core/backend.gd` | only if the test exposes a real defect in `_fail_all_pending()` |
+
+### Requirement
+
+The test must not depend on winning a race. Any of these is acceptable, in rough order of preference:
+
+- Issue a request that is genuinely slow relative to the kill — `alignment.frame_table` on the Kralupy
+  fixture at a fine `spacing_m` bakes a large table and ships a multi-megabyte blob tail, which takes far
+  longer than a ping. Assert the elapsed time to prove the request really was in flight.
+- Drive the disconnect from an observable signal rather than a wall-clock timer, so the kill is ordered
+  after the send and before the reply by construction.
+- Add a test-only hook on `Backend` that fails pending requests directly, and cover the
+  socket-close path separately through the already-passing crash-recovery test.
+
+Whatever you choose, the test must state in a comment why it cannot race, and the reasoning must survive a
+machine ten times faster or slower.
+
+### Acceptance
+
+1. The full suite passes: `-a tests --ignoreHeadlessMode` exits 0 with **29 of 29** test functions executed,
+   0 failures, 0 orphans.
+2. Run the full suite five times consecutively; all five are green. Report the counts.
+3. `test_killing_the_backend_process_reconnects_and_returns_to_ready` and
+   `test_shutdown_leaves_no_orphaned_backend_process` demonstrably execute — name them in the output.
+4. `Get-Process` after the five runs shows no orphaned `python`, `uv` or `coypu-builder-backend` process.
+5. If `_fail_all_pending()` turns out to be genuinely broken once a deterministic test finally reaches it,
+   fix it and say so explicitly — that would mean acceptance criterion 5 of T-103 was never actually met.
+
+### Report back
+
+State: which approach you took and why it cannot race; the five-run results; confirmation that the two
+previously-unreached tests now execute; and whether the production disconnect path needed any change.

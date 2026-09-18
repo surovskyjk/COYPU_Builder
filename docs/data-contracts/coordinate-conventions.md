@@ -16,5 +16,5 @@
 | Godot quaternion | `(x, y, z, w)` scalar-last |
 | Tiles | mesh vertices relative to the tile centre; tile node positioned in world |
 
-Implementation: `backend/src/coypu_builder/domain/crs.py`, `domain/lrs.py`; client `core/Origin.gd`.
+Implementation: `backend/src/coypu_builder/domain/crs.py`, `domain/lrs.py`; client `client/core/origin.gd`.
 Golden vectors: `shared/golden/origin_mapping.json`, `shared/golden/frame_eval.json`.
