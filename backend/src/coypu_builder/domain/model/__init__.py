@@ -5,9 +5,12 @@ from coypu_builder.domain.model.ids import EntityId, new_id
 from coypu_builder.domain.model.modes import Mode
 from coypu_builder.domain.model.network import Junction, JunctionKind, Link, Network, Node
 from coypu_builder.domain.model.organisation import Layer, WbsNode
+from coypu_builder.domain.model.trainset import Trainset
+from coypu_builder.domain.model.vehicle import CarSpec, TractionBand, VehicleDynamics, VehicleSpec
 
 __all__ = [
     "Asset",
+    "CarSpec",
     "Corridor",
     "CrossSectionInterval",
     "EntityId",
@@ -19,6 +22,10 @@ __all__ = [
     "Mode",
     "Network",
     "Node",
+    "TractionBand",
+    "Trainset",
+    "VehicleDynamics",
+    "VehicleSpec",
     "WbsNode",
     "new_id",
 ]

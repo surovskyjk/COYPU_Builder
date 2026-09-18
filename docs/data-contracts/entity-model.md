@@ -174,10 +174,11 @@ class WbsNode:
     parent_id: EntityId | None = None
 ```
 
-## Not defined here
+## Defined elsewhere
 
-`Trainset` and `KinematicsRun` (ADR 0006 names them, but they are T-113 and T-111 respectively, kept out
-so those tasks can proceed in parallel) — not even as stubs.
+Two ADR 0006 entities live outside this module so that T-110, T-111 and T-113 could proceed in parallel:
+`KinematicsRun` in `domain/kinematics/run.py` (T-111), and `Trainset` in `domain/model/trainset.py`
+alongside `VehicleSpec` in `domain/model/vehicle.py` (T-113).
 
 ## Synthetic tram fixture
 

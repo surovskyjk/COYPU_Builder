@@ -5,7 +5,7 @@ has (or will have) a self-contained specification in [`docs/tasks/`](docs/tasks/
 
 **Status legend** — `done` · `in progress` · `ready` (spec written, not started) · `planned` (no spec yet)
 
-Last reviewed: 2026-09-18. T-101 through T-111 are committed; M1 continues at T-113.
+Last reviewed: 2026-09-18 against `5edc188` plus the uncommitted T-113 change set. M1 continues at T-112.
 
 ---
 
@@ -76,7 +76,7 @@ against `shared/golden/origin_mapping.json` · D1, D2, D4, D5 retired.
 | T-110 | ADR 0006 entity model, topology graph, tram fixture | `done` (2026-09-18) | — | [task_110](docs/tasks/task_110_domain_model_and_topology.md) |
 | T-111 | `KinematicsRun` normalisation and `RunTable` baking | `done` (2026-09-18) | — | [task_111](docs/tasks/task_111_kinematics_domain.md) |
 | T-112 | Trainset chain reference + `trainset_chain.json` golden | `ready` | T-110, T-113 | [task_112](docs/tasks/task_112_trainset_chain.md) |
-| T-113 | Vehicle catalogue schema, loader, COYPU vehicle import | `ready` | — | [task_113](docs/tasks/task_113_vehicle_catalogue.md) |
+| T-113 | Vehicle catalogue schema, loader, COYPU vehicle import | `done` (2026-09-18, uncommitted) | — | [task_113](docs/tasks/task_113_vehicle_catalogue.md) |
 | T-114 | Protocol surface for runs, catalogue and `.coypu` import | `ready` | T-101, T-111, T-113 | [task_114](docs/tasks/task_114_protocol_run_surface.md) |
 | T-115 | Client domain mirror: alignment table, run table, registries | `ready` | T-102, T-103, T-114 | [task_115](docs/tasks/task_115_client_domain_mirror.md) |
 
@@ -159,6 +159,8 @@ ramps, doubling as a visual regression check on the kernel.
 | F3 | gdUnit4's CLI refuses `--headless` without `--ignoreHeadlessMode` (all versions v5.1.1–v6.2.1). Every invocation in `CLAUDE.md`, `client/README.md` and CI now carries the flag | T-102 | Closed; noted here so no later task "cleans up" the flag |
 | F4 | gdUnit4 v6.2.1 declares a Godot 4.5 floor, not the 4.4+ the spec asked for — no release satisfies both "declares 4.4+" and "compiles on 4.7.2" (v5.1.1 fails to compile: `FileAccess.get_as_text()` arity). v6.2.1 verified working empirically | T-102 | Accepted deviation. Revisit only if a Godot upgrade breaks the addon |
 | F5 | ~~The in-flight disconnect test raced a 0.01 s kill against a ~2 ms `session.ping`, failing 3/3 and stranding the two tests declared after it~~ | T-103 review | **closed 2026-09-18.** Replaced by an `alignment.frame_table` request at `spacing_m = 0.002` (~9M rows, ~8 s of synchronous bake) so no reply can exist at the 0.1 s kill. Re-verified here: 29/29, three consecutive green runs, 0 orphans |
+| F8 | `VehicleDynamics` mixes unit bases: traction-band coefficients are rebased to m/s on import (`b1' = 3.6·b1`, `b2' = 3.6²·b2`), but `davis_a/b/c` are copied through still calibrated for km/h, because no Davis formula is documented anywhere in the data contract. Documented in `vehicle-catalogue.md`, but two unit bases in one dataclass is a trap | T-113 | Any code evaluating Davis must treat `v` as km/h. Settle the formula and the base if Phase 3 ever computes resistance |
+| F9 | The T-113 contract typed `max_tractive_force_kn` and `davis_a/b/c` as non-optional `float`, which contradicted its own acceptance criterion 7 (absent sections must leave fields empty, never zeroed). Widened to `float \| None = None` | T-113 | Spec error, correctly flagged. `max_tractive_force_kn` stays `None` for archive imports — only the CSV `Meta` section supplies it, and deriving it from the traction curve's peak would be inventing data |
 | F7 | COYPU's kinematics grid overshoots the alignment: `station_m.max()` is `18185.0` against a `station_end` of `18184.971666` (its fixed 1 m simulation grid is not clipped to the exact alignment length). Harmless here, but T-112 and T-123 will pose a consist past the end and must clamp — both contracts already require it | T-111 | Standing data property, not a defect. Verify the clamp actually fires when T-123 plays the final seconds |
 | F6 | `topology.validate(network)` cannot check "links whose station range leaves the alignment" — the signature sees only `alignment_id`, never the `Alignment`. The spec asked for a check the contract structurally forbids | T-110 | Spec error, correctly declined. The check belongs to a caller holding both; documented in `docs/data-contracts/entity-model.md`. Revisit when T-145 assembles projects |
 
