@@ -37,11 +37,49 @@ Four singletons, in the order `project.godot` registers them:
   developer may be restarting the backend under a debugger) on any lost connection. `request()` is a
   coroutine that always resolves — a dead connection or a timeout comes back as a synthetic `err`
   envelope (`E_DISCONNECTED` / `E_TIMEOUT`) rather than hanging forever.
-- **`Session`** — the client's read-only mirror of backend document state. T-103 populates only what
-  `project.get`/`project.new`/`import.landxml` return; T-115 adds runs, layers and the entity registry.
+- **`Session`** — the client's read-only mirror of backend document state: project identity and alignment
+  summaries from `project.get`/`project.new`/`import.landxml` (T-103); alignment/run table caches, the
+  vehicle catalogue, the entity registry and layer state from `alignment.frame_table`/`run.get`/
+  `catalogue.vehicles`/`import.coypu` (T-115). Every `fetch_*` method is a coroutine that always
+  resolves — `null`/`false` plus `EventBus.backend_error` on failure — and caches its result by id, so a
+  repeat fetch with the same parameters never round-trips twice.
 
 `core/cli_args.gd` (`CliArgs`, not an autoload) parses the arguments after `--` on the command line:
 `--backend-url`, `--backend-token`, `--project`.
+
+## Domain mirror (`domain_mirror/`)
+
+ADR 0007: the backend bakes dense tables once per command; the client interpolates them at 60 Hz without
+ever calling back. These four objects are the client's only source of per-frame geometry and kinematics —
+nothing else in the client computes an alignment, evaluates a clothoid or recomputes cant roll.
+
+- **`AlignmentTable`** (`alignment_table.gd`) — mirrors one `alignment.frame_table` response: the
+  non-uniformly spaced station grid `domain/sampling.py: bake_stations` produces (a uniform grid merged
+  with every geometric key station, refined by chord error near curves), plus its position/rotation/roll/
+  pitch/cant/curvature/gradient/elevation/segment_index columns. `sample(station)` binary-searches to the
+  bracketing rows (`index_of`, with a forward-walk cache since callers overwhelmingly query increasing
+  stations) and interpolates: linearly for scalars and position, `Quaternion.slerp` for rotation — never a
+  linear/Euler blend — and takes the lower row's `segment_index` since it's a category, not a quantity.
+  `position_at(station)` is the camera-follow hot path: it returns a bare `Vector3` and never allocates a
+  `FrameSample`. Out-of-range queries clamp to the first/last row rather than extrapolating. Pinned to
+  `shared/golden/frame_eval.json`.
+- **`FrameSample`** (`frame_sample.gd`) — the plain value object `AlignmentTable.sample` returns: station,
+  position, rotation and the scalar track properties at that station.
+- **`RunTable`** (`run_table.gd`) — mirrors one `run.get` response: a kinematics run already resampled
+  server-side onto a uniform time grid, so there is no time blob and no search — `t = i · dt` reconstructs
+  the row index directly, then lerps with the next row. A dwell (flat station, zero speed) needs no special
+  case; the lerp between two equal-ish rows is itself flat. Force columns
+  (`f_traction`/`f_braking`/`f_resistance`) are absent from the table, not zero-filled, when the source run
+  carried none — check `has_forces()` before calling `traction_at()`. Pinned to
+  `shared/golden/run_table.json`.
+- **`EntityRegistry`** (`entity_registry.gd`) — a flat `entity_id -> (kind, data)` store for whatever the
+  backend attaches to the scene (trainsets, stops, gizmos, …); pure bookkeeping, no scene nodes.
+- **`LayerState`** (`layer_state.gd`) — visibility/opacity per layer id plus a `layer_changed` signal; pure
+  state with no rendering of its own. T-142 builds the layers panel on top of it; T-121/T-132 subscribe to
+  apply visibility to track/vehicle rendering.
+
+Positions and rotations on the wire are already base-point-relative and in Godot axes (ADR 0004) — none of
+the above ever routes them through `Origin`, which would double-apply the mapping.
 
 ## Launch modes
 

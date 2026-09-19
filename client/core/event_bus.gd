@@ -7,3 +7,8 @@ signal backend_state_changed(state: int)          # Backend.State
 signal backend_error(code: String, message: String)
 signal project_changed()                          # Session.project_info replaced
 signal alignments_changed()
+signal alignment_table_ready(alignment_id: String)
+signal runs_changed()
+signal run_table_ready(run_id: String)
+signal catalogue_ready()
+signal layers_changed()
