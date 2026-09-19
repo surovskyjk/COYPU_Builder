@@ -5,7 +5,7 @@ has (or will have) a self-contained specification in [`docs/tasks/`](docs/tasks/
 
 **Status legend** — `done` · `in progress` · `ready` (spec written, not started) · `planned` (no spec yet)
 
-Last reviewed: 2026-09-18 against `5edc188` plus the uncommitted T-113 change set. M1 continues at T-112.
+Last reviewed: 2026-09-19 against `24e6baa` (pushed to origin) plus the uncommitted T-112/F10 and T-114 change sets. T-115 is all that remains of M1.
 
 ---
 
@@ -27,7 +27,7 @@ msgspec/blob IPC on both sides, and two golden vector files.
 |---|---|---|
 | D1 | ~~`docs/data-contracts/coordinate-conventions.md` cites `client/core/Origin.gd`, which does not exist~~ | **retired by T-103** |
 | D2 | ~~ADR 0003 promised `tools/gen_protocol_docs.py`, `docs/protocol/ipc.md` and a CI freshness gate — all missing~~ | **retired by T-101** |
-| D3 | *(partly retired by T-110 and T-111 — `domain/model`, `topology` and `kinematics` are populated; `run.get` and the empty `io/` packages remain)* `run.get` raises `E_NOT_FOUND`; `domain/kinematics`, `topology`, `sections`, `analysis`, `io/gis`, `io/mesh`, `io/project` are 0-line packages; `domain/model` is `modes.py` alone | T-110, T-111, T-114 |
+| D3 | ~~`run.get` raises `E_NOT_FOUND`; `domain/kinematics`, `topology`, `sections`, `analysis`, `io/gis`, `io/mesh`, `io/project` are 0-line packages; `domain/model` is `modes.py` alone~~ | **retired by T-110, T-111 and T-114.** `domain/sections`, `io/gis`, `io/mesh` and `io/project` stay empty by design until M3, M2 and M4 respectively |
 | D4 | ~~gdUnit4 is not vendored; `CLAUDE.md` documents a command that cannot run~~ | **retired by T-102** |
 | D5 | ~~`tools/run_dev.ps1` passes `--backend-url` / `--backend-token`; nothing reads them~~ | **retired by T-103** |
 | D6 | ~~ADR 0006 requires a non-heavy-rail fixture before Phase 2 authoring ships~~ | **retired by T-110** |
@@ -75,9 +75,9 @@ against `shared/golden/origin_mapping.json` · D1, D2, D4, D5 retired.
 |---|---|---|---|---|
 | T-110 | ADR 0006 entity model, topology graph, tram fixture | `done` (2026-09-18) | — | [task_110](docs/tasks/task_110_domain_model_and_topology.md) |
 | T-111 | `KinematicsRun` normalisation and `RunTable` baking | `done` (2026-09-18) | — | [task_111](docs/tasks/task_111_kinematics_domain.md) |
-| T-112 | Trainset chain reference + `trainset_chain.json` golden | `ready` | T-110, T-113 | [task_112](docs/tasks/task_112_trainset_chain.md) |
-| T-113 | Vehicle catalogue schema, loader, COYPU vehicle import | `done` (2026-09-18, uncommitted) | — | [task_113](docs/tasks/task_113_vehicle_catalogue.md) |
-| T-114 | Protocol surface for runs, catalogue and `.coypu` import | `ready` | T-101, T-111, T-113 | [task_114](docs/tasks/task_114_protocol_run_surface.md) |
+| T-112 | Trainset chain reference + `trainset_chain.json` golden | `done` (2026-09-19, uncommitted) | T-110, T-113 | [task_112](docs/tasks/task_112_trainset_chain.md) |
+| T-113 | Vehicle catalogue schema, loader, COYPU vehicle import | `done` (2026-09-18) | — | [task_113](docs/tasks/task_113_vehicle_catalogue.md) |
+| T-114 | Protocol surface for runs, catalogue and `.coypu` import | `done` (2026-09-19, uncommitted) | T-101, T-111, T-113 | [task_114](docs/tasks/task_114_protocol_run_surface.md) |
 | T-115 | Client domain mirror: alignment table, run table, registries | `ready` | T-102, T-103, T-114 | [task_115](docs/tasks/task_115_client_domain_mirror.md) |
 
 **Exit criteria.** A COYPU kinematics run imports from both CSV dialects and from `.coypu`, normalises to one
@@ -159,6 +159,9 @@ ramps, doubling as a visual regression check on the kernel.
 | F3 | gdUnit4's CLI refuses `--headless` without `--ignoreHeadlessMode` (all versions v5.1.1–v6.2.1). Every invocation in `CLAUDE.md`, `client/README.md` and CI now carries the flag | T-102 | Closed; noted here so no later task "cleans up" the flag |
 | F4 | gdUnit4 v6.2.1 declares a Godot 4.5 floor, not the 4.4+ the spec asked for — no release satisfies both "declares 4.4+" and "compiles on 4.7.2" (v5.1.1 fails to compile: `FileAccess.get_as_text()` arity). v6.2.1 verified working empirically | T-102 | Accepted deviation. Revisit only if a Godot upgrade breaks the addon |
 | F5 | ~~The in-flight disconnect test raced a 0.01 s kill against a ~2 ms `session.ping`, failing 3/3 and stranding the two tests declared after it~~ | T-103 review | **closed 2026-09-18.** Replaced by an `alignment.frame_table` request at `spacing_m = 0.002` (~9M rows, ~8 s of synchronous bake) so no reply can exist at the 0.1 s kill. Re-verified here: 29/29, three consecutive green runs, 0 orphans |
+| F12 | `_stops_from_coypu` in `server/handlers.py` converts the archive's raw `[station_km, dwell_s, name]` rows into domain `Stop` tuples — format conversion in the wire layer, which `io/` should own. `io/coypu/archive.py` was not in T-114's Deliverables so it stayed in the handler, flagged in a docstring | T-114 | **Open**, low priority. Move to `CoypuProject` as a `stops()` accessor; fold into whichever later task next edits `io/coypu/` |
+| F10 | ~~Every `roll` in `shared/golden/trainset_chain.json` is zero, because the Kralupy fixture's cant block is a placeholder. That golden is the **only** reference T-123's client chain is pinned to, so a client that mishandles mean-roll averaging or the Gram-Schmidt correction would still pass it. T-112 covered the behaviour in Python via the tram fixture, which Godot cannot load~~ | T-112 review | **closed 2026-09-19.** A `tram_block` key adds 5 samples, 6 car-poses with non-zero roll and a max lead/trail divergence of 0.0236 rad; the Kralupy block is byte-unchanged. My criterion 3 was wrong twice over — the fixture has no gradient, and a *constant* gradient would not have broken lead/trail symmetry either. The correction is a no-op wherever curvature and cant are constant; only a **change** between the pivots (cant ramp, clothoid, vertical curve) exercises it, which is what the ramp samples do |
+| F11 | The T-112 contract's `forward = normalize(P_lead − P_trail) · d` was algebraically wrong: the layout already gives `p_lead − p_trail = d·pivot_distance`, so the extra `· d` squared the sign out and made `forward` equal `+tangent` for both directions, contradicting acceptance criterion 5. Implemented without the `· d` | T-112 | Spec error, correctly caught. Verified independently: the golden's `direction=−1` and `direction=+1` bodies at station 8260 are 180.00° apart. `task_112` and `trainset-chain.md` both corrected |
 | F8 | `VehicleDynamics` mixes unit bases: traction-band coefficients are rebased to m/s on import (`b1' = 3.6·b1`, `b2' = 3.6²·b2`), but `davis_a/b/c` are copied through still calibrated for km/h, because no Davis formula is documented anywhere in the data contract. Documented in `vehicle-catalogue.md`, but two unit bases in one dataclass is a trap | T-113 | Any code evaluating Davis must treat `v` as km/h. Settle the formula and the base if Phase 3 ever computes resistance |
 | F9 | The T-113 contract typed `max_tractive_force_kn` and `davis_a/b/c` as non-optional `float`, which contradicted its own acceptance criterion 7 (absent sections must leave fields empty, never zeroed). Widened to `float \| None = None` | T-113 | Spec error, correctly flagged. `max_tractive_force_kn` stays `None` for archive imports — only the CSV `Meta` section supplies it, and deriving it from the traction curve's peak would be inventing data |
 | F7 | COYPU's kinematics grid overshoots the alignment: `station_m.max()` is `18185.0` against a `station_end` of `18184.971666` (its fixed 1 m simulation grid is not clipped to the exact alignment length). Harmless here, but T-112 and T-123 will pose a consist past the end and must clamp — both contracts already require it | T-111 | Standing data property, not a defect. Verify the clamp actually fires when T-123 plays the final seconds |

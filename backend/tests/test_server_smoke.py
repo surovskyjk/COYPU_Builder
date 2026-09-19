@@ -16,6 +16,7 @@ from coypu_builder.server.codec import decode_frame, encode_frame, unpack_blob
 
 FIXTURES = Path(__file__).parent / "fixtures"
 KRALUPY_XML = FIXTURES / "kralupy" / "kralupy_neratovice_092.xml"
+KRALUPY_COYPU = FIXTURES / "kralupy" / "kralupy_neratovice_092.coypu"
 
 FRAME_TABLE_BLOBS = {
     "station",
@@ -29,6 +30,8 @@ FRAME_TABLE_BLOBS = {
     "elevation",
     "segment_index",
 }
+
+RUN_GET_BLOBS = {"station", "speed", "accel", "f_traction", "f_braking", "f_resistance"}
 
 
 async def _call(
@@ -107,6 +110,37 @@ async def test_full_import_and_frame_table_streaming(server_url):
         run_missing, _ = await _call(ws, "7", "run.get", {"run_id": "r1"})
         assert run_missing.type == "err"
         assert run_missing.error.code == "E_NOT_FOUND"
+
+
+async def test_import_coypu_then_run_list_and_run_get(server_url):
+    """T-114 acceptance: a full round trip over a real WebSocket covering import.coypu -> run.list ->
+    run.get, asserting blob dtypes and shapes."""
+    async with connect(server_url) as ws:
+        await _call(ws, "1", "session.hello", {"client": "pytest", "client_version": "0"})
+        await _call(ws, "2", "project.new", {})
+
+        imported, _ = await _call(ws, "3", "import.coypu", {"path": str(KRALUPY_COYPU)})
+        assert imported.type == "res", imported.error
+        assert len(imported.result["alignments"]) == 1
+        assert len(imported.result["runs"]) >= 1
+        assert len(imported.result["stops"]) == 6
+
+        listed, _ = await _call(ws, "4", "run.list")
+        assert listed.type == "res", listed.error
+        assert {r["run_id"] for r in listed.result["runs"]} == {r["run_id"] for r in imported.result["runs"]}
+
+        run_id = imported.result["runs"][0]["run_id"]
+        got, tail = await _call(ws, "5", "run.get", {"run_id": run_id, "dt": 0.05})
+        assert got.type == "res", got.error
+        row_count = got.result["row_count"]
+        dt = got.result["dt"]
+        assert abs(row_count * dt - got.result["duration_s"]) <= dt + 1e-6
+
+        blob_by_name = {ref.name: unpack_blob(tail, ref) for ref in got.blobs}
+        assert set(blob_by_name) == RUN_GET_BLOBS
+        for array in blob_by_name.values():
+            assert array.dtype == np.float32
+            assert array.shape == (row_count,)
 
 
 async def test_project_new_rejects_unknown_method_before_hello(server_url):

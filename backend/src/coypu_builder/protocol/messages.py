@@ -140,11 +140,162 @@ class AlignmentFrameTableResult(msgspec.Struct, frozen=True):
     station_end: float
 
 
-# --- run.get --------------------------------------------------------------------------------------------
+# --- catalogue.* / vehicle DTOs -------------------------------------------------------------------------
+# `VehicleSpec`/`CarSpec`/`VehicleDynamics`/`TractionBand` (domain/model/vehicle.py) flattened into wire
+# Structs -- domain objects never cross the boundary (T-114 DTO discipline).
+
+
+class TractionBandDTO(msgspec.Struct, frozen=True):
+    v_bottom_ms: float
+    v_top_ms: float
+    b0: float
+    b1: float
+    b2: float
+
+
+class VehicleDynamicsDTO(msgspec.Struct, frozen=True):
+    mass_t: float
+    rotating_mass_factor: float
+    max_speed_ms: float
+    brake_decel_ms2: float
+    max_tractive_force_kn: float | None = None
+    davis_a: float | None = None
+    davis_b: float | None = None
+    davis_c: float | None = None
+    traction_bands: tuple[TractionBandDTO, ...] = ()
+
+
+class CarSpecDTO(msgspec.Struct, frozen=True):
+    name: str
+    length_m: float
+    width_m: float
+    height_m: float
+    floor_height_m: float
+    bogie_pivot_distance_m: float
+    bogie_wheelbase_m: float
+    wheel_diameter_m: float
+    mesh: str | None = None
+    color: str = "#808080"
+
+
+class VehicleSpecDTO(msgspec.Struct, frozen=True):
+    key: str
+    name: str
+    mode: str
+    gauge_mm: float
+    cars: tuple[CarSpecDTO, ...]
+    coupling_gap_m: float = 0.0
+    aliases: tuple[str, ...] = ()
+    dynamics: VehicleDynamicsDTO | None = None
+    provenance: str = ""
+
+
+class CatalogueVehiclesResult(msgspec.Struct, frozen=True):
+    vehicles: tuple[VehicleSpecDTO, ...]
+
+
+# --- trainset.* -------------------------------------------------------------------------------------------
+# The assembled consist, cars already resolved and flattened front to back. No poses: ADR 0007 puts posing
+# in the client; T-112's backend chain (`domain.kinematics.trainset`) is a reference only.
+
+
+class TrainsetSummary(msgspec.Struct, frozen=True):
+    trainset_id: str
+    spec_key: str
+    name: str
+    mode: str
+    car_count: int
+    length_m: float
+
+
+class TrainsetDTO(msgspec.Struct, frozen=True):
+    trainset_id: str
+    spec_key: str
+    name: str
+    mode: str
+    gauge_mm: float
+    coupling_gap_m: float
+    length_m: float
+    cars: tuple[CarSpecDTO, ...]
+
+
+class TrainsetGetParams(msgspec.Struct, frozen=True):
+    trainset_id: str
+
+
+class TrainsetCreateParams(msgspec.Struct, frozen=True):
+    spec_key: str
+    units: int = 1
+    name: str = ""
+
+
+# --- run.* ------------------------------------------------------------------------------------------------
+
+
+class StopDTO(msgspec.Struct, frozen=True):
+    station_m: float
+    dwell_s: float
+    name: str = ""
+
+
+class RunSummary(msgspec.Struct, frozen=True):
+    run_id: str
+    name: str
+    alignment_id: str | None
+    trainset_id: str | None
+    direction: int
+    station_start: float
+    station_end: float
+    duration_s: float
+    sample_count: int
+    stop_count: int
+    warnings: tuple[str, ...] = ()
+
+
+class RunListResult(msgspec.Struct, frozen=True):
+    runs: tuple[RunSummary, ...]
 
 
 class RunGetParams(msgspec.Struct, frozen=True):
     run_id: str
+    dt: float = 0.05
+
+
+class RunGetResult(msgspec.Struct, frozen=True):
+    run_id: str
+    dt: float
+    row_count: int
+    duration_s: float
+    direction: int
+    stops: tuple[StopDTO, ...]
+
+
+# --- import.coypu / import.kinematics --------------------------------------------------------------------
+
+
+class ImportCoypuParams(msgspec.Struct, frozen=True):
+    path: str
+    crs: str | None = None
+
+
+class ImportCoypuResult(msgspec.Struct, frozen=True):
+    alignments: tuple[AlignmentSummary, ...]
+    runs: tuple[RunSummary, ...]
+    trainsets: tuple[TrainsetSummary, ...]
+    stops: tuple[StopDTO, ...]
+    warnings: tuple[str, ...] = ()
+
+
+class ImportKinematicsParams(msgspec.Struct, frozen=True):
+    path: str
+    alignment_id: str | None = None
+    stops_path: str | None = None
+
+
+class ImportKinematicsResult(msgspec.Struct, frozen=True):
+    runs: tuple[RunSummary, ...]
+    stops: tuple[StopDTO, ...]
+    warnings: tuple[str, ...] = ()
 
 
 # --- method registry ------------------------------------------------------------------------------------
@@ -212,6 +363,32 @@ METHODS: tuple[MethodSpec, ...] = (
         ),
     ),
     MethodSpec(
+        name="import.coypu",
+        summary=(
+            "Import a .coypu archive: its embedded LandXML alignment(s), every kinematics run normalised "
+            "and attached to a trainset where the vehicle name matches a catalogue entry, and its stops."
+        ),
+        params=ImportCoypuParams,
+        result=ImportCoypuResult,
+        errors=(
+            ErrorCode.BAD_PARAMS,
+            ErrorCode.NO_SESSION,
+            ErrorCode.NO_PROJECT,
+            ErrorCode.NOT_FOUND,
+            ErrorCode.EMPTY,
+            ErrorCode.CRS_REQUIRED,
+        ),
+    ),
+    MethodSpec(
+        name="import.kinematics",
+        summary=(
+            "Import a standalone kinematics CSV (either dialect) attached to an already-imported alignment."
+        ),
+        params=ImportKinematicsParams,
+        result=ImportKinematicsResult,
+        errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
+    ),
+    MethodSpec(
         name="alignment.frame_table",
         summary="Bake a dense, render-ready frame table for one alignment.",
         params=AlignmentFrameTableParams,
@@ -244,10 +421,77 @@ METHODS: tuple[MethodSpec, ...] = (
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
     ),
     MethodSpec(
+        name="run.list",
+        summary="List the kinematics runs attached to the current project, without their baked tables.",
+        params=None,
+        result=RunListResult,
+        errors=(ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT),
+    ),
+    MethodSpec(
         name="run.get",
-        summary="Fetch a baked kinematics run (not yet implemented).",
+        summary=(
+            "Fetch a kinematics run resampled onto a uniform time grid, as float32 blobs. Called once per "
+            "run (ADR 0007), never per frame. There is no `time` blob: the table is time-uniform, so the "
+            "client reconstructs t = i*dt from `dt` in the result."
+        ),
         params=RunGetParams,
-        result=None,
+        result=RunGetResult,
+        blobs=(
+            BlobSpec(
+                "station",
+                "<f4",
+                "(n,)",
+                "Absolute station along the run [m]; float32 resolves to about 1 mm at Kralupy's "
+                "~18000 m stations, which is enough for lookup, not for geometry.",
+            ),
+            BlobSpec("speed", "<f4", "(n,)", "Speed magnitude [m/s]."),
+            BlobSpec("accel", "<f4", "(n,)", "Signed acceleration [m/s^2]."),
+            BlobSpec(
+                "f_traction",
+                "<f4",
+                "(n,)",
+                "Tractive force [kN]. Omitted from the blob list entirely, never zero-filled, when the "
+                "source run carried none.",
+            ),
+            BlobSpec(
+                "f_braking",
+                "<f4",
+                "(n,)",
+                "Braking force [kN]. Omitted from the blob list entirely, never zero-filled, when the "
+                "source run carried none.",
+            ),
+            BlobSpec(
+                "f_resistance",
+                "<f4",
+                "(n,)",
+                "Resistance force [kN]. Omitted from the blob list entirely, never zero-filled, when the "
+                "source run carried none.",
+            ),
+        ),
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
+    ),
+    MethodSpec(
+        name="catalogue.vehicles",
+        summary=(
+            "Return the process-wide vehicle catalogue as a flat JSON projection (cars and dynamics, no "
+            "blobs)."
+        ),
+        params=None,
+        result=CatalogueVehiclesResult,
+        errors=(ErrorCode.NO_SESSION,),
+    ),
+    MethodSpec(
+        name="trainset.create",
+        summary="Assemble a consist from a catalogue key and attach it to the current project.",
+        params=TrainsetCreateParams,
+        result=TrainsetDTO,
+        errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
+    ),
+    MethodSpec(
+        name="trainset.get",
+        summary="Fetch an assembled consist by id, cars already resolved. No poses (ADR 0007).",
+        params=TrainsetGetParams,
+        result=TrainsetDTO,
+        errors=(ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
     ),
 )

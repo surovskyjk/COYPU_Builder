@@ -149,6 +149,51 @@ Import alignments from a LandXML file into the current project.
 
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`
 
+### `import.coypu`
+
+Import a .coypu archive: its embedded LandXML alignment(s), every kinematics run normalised and attached to a trainset where the vehicle name matches a catalogue entry, and its stops.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `path` | `str` | required |
+| `crs` | `str | None` | `None` |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `alignments` | `tuple[AlignmentSummary, ...]` | required |
+| `runs` | `tuple[RunSummary, ...]` | required |
+| `trainsets` | `tuple[TrainsetSummary, ...]` | required |
+| `stops` | `tuple[StopDTO, ...]` | required |
+| `warnings` | `tuple[str, ...]` | `()` |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`
+
+### `import.kinematics`
+
+Import a standalone kinematics CSV (either dialect) attached to an already-imported alignment.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `path` | `str` | required |
+| `alignment_id` | `str | None` | `None` |
+| `stops_path` | `str | None` | `None` |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `runs` | `tuple[RunSummary, ...]` | required |
+| `stops` | `tuple[StopDTO, ...]` | required |
+| `warnings` | `tuple[str, ...]` | `()` |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
+
 ### `alignment.frame_table`
 
 Bake a dense, render-ready frame table for one alignment.
@@ -187,18 +232,121 @@ Bake a dense, render-ready frame table for one alignment.
 
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
 
+### `run.list`
+
+List the kinematics runs attached to the current project, without their baked tables.
+
+**Params**
+
+None.
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `runs` | `tuple[RunSummary, ...]` | required |
+
+**Errors**: `E_NO_SESSION`, `E_NO_PROJECT`
+
 ### `run.get`
 
-Fetch a baked kinematics run (not yet implemented).
+Fetch a kinematics run resampled onto a uniform time grid, as float32 blobs. Called once per run (ADR 0007), never per frame. There is no `time` blob: the table is time-uniform, so the client reconstructs t = i*dt from `dt` in the result.
 
 **Params**
 
 | Field | Type | Default |
 |---|---|---|
 | `run_id` | `str` | required |
+| `dt` | `float` | `0.05` |
 
 **Result**
 
-None.
+| Field | Type | Default |
+|---|---|---|
+| `run_id` | `str` | required |
+| `dt` | `float` | required |
+| `row_count` | `int` | required |
+| `duration_s` | `float` | required |
+| `direction` | `int` | required |
+| `stops` | `tuple[StopDTO, ...]` | required |
+
+**Blobs**
+
+| Name | dtype | Shape | Description |
+|---|---|---|---|
+| `station` | `<f4` | `(n,)` | Absolute station along the run [m]; float32 resolves to about 1 mm at Kralupy's ~18000 m stations, which is enough for lookup, not for geometry. |
+| `speed` | `<f4` | `(n,)` | Speed magnitude [m/s]. |
+| `accel` | `<f4` | `(n,)` | Signed acceleration [m/s^2]. |
+| `f_traction` | `<f4` | `(n,)` | Tractive force [kN]. Omitted from the blob list entirely, never zero-filled, when the source run carried none. |
+| `f_braking` | `<f4` | `(n,)` | Braking force [kN]. Omitted from the blob list entirely, never zero-filled, when the source run carried none. |
+| `f_resistance` | `<f4` | `(n,)` | Resistance force [kN]. Omitted from the blob list entirely, never zero-filled, when the source run carried none. |
 
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
+
+### `catalogue.vehicles`
+
+Return the process-wide vehicle catalogue as a flat JSON projection (cars and dynamics, no blobs).
+
+**Params**
+
+None.
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `vehicles` | `tuple[VehicleSpecDTO, ...]` | required |
+
+**Errors**: `E_NO_SESSION`
+
+### `trainset.create`
+
+Assemble a consist from a catalogue key and attach it to the current project.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `spec_key` | `str` | required |
+| `units` | `int` | `1` |
+| `name` | `str` | `''` |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `trainset_id` | `str` | required |
+| `spec_key` | `str` | required |
+| `name` | `str` | required |
+| `mode` | `str` | required |
+| `gauge_mm` | `float` | required |
+| `coupling_gap_m` | `float` | required |
+| `length_m` | `float` | required |
+| `cars` | `tuple[CarSpecDTO, ...]` | required |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
+
+### `trainset.get`
+
+Fetch an assembled consist by id, cars already resolved. No poses (ADR 0007).
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `trainset_id` | `str` | required |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `trainset_id` | `str` | required |
+| `spec_key` | `str` | required |
+| `name` | `str` | required |
+| `mode` | `str` | required |
+| `gauge_mm` | `float` | required |
+| `coupling_gap_m` | `float` | required |
+| `length_m` | `float` | required |
+| `cars` | `tuple[CarSpecDTO, ...]` | required |
+
+**Errors**: `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
