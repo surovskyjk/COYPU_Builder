@@ -8,6 +8,7 @@ are pinned to the backend's float64 reference.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -19,8 +20,10 @@ from coypu_builder.domain.crs import (
     points_to_godot,
     quaternion_from_matrix,
 )
-from coypu_builder.domain.kinematics import bake_run_table
+from coypu_builder.domain.kinematics import bake_run_table, pose_trainset
 from coypu_builder.domain.lrs import frames
+from coypu_builder.domain.model import Trainset, new_id
+from coypu_builder.io.catalogue.vehicles import load_catalogue
 from coypu_builder.io.coypu import read_coypu
 from coypu_builder.io.coypu.kinematics_csv import read_stops_csv
 from coypu_builder.io.landxml import read_landxml, to_alignment
@@ -30,6 +33,7 @@ GOLDEN = ROOT / "shared" / "golden"
 KRALUPY = ROOT / "backend" / "tests" / "fixtures" / "kralupy" / "kralupy_neratovice_092.xml"
 KRALUPY_COYPU = ROOT / "backend" / "tests" / "fixtures" / "kralupy" / "kralupy_neratovice_092.coypu"
 KRALUPY_STOPS_CSV = ROOT / "backend" / "tests" / "fixtures" / "kralupy" / "kralupy_neratovice_092_stops.csv"
+BACKEND_TESTS = ROOT / "backend" / "tests"
 
 
 def origin_mapping() -> dict:
@@ -142,12 +146,220 @@ def run_table() -> dict:
     }
 
 
+def _build_tram_loop():
+    """`tests/fixtures/synthetic/tram_loop.py` is a test module, not a package under `src/` -- this tool is a
+    dev-only script (never shipped, ADR 0008), so a `sys.path` insert is how it reuses that fixture instead
+    of hand-writing a second canted alignment that would drift from it (F10)."""
+    tests_dir = str(BACKEND_TESTS)
+    if tests_dir not in sys.path:
+        sys.path.insert(0, tests_dir)
+    from fixtures.synthetic.tram_loop import ELEVATION_M, build_tram_loop
+
+    return build_tram_loop(), ELEVATION_M
+
+
+def tram_block() -> dict:
+    """F10: a second, clearly separated golden block from the synthetic tram loop, which actually cants --
+    unlike the Kralupy block above, whose LandXML cant is a documented zero placeholder. This is the block
+    that pins mean-roll averaging and the Gram-Schmidt correction in `_car_pose`.
+
+    tram_loop.py's vertical alignment is exactly flat (`VerticalAlignment.constant`) on both the street and
+    the loop, so a "cant and non-zero gradient coexist" sample (as F10 originally asked for) does not exist
+    anywhere in this fixture. What actually makes the Gram-Schmidt step non-trivial is a *changing* roll or
+    curvature between a car's two pivots, not gradient specifically -- verified below: every constant-cant,
+    constant-curvature sample (the two "full cant" ones) gives an exact no-op (the projection removed is
+    <1e-16, i.e. floating-point noise), while every cant-ramp sample gives a genuine, non-zero correction.
+    The two ramp samples are this block's real proof; the loop sample repeats it at a second, tighter (30 m
+    vs. 120 m) radius. See the T-112 Follow-up F10 closing report for the numbers.
+    """
+    (_, alignments), elevation = _build_tram_loop()
+    street_id, loop_id = list(alignments.keys())
+    street, loop = alignments[street_id], alignments[loop_id]
+
+    spec = load_catalogue()["tram_generic"]
+    trainset = Trainset(
+        id=new_id(),
+        spec_key=spec.key,
+        cars=spec.cars[:2],
+        coupling_gap_m=spec.coupling_gap_m,
+        mode=spec.mode,
+        gauge_mm=spec.gauge_mm,
+    )
+    base = BasePoint(0.0, 0.0, elevation)
+
+    # (alignment label, alignment, station_lead) -- a zero-cant control; cant ramping up then down on the
+    # street (the samples that pin mean-roll averaging: lead/trail rolls differ by ~13-14 mrad); full cant
+    # inside the street's constant-curvature arc (both pivots equal -- a no-op, included anyway because it
+    # is still the direct fix for F10's "every roll is zero" finding); and a tighter-radius ramp on the loop.
+    samples = [
+        ("street", street, 20.0),
+        ("street", street, 65.0),
+        ("street", street, 80.0),
+        ("street", street, 95.0),
+        ("loop", loop, 25.0),
+    ]
+
+    payload_samples = []
+    for label, aln, station_lead in samples:
+        pose = pose_trainset(aln, trainset, station_lead, direction=1)
+        cars = []
+        for car in pose.cars:
+            lead_pos = points_to_godot(car.lead.position[None, :], base, dtype=np.float64)[0]
+            trail_pos = points_to_godot(car.trail.position[None, :], base, dtype=np.float64)[0]
+            body_pos = points_to_godot(car.origin[None, :], base, dtype=np.float64)[0]
+            body_basis = basis_to_godot(car.forward[None, :], car.left[None, :], car.up[None, :])
+            body_quat = quaternion_from_matrix(body_basis)[0]
+            cars.append(
+                {
+                    "index": car.index,
+                    "lead_pivot": {
+                        "station": car.lead.station,
+                        "roll": car.lead.roll,
+                        "godot_position": lead_pos.tolist(),
+                    },
+                    "trail_pivot": {
+                        "station": car.trail.station,
+                        "roll": car.trail.roll,
+                        "godot_position": trail_pos.tolist(),
+                    },
+                    "body": {
+                        "godot_position": body_pos.tolist(),
+                        "godot_quaternion_xyzw": body_quat.tolist(),
+                        "roll": car.roll,
+                    },
+                }
+            )
+        payload_samples.append(
+            {
+                "alignment": label,
+                "station_lead": station_lead,
+                "direction": 1,
+                "clamped": pose.clamped,
+                "cars": cars,
+            }
+        )
+
+    return {
+        "source": "tests/fixtures/synthetic/tram_loop.py:build_tram_loop",
+        "crs": None,  # arbitrary local metres, not a real projected CRS -- see tram_loop.py
+        "base_point": {"easting": base.easting, "northing": base.northing, "height": base.height},
+        "trainset": {
+            "spec_key": trainset.spec_key,
+            "name": trainset.name,
+            "mode": trainset.mode.value,
+            "gauge_mm": trainset.gauge_mm,
+            "coupling_gap_m": trainset.coupling_gap_m,
+            "cars": [
+                {
+                    "name": c.name,
+                    "length_m": c.length_m,
+                    "width_m": c.width_m,
+                    "height_m": c.height_m,
+                    "floor_height_m": c.floor_height_m,
+                    "bogie_pivot_distance_m": c.bogie_pivot_distance_m,
+                    "bogie_wheelbase_m": c.bogie_wheelbase_m,
+                    "wheel_diameter_m": c.wheel_diameter_m,
+                    "color": c.color,
+                }
+                for c in trainset.cars
+            ],
+        },
+        "samples": payload_samples,
+    }
+
+
+def trainset_chain() -> dict:
+    raw = read_landxml(KRALUPY)[0]
+    crs = ProjectCRS(f"EPSG:{raw.epsg}")
+    aln = to_alignment(raw, crs).alignment
+    base = BasePoint.rounded(
+        *aln.horizontal.point(aln.station_start)[0], aln.vertical.elevation(aln.station_start)[0]
+    )
+
+    trainset = Trainset.from_spec(load_catalogue()["dmu_br650_cd840"], units=3)
+
+    # (station_lead, direction) -- eight-plus samples chosen to exercise a distinct regime each; see the
+    # T-112 closing report for the justification of every station.
+    samples = [
+        (100.0, 1),  # start of the route
+        (8260.0, 1),  # long straight (6615-9905 m), well clear of any transition
+        (16850.0, 1),  # sharpest curve on the file, R ~= 300 m
+        (16790.0, 1),  # clothoid ramping into that same sharpest curve
+        (3850.0, 1),  # consist straddles the arc(14)/clothoid(15)/line(16) boundary
+        (16034.09, 1),  # nominal cant-ramp station (Kralupy's cant block is a zero placeholder -- see report)
+        (2860.255557, 1),  # vertical curve PVI, horizontally flat
+        (18199.971666, 1),  # 15 m past the alignment end: exercises clamping
+        (8260.0, -1),  # the long straight again, reversed, to pin the direction sign
+    ]
+
+    payload_samples = []
+    for station_lead, direction in samples:
+        pose = pose_trainset(aln, trainset, station_lead, direction=direction)
+        cars = []
+        for car in pose.cars:
+            lead_pos = points_to_godot(car.lead.position[None, :], base, dtype=np.float64)[0]
+            trail_pos = points_to_godot(car.trail.position[None, :], base, dtype=np.float64)[0]
+            body_pos = points_to_godot(car.origin[None, :], base, dtype=np.float64)[0]
+            body_basis = basis_to_godot(car.forward[None, :], car.left[None, :], car.up[None, :])
+            body_quat = quaternion_from_matrix(body_basis)[0]
+            cars.append(
+                {
+                    "index": car.index,
+                    "lead_pivot": {"station": car.lead.station, "godot_position": lead_pos.tolist()},
+                    "trail_pivot": {"station": car.trail.station, "godot_position": trail_pos.tolist()},
+                    "body": {
+                        "godot_position": body_pos.tolist(),
+                        "godot_quaternion_xyzw": body_quat.tolist(),
+                        "roll": car.roll,
+                    },
+                }
+            )
+        payload_samples.append(
+            {
+                "station_lead": station_lead,
+                "direction": direction,
+                "clamped": pose.clamped,
+                "cars": cars,
+            }
+        )
+
+    return {
+        "source": KRALUPY.name,
+        "crs": f"EPSG:{raw.epsg}",
+        "base_point": {"easting": base.easting, "northing": base.northing, "height": base.height},
+        "trainset": {
+            "spec_key": trainset.spec_key,
+            "name": trainset.name,
+            "mode": trainset.mode.value,
+            "gauge_mm": trainset.gauge_mm,
+            "coupling_gap_m": trainset.coupling_gap_m,
+            "cars": [
+                {
+                    "name": c.name,
+                    "length_m": c.length_m,
+                    "width_m": c.width_m,
+                    "height_m": c.height_m,
+                    "floor_height_m": c.floor_height_m,
+                    "bogie_pivot_distance_m": c.bogie_pivot_distance_m,
+                    "bogie_wheelbase_m": c.bogie_wheelbase_m,
+                    "wheel_diameter_m": c.wheel_diameter_m,
+                    "color": c.color,
+                }
+                for c in trainset.cars
+            ],
+        },
+        "samples": payload_samples,
+        "tram_block": tram_block(),
+    }
+
+
 def main() -> None:
     GOLDEN.mkdir(parents=True, exist_ok=True)
     payloads = (
         ("origin_mapping.json", origin_mapping()),
         ("frame_eval.json", frame_eval()),
         ("run_table.json", run_table()),
+        ("trainset_chain.json", trainset_chain()),
     )
     for name, payload in payloads:
         (GOLDEN / name).write_text(json.dumps(payload, indent=2), encoding="utf-8")

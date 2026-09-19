@@ -72,12 +72,18 @@ cant roll and gradient pitch.
 
 ```
 origin   = (P_lead + P_trail) / 2                       # 3-D midpoint of the two pivot POSITIONS
-forward  = normalize(P_lead − P_trail) · d              # the chord, not the tangent
+forward  = normalize(P_lead − P_trail)                  # the chord, not the tangent
 roll     = (roll_lead + roll_trail) / 2                 # mean of the two frames' cant roll
 up_raw   = normalize(up_lead + up_trail)                # mean of the two frames' plane normals
 up       = normalize(up_raw − (up_raw · forward) · forward)   # Gram-Schmidt against forward
 left     = cross(up, forward)
 ```
+
+> **Corrected 2026-09-18 (F11).** This formula originally read `normalize(P_lead − P_trail) · d`, which is
+> wrong: the layout formulas already put `p_lead − p_trail = d · pivot_distance`, so the normalised chord is
+> `d · tangent` and the extra `· d` squared the sign away, leaving `forward` equal to `+tangent` for both
+> directions — contradicting acceptance criterion 5. The direction sign is carried entirely by which pivot
+> the layout assigns as lead. See `docs/data-contracts/trainset-chain.md`, "On `forward`'s sign".
 
 The chord — not the tangent at the midpoint — is what makes a car cut across a curve the way a real vehicle
 does. Applying the mean roll and then orthogonalising in exactly this order is part of the contract: the
@@ -226,3 +232,69 @@ git diff --stat shared/golden
 State: the eight-plus golden sample stations and why each was chosen; the measured mid-ordinate at the
 sharpest curve against the analytic value; how the degenerate zero-pivot-distance case behaves; and anything
 in `docs/data-contracts/trainset-chain.md` you had to decide that this specification left open.
+
+---
+
+## Follow-up F10 — make the golden exercise cant roll
+
+*Added 2026-09-18 after the T-112 review. Must land before T-123 implements the client chain against this
+golden.*
+
+`shared/golden/trainset_chain.json` is the only reference the Godot client will ever be measured against for
+the trainset chain — T-123's implementation is pinned to it and nothing else. Every `roll` value in the
+committed file is `0.0` or `-0.0`, because the Kralupy fixture's cant block is a documented zero placeholder.
+Verified on review: the file contains exactly two distinct roll values, both zero.
+
+That leaves a hole. A client implementation that averages the two pivots' rolls incorrectly, applies the
+Gram-Schmidt correction in the wrong order, or ignores cant entirely would reproduce this golden perfectly
+and still be wrong the moment it meets a canted curve. T-112 covered that behaviour on the Python side with
+the synthetic tram fixture, which is the right call — but `tests/fixtures/synthetic/tram_loop.py` is a Python
+module the Godot client cannot load.
+
+### Deliverables
+
+| Path | Action |
+|---|---|
+| `tools/make_golden.py` | emit a second sample block from the tram network alongside the Kralupy one |
+| `shared/golden/trainset_chain.json` | regenerate |
+| `docs/data-contracts/trainset-chain.md` | describe the second block and what it pins |
+| `backend/tests/test_trainset_chain.py` | assert the golden actually contains non-zero roll |
+
+### Contract
+
+Extend the golden with a second, clearly separated group of samples — either a `tram_samples` key beside
+`samples`, or a `blocks` list where each block carries its own `source`, `crs`, `base_point` and `trainset`.
+Prefer whichever keeps the existing Kralupy block byte-stable, so this change is visibly additive.
+
+The tram block uses the synthetic tram network's canted alignment, a two-car tram consist from
+`tram_generic.json`, and at least four sample stations chosen so that between them they cover:
+
+- a station mid cant-ramp, where the two bogies sit at **different** cant values — this is the sample that
+  actually pins mean-roll averaging, and the two pivot rolls must differ measurably;
+- a station at full cant inside the curve;
+- a station where cant and a non-zero gradient coexist, so the Gram-Schmidt correction against `forward` is
+  not a no-op;
+- one straight, zero-cant station as a control.
+
+Report the per-sample pivot rolls so it is evident they differ where they must.
+
+**Do not duplicate the tram builder.** Import `build_tram_loop` from `tests/fixtures/synthetic/tram_loop.py`
+— `make_golden.py` is a development tool, not shipped code, so an explicit `sys.path` insert for `tests/` is
+acceptable if that is what it takes. A second hand-written canted alignment inside `make_golden.py` would
+drift from the fixture and is not acceptable.
+
+### Acceptance
+
+1. `shared/golden/trainset_chain.json` contains at least four samples whose `roll` is non-zero, and at least
+   one sample where the lead and trail pivot rolls differ by more than `1e-4` rad.
+2. The existing nine Kralupy samples are unchanged — diff the block before and after.
+3. The file regenerates byte-identically on a second `make_golden.py` run.
+4. A test asserts criterion 1 directly, so the coverage cannot silently regress if the fixture changes.
+5. `docs/data-contracts/trainset-chain.md` states which block pins which behaviour, so T-123 knows the tram
+   block is the one that proves its roll handling.
+6. `uv run ruff check . ../tools`, `ruff format --check . ../tools` and `pytest -q` all pass.
+
+### Report back
+
+State: the tram sample stations and the lead/trail pivot rolls at each; confirmation that the Kralupy block
+is byte-unchanged; and how `make_golden.py` reaches the fixture without duplicating it.
