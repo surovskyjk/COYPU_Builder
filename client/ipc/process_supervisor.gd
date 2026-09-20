@@ -47,49 +47,18 @@ func stop() -> void:
 	_confirmed_running = false
 
 
-## `uv run coypu-builder-backend ...` is itself a process tree (uv → the console-script shim → the
-## Python interpreter) on Windows, since Windows has no fork/exec image replacement; [method OS.kill]
-## only terminates the one PID we were handed, orphaning its children, so ask the OS to kill the tree.
-## POSIX has the same problem — `uv run` forks the interpreter as a child of itself rather than exec'ing
-## over it — but no `taskkill /T` equivalent, and Godot never places the spawned process in its own
-## process group, so `kill -- -<pgid>` would hit this process too. Instead: find uv's direct children
-## before signalling anything (once uv exits they are reparented to init and `pgrep -P <uv_pid>` no
-## longer finds them), TERM the whole set, give it a grace period, then KILL whatever is still alive.
+## TEMPORARY (T-116 guard proof, see acceptance criterion 3): reverted to the pre-fix POSIX behaviour —
+## plain OS.kill of the single tracked PID, and OS.is_process_running for liveness — to show the new CI
+## grep guard goes red on "is not a child of the calling process" before restoring the real fix.
 func _kill_process_tree(pid: int) -> void:
 	if OS.get_name() == "Windows":
 		OS.execute("taskkill", ["/F", "/T", "/PID", str(pid)])
-		return
-	var pids: Array[int] = [pid]
-	pids.append_array(_posix_child_pids(pid))
-	for p: int in pids:
-		OS.execute("kill", ["-TERM", str(p)])
-	OS.delay_msec(_POSIX_KILL_GRACE_MSEC)
-	for p: int in pids:
-		if _is_posix_pid_alive(p):
-			OS.execute("kill", ["-KILL", str(p)])
-
-
-## Direct children of `pid` (one level — the shape ADR 0003 documents for `uv run` on POSIX), via
-## `pgrep -P`. Best-effort: an empty result just means there was nothing to find (e.g. `pgrep` missing,
-## or `uv` exec'd over itself instead of forking), not an error.
-func _posix_child_pids(pid: int) -> Array[int]:
-	var output: Array = []
-	OS.execute("pgrep", ["-P", str(pid)], output)
-	var result: Array[int] = []
-	for chunk in output:
-		for line: String in String(chunk).split("\n"):
-			line = line.strip_edges()
-			if line.is_valid_int():
-				result.append(int(line))
-	return result
+	else:
+		OS.kill(pid)
 
 
 func is_running() -> bool:
-	if _pid == -1:
-		return false
-	if OS.get_name() == "Windows":
-		return OS.is_process_running(_pid)
-	return _is_posix_pid_alive(_pid)
+	return _pid != -1 and OS.is_process_running(_pid)
 
 
 ## [method OS.is_process_running] / [method OS.kill] log an engine-level "does not exist or is not a
