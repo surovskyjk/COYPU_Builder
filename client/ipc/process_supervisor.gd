@@ -11,6 +11,9 @@ signal backend_crashed
 @export var host: String = "127.0.0.1"
 @export var port_wait_timeout_sec: float = 10.0
 
+## How long to wait after SIGTERM before escalating to SIGKILL on POSIX (see [method _kill_process_tree]).
+const _POSIX_KILL_GRACE_MSEC := 200
+
 var _pid: int = -1
 var _stdio: FileAccess
 var _waiting_for_port := false
@@ -47,15 +50,74 @@ func stop() -> void:
 ## `uv run coypu-builder-backend ...` is itself a process tree (uv → the console-script shim → the
 ## Python interpreter) on Windows, since Windows has no fork/exec image replacement; [method OS.kill]
 ## only terminates the one PID we were handed, orphaning its children, so ask the OS to kill the tree.
+## POSIX has the same problem — `uv run` forks the interpreter as a child of itself rather than exec'ing
+## over it — but no `taskkill /T` equivalent, and Godot never places the spawned process in its own
+## process group, so `kill -- -<pgid>` would hit this process too. Instead: find uv's direct children
+## before signalling anything (once uv exits they are reparented to init and `pgrep -P <uv_pid>` no
+## longer finds them), TERM the whole set, give it a grace period, then KILL whatever is still alive.
 func _kill_process_tree(pid: int) -> void:
 	if OS.get_name() == "Windows":
 		OS.execute("taskkill", ["/F", "/T", "/PID", str(pid)])
-	else:
-		OS.kill(pid)
+		return
+	var pids: Array[int] = [pid]
+	pids.append_array(_posix_child_pids(pid))
+	for p: int in pids:
+		OS.execute("kill", ["-TERM", str(p)])
+	OS.delay_msec(_POSIX_KILL_GRACE_MSEC)
+	for p: int in pids:
+		if _is_posix_pid_alive(p):
+			OS.execute("kill", ["-KILL", str(p)])
+
+
+## Direct children of `pid` (one level — the shape ADR 0003 documents for `uv run` on POSIX), via
+## `pgrep -P`. Best-effort: an empty result just means there was nothing to find (e.g. `pgrep` missing,
+## or `uv` exec'd over itself instead of forking), not an error.
+func _posix_child_pids(pid: int) -> Array[int]:
+	var output: Array = []
+	OS.execute("pgrep", ["-P", str(pid)], output)
+	var result: Array[int] = []
+	for chunk in output:
+		for line: String in String(chunk).split("\n"):
+			line = line.strip_edges()
+			if line.is_valid_int():
+				result.append(int(line))
+	return result
 
 
 func is_running() -> bool:
-	return _pid != -1 and OS.is_process_running(_pid)
+	if _pid == -1:
+		return false
+	if OS.get_name() == "Windows":
+		return OS.is_process_running(_pid)
+	return _is_posix_pid_alive(_pid)
+
+
+## [method OS.is_process_running] / [method OS.kill] log an engine-level "does not exist or is not a
+## child of the calling process" ERROR for a PID that is not (or is no longer) a direct child of Godot —
+## which happens routinely here once a POSIX kill above has reaped it, or for a grandchild we discovered
+## via [method _posix_child_pids]. Read `/proc` directly instead, which never errors: a missing entry or
+## zombie state ('Z') both mean "treat as dead" (a zombie can't hold the port; it only awaits reaping).
+func _is_posix_pid_alive(pid: int) -> bool:
+	var stat_path := "/proc/%d/stat" % pid
+	var f := FileAccess.open(stat_path, FileAccess.READ)
+	if f == null:
+		return _is_posix_pid_alive_via_signal(pid)
+	var content := f.get_as_text()
+	f.close()
+	var close_paren := content.rfind(")")
+	if close_paren == -1:
+		return false
+	var fields := content.substr(close_paren + 1).strip_edges().split(" ")
+	if fields.is_empty():
+		return false
+	return fields[0] != "Z"
+
+
+## Fallback for POSIX systems without `/proc` (e.g. macOS, not a current CI target). `kill -0` only
+## checks whether the PID exists and is signalable — unlike Godot's own process tracking, it does not
+## require the PID to be a direct child, so it cannot produce the "not a child" error either.
+func _is_posix_pid_alive_via_signal(pid: int) -> bool:
+	return OS.execute("kill", ["-0", str(pid)]) == 0
 
 
 ## Test-only (T-103 `test_connection_lifecycle.gd`): the spawned process id, or -1 if none is running.
