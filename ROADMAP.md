@@ -5,7 +5,7 @@ has (or will have) a self-contained specification in [`docs/tasks/`](docs/tasks/
 
 **Status legend** — `done` · `in progress` · `ready` (spec written, not started) · `planned` (no spec yet)
 
-Last reviewed: 2026-09-19 against `6c564ee` (pushed) plus the uncommitted T-115 change set. M1's six tasks are done; T-116 is open because CI is red on Linux.
+Last reviewed: 2026-09-20 against `3519daf`. **M1 complete and master is green for the first time since Phase 0** (run 35536076792). M2 under way: T-120 done, T-121 next.
 
 ---
 
@@ -67,7 +67,7 @@ in CI with no loss of assertion coverage · `godot --path client` boots a scene 
 completes `session.hello`, heartbeats, and survives a backend kill by reconnecting · `Origin` is validated
 against `shared/golden/origin_mapping.json` · D1, D2, D4, D5 retired.
 
-### P1.M1 — Run domain · `in progress`
+### P1.M1 — Run domain · `done`
 
 *Goal:* kinematics becomes a first-class domain concept, and the client can mirror baked tables.
 
@@ -78,25 +78,25 @@ against `shared/golden/origin_mapping.json` · D1, D2, D4, D5 retired.
 | T-112 | Trainset chain reference + `trainset_chain.json` golden | `done` (2026-09-19) | T-110, T-113 | [task_112](docs/tasks/task_112_trainset_chain.md) |
 | T-113 | Vehicle catalogue schema, loader, COYPU vehicle import | `done` (2026-09-18) | — | [task_113](docs/tasks/task_113_vehicle_catalogue.md) |
 | T-114 | Protocol surface for runs, catalogue and `.coypu` import | `done` (2026-09-19) | T-101, T-111, T-113 | [task_114](docs/tasks/task_114_protocol_run_surface.md) |
-| T-115 | Client domain mirror: alignment table, run table, registries | `done` (2026-09-19, uncommitted) | T-102, T-103, T-114 | [task_115](docs/tasks/task_115_client_domain_mirror.md) |
-| T-116 | Cross-platform process supervision and socket reuse | `ready` — **CI is red until this lands** | T-103, T-115 | [task_116](docs/tasks/task_116_cross_platform_supervision.md) |
+| T-115 | Client domain mirror: alignment table, run table, registries | `done` (2026-09-19) | T-102, T-103, T-114 | [task_115](docs/tasks/task_115_client_domain_mirror.md) |
+| T-116 | Cross-platform process supervision and socket reuse | `done` (2026-09-20, merged as `3519daf`) | T-103, T-115 | [task_116](docs/tasks/task_116_cross_platform_supervision.md) |
 
 **Exit criteria.** A COYPU kinematics run imports from both CSV dialects and from `.coypu`, normalises to one
 `KinematicsRun`, and bakes to a time-uniform `RunTable` · `run.get` returns real blobs · the client can
 interpolate a frame table and a run table with results pinned to `shared/golden/` · a synthetic tram network
 with a junction exists and passes the same tests as heavy rail · D3, D6 retired.
 
-### P1.M2 — Track in 3D · `planned`
+### P1.M2 — Track in 3D · `ready`
 
 *Goal:* the first real demo — a train running on rails.
 
-| Task | Title | Status | Depends on |
-|---|---|---|---|
-| T-120 | Backend track mesh baker: rails + ballast prism, tile-local chunking | `planned` | T-110 |
-| T-121 | Client track scene: chunk instancing, sleeper `MultiMesh`, LOD | `planned` | T-115, T-120 |
-| T-122 | Client vehicle scene: procedural car from the catalogue spec, consist assembly | `planned` | T-113, T-115 |
-| T-123 | Client playback: transport, scrub, speed, trainset chain evaluation | `planned` | T-112, T-115, T-122 |
-| T-124 | Cameras: manager, orbit, wayside, XR-ready cab rig | `planned` | T-121, T-123 |
+| Task | Title | Status | Depends on | Spec |
+|---|---|---|---|---|
+| T-120 | Backend track mesh baker: rails + ballast prism, tile-local chunking | `done` (2026-09-20, uncommitted) | T-110 | [task_120](docs/tasks/task_120_track_mesh_baker.md) |
+| T-121 | Client track scene: chunk instancing, sleeper `MultiMesh`, LOD | `ready` | T-115, T-120 | [task_121](docs/tasks/task_121_client_track_scene.md) |
+| T-122 | Client vehicle scene: procedural car from the catalogue spec, consist assembly | `ready` | T-113, T-115 | [task_122](docs/tasks/task_122_client_vehicle_scene.md) |
+| T-123 | Client playback: transport, scrub, speed, trainset chain evaluation | `ready` | T-112, T-115, T-122 | [task_123](docs/tasks/task_123_client_playback.md) |
+| T-124 | Cameras: manager, orbit, wayside, XR-ready cab rig | `ready` | T-121, T-123 | [task_124](docs/tasks/task_124_cameras.md) |
 
 **Exit criteria.** The Kralupy corridor renders as rails, sleepers and ballast with no vertex shimmer at any
 zoom · a three-car consist plays back along it at a locked 60 fps with bogies on the rails and bodies chording
@@ -160,10 +160,11 @@ ramps, doubling as a visual regression check on the kernel.
 | F3 | gdUnit4's CLI refuses `--headless` without `--ignoreHeadlessMode` (all versions v5.1.1–v6.2.1). Every invocation in `CLAUDE.md`, `client/README.md` and CI now carries the flag | T-102 | Closed; noted here so no later task "cleans up" the flag |
 | F4 | gdUnit4 v6.2.1 declares a Godot 4.5 floor, not the 4.4+ the spec asked for — no release satisfies both "declares 4.4+" and "compiles on 4.7.2" (v5.1.1 fails to compile: `FileAccess.get_as_text()` arity). v6.2.1 verified working empirically | T-102 | Accepted deviation. Revisit only if a Godot upgrade breaks the addon |
 | F5 | ~~The in-flight disconnect test raced a 0.01 s kill against a ~2 ms `session.ping`, failing 3/3 and stranding the two tests declared after it~~ | T-103 review | **closed 2026-09-18.** Replaced by an `alignment.frame_table` request at `spacing_m = 0.002` (~9M rows, ~8 s of synchronous bake) so no reply can exist at the 0.1 s kill. Re-verified here: 29/29, three consecutive green runs, 0 orphans |
-| F13 | The `client` CI job has failed on **every** push since T-103 landed, while both `backend` jobs pass. Linux-only: `_kill_process_tree` uses `OS.kill(pid)` off Windows, which rejects a non-child PID (`The process N does not exist or is not a child of the calling process`), so `uv run`'s Python child survives and holds its port; then `connect_to_url` reuses a `WebSocketPeer` that is not `STATE_CLOSED`, so every reconnect returns `ERR_ALREADY_IN_USE`. Structurally invisible on Windows, where the `taskkill /T` path works | CI review 2026-09-19 | **Open — T-116.** Reconnect, which ADR 0003 requires, does not work on Linux at all |
+| F13 | ~~The `client` CI job has failed on **every** push since T-103 landed, while both `backend` jobs pass. Linux-only: `_kill_process_tree` uses `OS.kill(pid)` off Windows, which rejects a non-child PID (`The process N does not exist or is not a child of the calling process`), so `uv run`'s Python child survives and holds its port; then `connect_to_url` reuses a `WebSocketPeer` that is not `STATE_CLOSED`, so every reconnect returns `ERR_ALREADY_IN_USE`. Structurally invisible on Windows, where the `taskkill /T` path works~~ | CI review 2026-09-19 | **closed 2026-09-20 by T-116** (run 35531237406: 60/60, 9/9 suites, exit 0, all three jobs green). Note the causal story turned out to be one root cause with two symptoms — once the tree kill works, the socket closes promptly and the `ERR_ALREADY_IN_USE` race stops reproducing, so reverting the websocket fix alone stayed green (run 35530862952). That fix is retained as defence in depth, not because CI can prove it |
 | F14 | Nobody looked at a CI result for eleven days. Two pushes went out red | process | Every commit-and-push prompt from now on must end by waiting for the run and reporting its conclusion, not just the push result |
 | F15 | `frame_eval.json`'s eight stations all land on exact table rows (uniform-grid integers or geometric key stations `bake_stations` always includes), so the client's *interpolation* between rows is never pinned — only its lookup. Measured deviations were at the float32 noise floor (6.1e-5 m against a 1e-3 budget) because no interpolation error entered the comparison | T-115 | Add off-row stations with backend-computed truth when a later task next regenerates the golden. Not urgent; T-121 and T-123 will exercise interpolation visually |
 | F16 | `RunTable` station error against its golden is 7.99e-4 m — **80% of the 1e-3 budget** — from float32 ULP at Kralupy's ~18 km stations. Not algorithmic, but the margin scales with corridor length | T-115 | A corridor much longer than 18 km will breach it. Revisit the budget, or carry station as float64, if M3 brings longer alignments |
+| F17 | T-120's full-corridor `alignment.track_mesh` payload is **24.62 MB**, but `IpcWebSocketClient.INBOUND_BUFFER_SIZE` is **16 MiB (16.78 MB)** — one `chunk_index: null` call produces a frame the client cannot receive. My T-120 spec set an abstract ~32 MB flag threshold without checking the limit already in the codebase | T-120 review | **Resolved in spec.** T-121 now must page by `chunk_index` (~337 KB per chunk) and assert no response exceeds 8 MB. `INBOUND_BUFFER_SIZE` stays 16 MiB — paging is the designed path and is what M3's terrain streaming needs anyway |
 | F12 | `_stops_from_coypu` in `server/handlers.py` converts the archive's raw `[station_km, dwell_s, name]` rows into domain `Stop` tuples — format conversion in the wire layer, which `io/` should own. `io/coypu/archive.py` was not in T-114's Deliverables so it stayed in the handler, flagged in a docstring | T-114 | **Open**, low priority. Move to `CoypuProject` as a `stops()` accessor; fold into whichever later task next edits `io/coypu/` |
 | F10 | ~~Every `roll` in `shared/golden/trainset_chain.json` is zero, because the Kralupy fixture's cant block is a placeholder. That golden is the **only** reference T-123's client chain is pinned to, so a client that mishandles mean-roll averaging or the Gram-Schmidt correction would still pass it. T-112 covered the behaviour in Python via the tram fixture, which Godot cannot load~~ | T-112 review | **closed 2026-09-19.** A `tram_block` key adds 5 samples, 6 car-poses with non-zero roll and a max lead/trail divergence of 0.0236 rad; the Kralupy block is byte-unchanged. My criterion 3 was wrong twice over — the fixture has no gradient, and a *constant* gradient would not have broken lead/trail symmetry either. The correction is a no-op wherever curvature and cant are constant; only a **change** between the pivots (cant ramp, clothoid, vertical curve) exercises it, which is what the ramp samples do |
 | F11 | The T-112 contract's `forward = normalize(P_lead − P_trail) · d` was algebraically wrong: the layout already gives `p_lead − p_trail = d·pivot_distance`, so the extra `· d` squared the sign out and made `forward` equal `+tangent` for both directions, contradicting acceptance criterion 5. Implemented without the `· d` | T-112 | Spec error, correctly caught. Verified independently: the golden's `direction=−1` and `direction=+1` bodies at station 8260 are 180.00° apart. `task_112` and `trainset-chain.md` both corrected |

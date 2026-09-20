@@ -140,6 +140,33 @@ class AlignmentFrameTableResult(msgspec.Struct, frozen=True):
     station_end: float
 
 
+# --- alignment.track_mesh --------------------------------------------------------------------------------
+# Result carries only per-chunk metadata; geometry rides the blobs, four per (chunk_index, surface) pair --
+# see the `alignment.track_mesh` BlobSpec descriptions below for the exact naming scheme.
+
+
+class AlignmentTrackMeshParams(msgspec.Struct, frozen=True):
+    alignment_id: str
+    chunk_length_m: float = 250.0
+    spacing_m: float = 1.0
+    chunk_index: int | None = None  # None = all chunks
+
+
+class TrackMeshChunkInfo(msgspec.Struct, frozen=True):
+    chunk_index: int
+    surface: str
+    station_start: float
+    station_end: float
+    tile_origin: tuple[float, float, float]  # Godot axes, relative to the project base point
+    vertex_count: int
+    index_count: int
+
+
+class AlignmentTrackMeshResult(msgspec.Struct, frozen=True):
+    alignment_id: str
+    chunks: tuple[TrackMeshChunkInfo, ...]
+
+
 # --- catalogue.* / vehicle DTOs -------------------------------------------------------------------------
 # `VehicleSpec`/`CarSpec`/`VehicleDynamics`/`TractionBand` (domain/model/vehicle.py) flattened into wire
 # Structs -- domain objects never cross the boundary (T-114 DTO discipline).
@@ -417,6 +444,48 @@ METHODS: tuple[MethodSpec, ...] = (
             BlobSpec("gradient", "<f4", "(n,)", "Vertical gradient [dimensionless]."),
             BlobSpec("elevation", "<f4", "(n,)", "Profile elevation at the pivot [m]."),
             BlobSpec("segment_index", "<i4", "(n,)", "Index of the horizontal segment containing this row."),
+        ),
+        errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
+    ),
+    MethodSpec(
+        name="alignment.track_mesh",
+        summary=(
+            "Bake two swept rails plus one default ballast prism for one alignment, chunked and tile-local "
+            "(ADR 0004): every vertex is relative to its own chunk's tile_origin, never in absolute "
+            "project coordinates."
+        ),
+        params=AlignmentTrackMeshParams,
+        result=AlignmentTrackMeshResult,
+        blobs=(
+            BlobSpec(
+                "vertices_<i>_<surface>",
+                "<f4",
+                "(n, 3)",
+                "Naming scheme, one quadruplet of blobs per (chunk_index, surface) pair actually present in "
+                "`chunks`: `<i>` is that entry's `chunk_index`, `<surface>` its `surface` "
+                "('rail_left' | 'rail_right' | 'ballast'), e.g. `vertices_3_ballast`. Positions in Godot "
+                "axes, relative to that entry's `tile_origin` -- never absolute.",
+            ),
+            BlobSpec(
+                "normals_<i>_<surface>",
+                "<f4",
+                "(n, 3)",
+                "Same naming scheme as `vertices_<i>_<surface>`; unit outward normals in Godot axes.",
+            ),
+            BlobSpec(
+                "uvs_<i>_<surface>",
+                "<f4",
+                "(n, 2)",
+                "Same naming scheme. `u` is accumulated perimeter distance around the profile; `v` is "
+                "absolute station [m], so it matches exactly across a shared chunk boundary.",
+            ),
+            BlobSpec(
+                "indices_<i>_<surface>",
+                "<i4",
+                "(m,)",
+                "Same naming scheme. Triangle indices into that same blob's vertices, wound "
+                "counter-clockwise as seen from outside.",
+            ),
         ),
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
     ),

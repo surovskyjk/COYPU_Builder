@@ -232,6 +232,37 @@ Bake a dense, render-ready frame table for one alignment.
 
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
 
+### `alignment.track_mesh`
+
+Bake two swept rails plus one default ballast prism for one alignment, chunked and tile-local (ADR 0004): every vertex is relative to its own chunk's tile_origin, never in absolute project coordinates.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `alignment_id` | `str` | required |
+| `chunk_length_m` | `float` | `250.0` |
+| `spacing_m` | `float` | `1.0` |
+| `chunk_index` | `int | None` | `None` |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `alignment_id` | `str` | required |
+| `chunks` | `tuple[TrackMeshChunkInfo, ...]` | required |
+
+**Blobs**
+
+| Name | dtype | Shape | Description |
+|---|---|---|---|
+| `vertices_<i>_<surface>` | `<f4` | `(n, 3)` | Naming scheme, one quadruplet of blobs per (chunk_index, surface) pair actually present in `chunks`: `<i>` is that entry's `chunk_index`, `<surface>` its `surface` ('rail_left' | 'rail_right' | 'ballast'), e.g. `vertices_3_ballast`. Positions in Godot axes, relative to that entry's `tile_origin` -- never absolute. |
+| `normals_<i>_<surface>` | `<f4` | `(n, 3)` | Same naming scheme as `vertices_<i>_<surface>`; unit outward normals in Godot axes. |
+| `uvs_<i>_<surface>` | `<f4` | `(n, 2)` | Same naming scheme. `u` is accumulated perimeter distance around the profile; `v` is absolute station [m], so it matches exactly across a shared chunk boundary. |
+| `indices_<i>_<surface>` | `<i4` | `(m,)` | Same naming scheme. Triangle indices into that same blob's vertices, wound counter-clockwise as seen from outside. |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
+
 ### `run.list`
 
 List the kinematics runs attached to the current project, without their baked tables.

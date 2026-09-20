@@ -29,10 +29,13 @@ from coypu_builder.io.coypu.archive import CoypuProject, read_coypu
 from coypu_builder.io.coypu.kinematics_csv import read_kinematics_csv, read_stops_csv
 from coypu_builder.io.coypu.vehicles import dynamics_from_coypu, merge_dynamics
 from coypu_builder.io.landxml import LandXmlAlignment, read_landxml, to_alignment
+from coypu_builder.io.mesh.track import bake_track_mesh
 from coypu_builder.protocol.messages import (
     AlignmentFrameTableParams,
     AlignmentFrameTableResult,
     AlignmentSummary,
+    AlignmentTrackMeshParams,
+    AlignmentTrackMeshResult,
     BasePointDTO,
     CarSpecDTO,
     CatalogueVehiclesResult,
@@ -54,6 +57,7 @@ from coypu_builder.protocol.messages import (
     SessionPingParams,
     SessionPingResult,
     StopDTO,
+    TrackMeshChunkInfo,
     TractionBandDTO,
     TrainsetCreateParams,
     TrainsetDTO,
@@ -461,6 +465,53 @@ def handle_alignment_frame_table(session: Session, params: dict[str, Any] | None
     return msgspec.to_builtins(result), blobs
 
 
+def handle_alignment_track_mesh(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    project = _require_project(session)
+    req = _convert(params, AlignmentTrackMeshParams)
+    entry = project.alignments.get(req.alignment_id)
+    if entry is None:
+        raise ProtocolError(ErrorCode.NOT_FOUND, f"unknown alignment_id '{req.alignment_id}'")
+    if req.chunk_length_m <= 0.0:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, f"chunk_length_m must be > 0, got {req.chunk_length_m}")
+    if req.spacing_m <= 0.0:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, f"spacing_m must be > 0, got {req.spacing_m}")
+
+    mesh_chunks = bake_track_mesh(entry.alignment, chunk_length_m=req.chunk_length_m, spacing_m=req.spacing_m)
+    if req.chunk_index is not None:
+        mesh_chunks = tuple(c for c in mesh_chunks if c.chunk_index == req.chunk_index)
+        if not mesh_chunks:
+            raise ProtocolError(ErrorCode.NOT_FOUND, f"no chunk with chunk_index {req.chunk_index}")
+
+    base = project.base_point or BasePoint(0.0, 0.0, 0.0)
+    infos: list[TrackMeshChunkInfo] = []
+    blobs: dict[str, np.ndarray] = {}
+    for chunk in mesh_chunks:
+        tile_origin_godot = points_to_godot(chunk.tile_origin[None, :], base, dtype=np.float64)[0]
+        infos.append(
+            TrackMeshChunkInfo(
+                chunk_index=chunk.chunk_index,
+                surface=chunk.surface,
+                station_start=chunk.station_start,
+                station_end=chunk.station_end,
+                tile_origin=(
+                    float(tile_origin_godot[0]),
+                    float(tile_origin_godot[1]),
+                    float(tile_origin_godot[2]),
+                ),
+                vertex_count=len(chunk.vertices),
+                index_count=len(chunk.indices),
+            )
+        )
+        suffix = f"{chunk.chunk_index}_{chunk.surface}"
+        blobs[f"vertices_{suffix}"] = chunk.vertices
+        blobs[f"normals_{suffix}"] = chunk.normals
+        blobs[f"uvs_{suffix}"] = chunk.uvs
+        blobs[f"indices_{suffix}"] = chunk.indices
+
+    result = AlignmentTrackMeshResult(alignment_id=req.alignment_id, chunks=tuple(infos))
+    return msgspec.to_builtins(result), blobs
+
+
 def handle_run_list(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     summaries = tuple(_run_summary(run_id, entry) for run_id, entry in project.runs.items())
@@ -537,6 +588,7 @@ DISPATCH: dict[str, Handler] = {
     "import.coypu": handle_import_coypu,
     "import.kinematics": handle_import_kinematics,
     "alignment.frame_table": handle_alignment_frame_table,
+    "alignment.track_mesh": handle_alignment_track_mesh,
     "run.list": handle_run_list,
     "run.get": handle_run_get,
     "catalogue.vehicles": handle_catalogue_vehicles,
