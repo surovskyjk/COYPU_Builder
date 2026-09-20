@@ -39,11 +39,11 @@ entirely. `client/ipc/process_supervisor.gd` now branches:
   group, so `kill -- -<pgid>` would hit Godot itself. Instead, `uv`'s direct children are found with
   `pgrep -P` *before* signalling anything (once `uv` exits they're reparented to init and no longer found
   that way), `SIGTERM` is sent to `uv` and each child, and whatever is still alive after a 200 ms grace
-  period gets `SIGKILL`. Liveness is checked by reading `/proc/<pid>/stat` (treating a zombie as dead, since
-  it can't hold the port) rather than `OS.is_process_running`/`OS.kill`, because both of those raise an
-  engine-level "does not exist or is not a child of the calling process" error for a PID that isn't (or is
-  no longer) a direct child of Godot — routine here once a kill above has reaped it. A `kill -0` fallback
-  covers POSIX systems without `/proc` (e.g. macOS, not a current CI target).
+  period gets `SIGKILL`. Liveness is checked with a plain `/proc/<pid>` existence test rather than
+  `OS.is_process_running`/`OS.kill`, because both of those raise an engine-level "does not exist or is not
+  a child of the calling process" error for a PID that isn't (or is no longer) a direct child of Godot —
+  routine here once a kill above has reaped it. A `kill -0` fallback covers POSIX systems without `/proc`
+  (e.g. macOS, not a current CI target).
 
 `client/ipc/websocket_client.gd`'s `connect_to_url` now constructs a fresh `WebSocketPeer` per call instead
 of reusing one: `WebSocketPeer.connect_to_url` refuses to run again until the existing peer reaches

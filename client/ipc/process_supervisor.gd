@@ -95,22 +95,14 @@ func is_running() -> bool:
 ## [method OS.is_process_running] / [method OS.kill] log an engine-level "does not exist or is not a
 ## child of the calling process" ERROR for a PID that is not (or is no longer) a direct child of Godot —
 ## which happens routinely here once a POSIX kill above has reaped it, or for a grandchild we discovered
-## via [method _posix_child_pids]. Read `/proc` directly instead, which never errors: a missing entry or
-## zombie state ('Z') both mean "treat as dead" (a zombie can't hold the port; it only awaits reaping).
+## via [method _posix_child_pids]. Checking for `/proc/<pid>` directly never errors that way. Note this
+## is a plain existence check, not a `stat`-field read: [FileAccess] sizes its buffer from the file's
+## reported length, which procfs pseudo-files report as 0, so `get_as_text()` on `/proc/<pid>/stat` reads
+## back empty every time regardless of the real content — that cannot be used here.
 func _is_posix_pid_alive(pid: int) -> bool:
-	var stat_path := "/proc/%d/stat" % pid
-	var f := FileAccess.open(stat_path, FileAccess.READ)
-	if f == null:
-		return _is_posix_pid_alive_via_signal(pid)
-	var content := f.get_as_text()
-	f.close()
-	var close_paren := content.rfind(")")
-	if close_paren == -1:
-		return false
-	var fields := content.substr(close_paren + 1).strip_edges().split(" ")
-	if fields.is_empty():
-		return false
-	return fields[0] != "Z"
+	if DirAccess.dir_exists_absolute("/proc"):
+		return DirAccess.dir_exists_absolute("/proc/%d" % pid)
+	return _is_posix_pid_alive_via_signal(pid)
 
 
 ## Fallback for POSIX systems without `/proc` (e.g. macOS, not a current CI target). `kill -0` only
