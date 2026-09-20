@@ -28,3 +28,25 @@ gRPC/ZeroMQ (no first-class Godot support), shared memory (needs GDExtension), G
 T-101 built the generator side: `protocol/messages.py` now exports `ErrorCode`, `BlobSpec`, `MethodSpec` and
 the `METHODS` registry as the actual SSOT (not just a stated intent), `tools/gen_protocol_docs.py` renders
 `docs/protocol/ipc.md` from it, and CI runs `--check` in the `backend` job so a stale doc fails the build.
+
+T-116 found that process supervision is platform-specific and was only implemented for Windows, which the
+`backend` job's Windows-only-passing / `client` job's Linux-only-failing split hid from local testing
+entirely. `client/ipc/process_supervisor.gd` now branches:
+
+- **Windows**: `taskkill /F /T` on the tracked PID, as before — it kills the whole `uv` → shim → interpreter
+  tree in one shot, and `OS.is_process_running` is safe to poll for liveness.
+- **POSIX**: there is no tree-kill equivalent, and Godot never places the spawned process in its own process
+  group, so `kill -- -<pgid>` would hit Godot itself. Instead, `uv`'s direct children are found with
+  `pgrep -P` *before* signalling anything (once `uv` exits they're reparented to init and no longer found
+  that way), `SIGTERM` is sent to `uv` and each child, and whatever is still alive after a 200 ms grace
+  period gets `SIGKILL`. Liveness is checked with a plain `/proc/<pid>` existence test rather than
+  `OS.is_process_running`/`OS.kill`, because both of those raise an engine-level "does not exist or is not
+  a child of the calling process" error for a PID that isn't (or is no longer) a direct child of Godot —
+  routine here once a kill above has reaped it. A `kill -0` fallback covers POSIX systems without `/proc`
+  (e.g. macOS, not a current CI target).
+
+`client/ipc/websocket_client.gd`'s `connect_to_url` now constructs a fresh `WebSocketPeer` per call instead
+of reusing one: `WebSocketPeer.connect_to_url` refuses to run again until the existing peer reaches
+`STATE_CLOSED`, and the restart-on-loss path above calls it as soon as a respawned backend is ready, with no
+guarantee the old peer has finished closing. The Windows tree-kill closes the old socket promptly enough that
+this race was never observed there; on Linux it failed every reconnect with `ERR_ALREADY_IN_USE`.

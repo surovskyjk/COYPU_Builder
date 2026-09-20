@@ -47,4 +47,15 @@ jobs:
       # gdUnit4's CLI tool refuses to run headless without this flag regardless of CI having no
       # display (the check only matters for suites simulating UI input, which ours never do); its own
       # exit code fails the job on any test failure.
-      - run: godot --headless --path client -s addons/gdUnit4/bin/GdUnitCmdTool.gd -a tests --ignoreHeadlessMode
+      #
+      # T-116: process-supervision engine errors (a leaked backend process, a socket reused before it
+      # closed) can print without failing a single assertion — that's exactly how this class of bug hid
+      # from CI before. Tee the output and grep it so those strings fail the build even when every test
+      # happens to pass.
+      - run: |
+          set -euo pipefail
+          godot --headless --path client -s addons/gdUnit4/bin/GdUnitCmdTool.gd -a tests --ignoreHeadlessMode 2>&1 | tee gdunit-output.log
+          if grep -q "is not a child of the calling process" gdunit-output.log || grep -q "ERR_ALREADY_IN_USE" gdunit-output.log; then
+            echo "::error::process-supervision error found in gdUnit4 output (T-116 guard)"
+            exit 1
+          fi
