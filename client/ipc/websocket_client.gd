@@ -16,16 +16,7 @@ var _was_open := false
 var _next_request_id := 0
 
 
-## A [WebSocketPeer] refuses to [method WebSocketPeer.connect_to_url] again until it reaches
-## `STATE_CLOSED`, which a reconnect after a backend crash cannot guarantee (ADR 0003's restart-on-loss
-## path calls this the moment a new backend is ready, with no wait for the old peer to finish closing).
-## Constructing a fresh peer sidesteps that entirely — the old one is simply dropped and collected — but
-## `_was_open` must be reset here too, or a stale `true` from the discarded peer either fires a spurious
-## `disconnected` for a peer nobody is polling anymore, or (worse) suppresses the real `connected` signal
-## for the new one.
 func connect_to_url(url: String) -> Error:
-	_peer = WebSocketPeer.new()
-	_was_open = false
 	_peer.inbound_buffer_size = INBOUND_BUFFER_SIZE
 	var err := _peer.connect_to_url(url)
 	if err != OK:
