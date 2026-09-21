@@ -2,6 +2,9 @@ extends Node3D
 ## Deliberately temporary bootstrap scene (T-103): a free-look camera and a status overlay showing
 ## backend/session state. M2 replaces the camera (T-124); M4 replaces the overlay (T-140). Do not extend
 ## this file's scope — see "Out of scope" in docs/tasks/task_103_client_app_shell.md.
+##
+## T-121 adds exactly one thing on top of that: building [TrackCorridor] for the first alignment Session
+## knows about and driving its LOD from this scene's (still temporary) free-look camera every frame.
 
 const _LOOK_SPEED := 0.005
 const _MOVE_SPEED := 12.0
@@ -15,6 +18,9 @@ var _look_active := false
 var _yaw := 0.0
 var _pitch := 0.0
 
+var _corridor: TrackCorridor
+var _corridor_alignment_id := ""
+
 
 func _ready() -> void:
 	var args := CliArgs.from_cmdline()
@@ -27,6 +33,11 @@ func _ready() -> void:
 	Backend.state_changed.connect(_on_backend_state_changed)
 	EventBus.project_changed.connect(_refresh_status)
 	EventBus.alignments_changed.connect(_refresh_status)
+	EventBus.alignments_changed.connect(_on_alignments_changed)
+
+	_corridor = TrackCorridor.new()
+	add_child(_corridor)
+	Session.layers().define(TrackCorridor.LAYER_ID, "Track")
 
 	Backend.start()
 	_refresh_status()
@@ -57,6 +68,27 @@ func _bootstrap_session() -> void:
 	if got.type == "res":
 		Session.set_project_info(got.result)
 	_refresh_status()
+
+
+## Builds [TrackCorridor] for the first alignment Session knows about, once (T-121). A later
+## `alignments_changed` naming a different first alignment replaces it; the same id is a no-op, since
+## `Session.alignments_changed` can fire for reasons unrelated to the corridor (e.g. a rename).
+func _on_alignments_changed() -> void:
+	var alignments := Session.alignments()
+	if alignments.is_empty():
+		return
+	var alignment_id: String = alignments[0].get("alignment_id", "")
+	if alignment_id.is_empty() or alignment_id == _corridor_alignment_id:
+		return
+	_corridor_alignment_id = alignment_id
+	_build_track_corridor(alignment_id)
+
+
+func _build_track_corridor(alignment_id: String) -> void:
+	var table := await Session.fetch_alignment_table(alignment_id)
+	if table == null:
+		return
+	await _corridor.build(alignment_id, table)
 
 
 func _refresh_status() -> void:
@@ -92,6 +124,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
+	_corridor.update_lod(_camera.global_position)
+
 	if not _look_active:
 		return
 	var input_dir := Vector3.ZERO

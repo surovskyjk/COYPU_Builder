@@ -176,3 +176,70 @@ State: measured frame time with and without LOD, the two LOD thresholds and the 
 confirmation that the far end of the corridor is shimmer-free, with a screenshot; chunk count and total
 vertex count actually instantiated; and whether T-120's chunk length turned out to be the right vertex
 budget or wants changing.
+
+---
+
+## Follow-up F18 — ask the backend how many chunks there are
+
+*Added 2026-09-21 after the T-121 review. Small, spans both sides, and should land before M3 builds a second
+paged resource on the same pattern.*
+
+`TrackCorridor.build` currently derives the chunk count client-side:
+
+```gdscript
+const CHUNK_LENGTH_M := 250.0
+chunk_count_expected = maxi(1, int(ceil(span / CHUNK_LENGTH_M)))
+```
+
+This re-implements the backend's chunking formula in the client. It is correct today because both sides use
+fixed-length chunks and the client passes `chunk_length_m` along — and T-121 flagged it openly in a docstring
+rather than hiding it, which is why it is a follow-up and not a defect.
+
+It is still the wrong shape. The moment chunking becomes anything but `ceil(span / L)` — a vertex budget, a
+key-station-aligned split, a per-surface difference — the client pages too few chunks and **silently renders
+a truncated corridor**. That failure looks like the data ending early, not like a bug, which is the worst
+kind to ship.
+
+The real gap is in T-120's API, which I designed: `chunk_index: int | None` gives "one chunk with blobs" or
+"all chunks with all blobs" (24.62 MB), and no way to ask the cheap question "how many chunks, and where?"
+
+### Deliverables
+
+| Path | Action |
+|---|---|
+| `backend/src/coypu_builder/protocol/messages.py` | add a metadata-only mode to `AlignmentTrackMeshParams` |
+| `backend/src/coypu_builder/server/handlers.py` | honour it — return `chunks`, emit no blobs |
+| `docs/protocol/ipc.md` | regenerate |
+| `docs/data-contracts/track-mesh.md` | document the two-step fetch as the intended pattern |
+| `backend/tests/test_track_mesh.py` | assert the metadata call returns every chunk and zero blobs |
+| `client/scene/track/track_corridor.gd` | drop `CHUNK_LENGTH_M`-based counting; use the returned list |
+| `client/core/session.gd` | cache the chunk list alongside the chunk pages |
+| `client/tests/integration/test_track_corridor.gd` | assert the count comes from the backend |
+
+### Contract
+
+Add `metadata_only: bool = False` to `AlignmentTrackMeshParams`. When true the handler bakes (or reads its
+cache), fills `chunks` with every `TrackMeshChunkInfo`, and emits **no blobs** — a response of a few KB.
+Keep `chunk_index: None` meaning "all chunks with blobs"; do not change existing behaviour.
+
+If baking the whole corridor just to count chunks proves slow, say so with a measurement rather than adding
+a cache — T-120 measured the full bake at 0.147 s, so this is very likely a non-issue.
+
+Client side: `build()` calls once with `metadata_only: true`, then iterates the returned `chunks` by their
+own `chunk_index`. `CHUNK_LENGTH_M` stays only as the value **passed to** the backend, never as the basis
+for a count. The client must not contain a second expression of how chunking works.
+
+### Acceptance
+
+1. The metadata-only response carries every chunk's info and zero blobs; its size is under 64 KB, asserted.
+2. `TrackCorridor` contains no arithmetic deriving a chunk count. The count comes from the response length.
+3. The corridor still renders complete: 73 chunks, 440,448 vertices, 30,333 sleepers, unchanged.
+4. A test proves truncation is now impossible: stub or vary the backend's chunking so the naive
+   `ceil(span / 250)` would give the wrong answer, and confirm the client still fetches every chunk.
+5. `gen_protocol_docs.py --check` exits 0 with the regenerated docs committed.
+6. Both suites green on Windows and on Linux CI: 143 pytest, 70 gdUnit4 cases.
+
+### Report back
+
+State: the metadata response size; confirmation that no chunk-count arithmetic remains in the client; and
+how you proved truncation cannot recur.

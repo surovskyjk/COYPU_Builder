@@ -36,7 +36,7 @@ Read before starting: `docs/adr/0002-client-language.md` (XR is a reserved escap
 | `client/cameras/cab_camera.gd` | new — XR-ready rig |
 | `client/cameras/camera_rig.gd` | new — the shared base |
 | `client/scene/main.gd` | replace the temporary camera with `CameraManager` |
-| `client/scene/main.tscn` | remove the temporary `Camera3D` |
+| `client/scene/main.tscn` | remove the temporary `Camera3D`; fix the lighting (F19 below) |
 | `client/core/event_bus.gd` | add `camera_changed(mode)` |
 | `client/tests/unit/test_camera_rigs.gd` | new |
 | `client/tests/integration/test_camera_follow.gd` | new — headless, follows a real run |
@@ -100,6 +100,22 @@ positions are already base-point-relative** — nothing here calls `Origin.to_go
 camera's `(E, N, H)` is the one legitimate use of `Origin.from_godot`.
 
 Input bindings are defined in `project.godot`'s input map, not hard-coded scancodes, so M4 can rebind them.
+
+### F19 — make the scene legible
+
+`main.tscn` sets `ambient_light_source = 3` (`AMBIENT_SOURCE_SKY`) alongside `background_mode = 1`
+(`BG_COLOR`) with no `Sky` resource in the scene, so the `ambient_light_color` and
+`ambient_light_energy = 0.6` authored beside it are inert — the corridor is lit by the directional light
+alone and renders nearly black. Verify that reading, then fix it: either switch to `AMBIENT_SOURCE_COLOR`
+(2) so the authored values apply, or give the environment a real procedural sky and keep the sky source.
+
+This is in scope here because T-124 is the task that closes M2, and M2's exit criteria are judged by
+looking at the thing. A demo nobody can see is not a demo. Keep it to environment and lighting — no
+post-processing, no tone-mapping tuning, no materials work; T-144 owns view modes.
+
+While you are there: the `Ground` plane is 4000 m square at the origin, so it vanishes from view along an
+18 km corridor. Either scale it to the corridor's extent or drop it — a floating track over a void reads as
+broken, and M3's terrain will replace it regardless.
 
 ## Invariants
 

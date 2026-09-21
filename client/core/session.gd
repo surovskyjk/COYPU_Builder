@@ -2,7 +2,8 @@ extends Node
 ## Autoload `Session`: the client's read-only mirror of backend document state (ADR 0007 — the client
 ## interpolates baked tables and computes no geometry of its own). T-103 populates project identity and
 ## alignment summaries from `project.get`/`project.new`/`import.landxml`; T-115 adds the alignment/run
-## table caches, the vehicle catalogue, the entity registry and layer state.
+## table caches, the vehicle catalogue, the entity registry and layer state; T-121 adds the
+## `alignment.track_mesh` page cache [TrackCorridor] pages through.
 ##
 ## Every `fetch_*` coroutine resolves even on `err` — returning `null`/`false` and emitting
 ## [signal EventBus.backend_error] — so no caller can hang waiting on a dead backend. Table caching is by
@@ -19,6 +20,10 @@ var _catalogue: Array[Dictionary] = []
 var _alignment_tables: Dictionary = {}
 ## run_id -> {"dt": float, "table": RunTable}
 var _run_tables: Dictionary = {}
+
+## alignment_id -> {page_key (int; a real chunk_index, or -1 for "all chunks") -> {"chunk_length_m": float,
+## "spacing_m": float, "envelope": IpcEnvelope}}
+var _track_mesh_pages: Dictionary = {}
 
 var _entities := EntityRegistry.new()
 var _layers := LayerState.new()
@@ -137,6 +142,38 @@ func fetch_run_table(run_id: String, dt: float = 0.05) -> RunTable:
 	_run_tables[run_id] = {"dt": dt, "table": table}
 	EventBus.run_table_ready.emit(run_id)
 	return table
+
+
+## Coroutine. Fetches (or returns the cached) `alignment.track_mesh` page for `alignment_id`.
+## `chunk_index` selects one chunk's three surfaces; `null` requests every chunk in a single response and
+## must only be used for a short alignment -- [TrackCorridor] never passes `null` for a real corridor,
+## since a long one's all-chunks response can exceed
+## `IpcWebSocketClient.INBOUND_BUFFER_SIZE` (see F17 in docs/tasks/task_121_client_track_scene.md and
+## docs/data-contracts/track-mesh.md). Resolves to `null` and emits [signal EventBus.backend_error] on
+## failure rather than hanging. Returns the raw envelope: `result.chunks` carries the per-(chunk_index,
+## surface) metadata, `blobs` the geometry, named per docs/data-contracts/track-mesh.md.
+func fetch_track_mesh(
+	alignment_id: String, chunk_index: Variant = null, chunk_length_m: float = 250.0, spacing_m: float = 1.0
+) -> IpcEnvelope:
+	var page_key: int = chunk_index if chunk_index != null else -1
+	var pages: Dictionary = _track_mesh_pages.get(alignment_id, {})
+	if pages.has(page_key):
+		var cached: Dictionary = pages[page_key]
+		if cached["chunk_length_m"] == chunk_length_m and cached["spacing_m"] == spacing_m:
+			return cached["envelope"]
+
+	var params := {"alignment_id": alignment_id, "chunk_length_m": chunk_length_m, "spacing_m": spacing_m}
+	if chunk_index != null:
+		params["chunk_index"] = chunk_index
+
+	var envelope := await Backend.request("alignment.track_mesh", params)
+	if envelope.type != "res":
+		EventBus.backend_error.emit(envelope.error.get("code", "E_INTERNAL"), envelope.error.get("message", ""))
+		return null
+
+	pages[page_key] = {"chunk_length_m": chunk_length_m, "spacing_m": spacing_m, "envelope": envelope}
+	_track_mesh_pages[alignment_id] = pages
+	return envelope
 
 
 ## Coroutine. Replaces [method vehicle_catalogue] from `catalogue.vehicles`. Leaves the previous

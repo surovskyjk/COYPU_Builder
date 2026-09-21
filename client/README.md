@@ -81,6 +81,37 @@ nothing else in the client computes an alignment, evaluates a clothoid or recomp
 Positions and rotations on the wire are already base-point-relative and in Godot axes (ADR 0004) — none of
 the above ever routes them through `Origin`, which would double-apply the mapping.
 
+## Track scene (`scene/track/`)
+
+T-121: the first geometry the client actually renders — two swept rails plus a ballast prism per chunk
+(T-120's `alignment.track_mesh`) and one `MultiMesh` sleeper field per chunk, placed by the client itself
+since per-instance placement is evaluation (ADR 0007).
+
+- **`TrackCorridor`** (`track_corridor.gd`) — owns every chunk of one alignment. `build(alignment_id,
+  table)` pages through `alignment.track_mesh` by `chunk_index` — **never** `chunk_index: null`: the full
+  Kralupy corridor's all-chunks response is 24.62 MB against `IpcWebSocketClient.INBOUND_BUFFER_SIZE`
+  (16 MiB), one frame the client cannot receive (F17). The number of pages is computed client-side from
+  the already-baked `AlignmentTable`'s station bounds with the same `ceil(span / chunk_length_m)` the
+  backend uses, so it never has to probe past the last chunk. Each page's three surfaces
+  (`TrackChunk`) plus its `SleeperField` share one wrapper `Node3D` so `update_lod(camera_position)` can
+  hide a whole chunk (beyond `CHUNK_LOD_FAR_M`) or just its sleeper field (beyond `SLEEPER_LOD_NEAR_M`) in
+  one write — distance-based visibility, not decimation; T-120 emits a single detail level.
+  `set_visible_layer` (self-wired to `EventBus.layers_changed` / `LayerState`'s `"track"` layer) toggles
+  the whole corridor.
+- **`TrackChunk`** (`track_chunk.gd`) — one `(chunk_index, surface)` mesh: a `Node3D` wrapping a child
+  `MeshInstance3D` built from the matching `vertices_<i>_<surface>`/`normals_<i>_<surface>`/
+  `uvs_<i>_<surface>`/`indices_<i>_<surface>` blobs via `surface_from_arrays`. **The tile origin goes on
+  this node's own `position`; the vertices go into the mesh unchanged** — that is the whole of ADR 0004 on
+  this side, and folding the origin into the vertices (or the wrapper it sits under) would reintroduce
+  exactly the float32 shimmer tile-local rendering exists to prevent.
+- **`SleeperField`** (`sleeper_field.gd`) — a `MultiMeshInstance3D`; `populate()` places one box instance
+  per station across a chunk's span, transform taken straight from `AlignmentTable.sample()` so cant roll
+  and gradient pitch come along automatically, offset down the frame's own up axis so the sleeper top
+  meets the rail foot. Tile-local exactly like `TrackChunk`: instance positions have the field's own
+  `tile_origin` subtracted before `set_instance_transform`, never left in.
+- **`TrackMaterials`** (`track_materials.gd`) — three cached placeholder `StandardMaterial3D`s (rail,
+  sleeper, ballast), distinguishable by albedo/roughness only. T-144's view modes replace these.
+
 ## Launch modes
 
 - **Spawn mode** (no `--backend-url`): `Backend` locates `uv`, spawns
