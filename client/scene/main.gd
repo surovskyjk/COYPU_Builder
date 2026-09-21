@@ -5,6 +5,12 @@ extends Node3D
 ##
 ## T-121 adds exactly one thing on top of that: building [TrackCorridor] for the first alignment Session
 ## knows about and driving its LOD from this scene's (still temporary) free-look camera every frame.
+##
+## T-123 adds one more: once a kinematics run is available (the `.coypu` import path -- a bare LandXML
+## import carries no run), it fetches the run's trainset, builds a [TrainsetNode] and drives it with a
+## [PlaybackController] from a paused [TimelineState]. Temporary keyboard bindings stand in for the
+## timeline UI (T-141): Space toggles play/pause, Home/End seek to the run's start/end, `[`/`]` halve or
+## double the rate.
 
 const _LOOK_SPEED := 0.005
 const _MOVE_SPEED := 12.0
@@ -21,6 +27,11 @@ var _pitch := 0.0
 var _corridor: TrackCorridor
 var _corridor_alignment_id := ""
 
+var _timeline: TimelineState
+var _playback: PlaybackController
+var _trainset_node: TrainsetNode
+var _playback_wired := false
+
 
 func _ready() -> void:
 	var args := CliArgs.from_cmdline()
@@ -34,6 +45,7 @@ func _ready() -> void:
 	EventBus.project_changed.connect(_refresh_status)
 	EventBus.alignments_changed.connect(_refresh_status)
 	EventBus.alignments_changed.connect(_on_alignments_changed)
+	EventBus.runs_changed.connect(_on_runs_changed)
 
 	_corridor = TrackCorridor.new()
 	add_child(_corridor)
@@ -56,14 +68,21 @@ func _on_backend_state_changed(state: Backend.State) -> void:
 
 
 ## Only feature work this bootstrap scene is allowed: when `--project` names a `.xml` file, open a new
-## project and import it so the overlay has real alignment summaries to show; otherwise just mirror
-## whatever project the backend already has open (there may be none yet).
+## project and import it so the overlay has real alignment summaries to show; a `.coypu` archive additionally
+## carries kinematics runs (T-123 needs one to wire playback), so it goes through `Session.import_coypu`
+## instead. Otherwise just mirror whatever project the backend already has open (there may be none yet).
 func _bootstrap_session() -> void:
-	if _project_path.to_lower().ends_with(".xml"):
+	var lower_path := _project_path.to_lower()
+	if lower_path.ends_with(".xml"):
 		await Backend.request("project.new", {})
 		var imported := await Backend.request("import.landxml", {"path": _project_path})
 		if imported.type != "res":
 			push_error("main: import.landxml failed: %s" % str(imported.error))
+	elif lower_path.ends_with(".coypu"):
+		await Backend.request("project.new", {})
+		var imported := await Session.import_coypu(_project_path)
+		if not imported:
+			push_error("main: import.coypu failed for '%s'" % _project_path)
 	var got := await Backend.request("project.get", {})
 	if got.type == "res":
 		Session.set_project_info(got.result)
@@ -89,6 +108,60 @@ func _build_track_corridor(alignment_id: String) -> void:
 	if table == null:
 		return
 	await _corridor.build(alignment_id, table)
+
+
+## Wires the first run Session knows about, once (T-123) -- `import_coypu`'s `RunSummary` carries the
+## `trainset_id` `handle_import_coypu` created for it, so no separate `trainset.create` call is needed.
+func _on_runs_changed() -> void:
+	if _playback_wired:
+		return
+	var runs := Session.runs()
+	if runs.is_empty():
+		return
+	_playback_wired = true
+	_wire_playback(runs[0])
+
+
+func _wire_playback(run_summary: Dictionary) -> void:
+	var alignment_id: String = run_summary.get("alignment_id", "")
+	var run_id: String = run_summary.get("run_id", "")
+	var trainset_id: String = run_summary.get("trainset_id", "")
+	if alignment_id.is_empty() or run_id.is_empty() or trainset_id.is_empty():
+		return
+
+	var table := await Session.fetch_alignment_table(alignment_id)
+	var run := await Session.fetch_run_table(run_id)
+	var trainset_dto: Variant = await Session.fetch_trainset(trainset_id)
+	if table == null or run == null or trainset_dto == null:
+		return
+
+	_trainset_node = TrainsetNode.build(trainset_dto as Dictionary)
+	add_child(_trainset_node)
+
+	_timeline = TimelineState.new()
+	_playback = PlaybackController.new()
+	add_child(_playback)
+	_playback.bind(table, run, _trainset_node, _timeline)
+	_timeline.pause()
+
+
+func _handle_playback_key(keycode: Key) -> void:
+	if _timeline == null:
+		return
+	match keycode:
+		KEY_SPACE:
+			if _timeline.is_playing():
+				_timeline.pause()
+			else:
+				_timeline.play()
+		KEY_HOME:
+			_timeline.seek(0.0)
+		KEY_END:
+			_timeline.seek(_timeline.duration())
+		KEY_BRACKETLEFT:
+			_timeline.set_rate(_timeline.rate() * 0.5)
+		KEY_BRACKETRIGHT:
+			_timeline.set_rate(_timeline.rate() * 2.0)
 
 
 func _refresh_status() -> void:
@@ -121,6 +194,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_yaw -= event.relative.x * _LOOK_SPEED
 		_pitch = clampf(_pitch - event.relative.y * _LOOK_SPEED, -1.5, 1.5)
 		_camera.rotation = Vector3(_pitch, _yaw, 0.0)
+	elif event is InputEventKey and event.pressed and not event.echo:
+		_handle_playback_key(event.keycode)
 
 
 func _process(delta: float) -> void:

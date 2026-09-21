@@ -14,3 +14,5 @@ signal catalogue_ready()
 signal trainset_ready(trainset_id: String)
 signal layers_changed()
 signal track_mesh_ready(alignment_id: String)
+signal playback_state_changed()                   # PlaybackController: TimelineState.is_playing() flipped
+signal playback_time_changed(t: float)             # PlaybackController: TimelineState.time() changed

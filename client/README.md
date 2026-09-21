@@ -141,6 +141,38 @@ cylinders sized from its `CarSpecDTO`; `CarSpec.mesh` stays `null` until Phase 2
   greys cached once. `gauge_mm` is not a `CarSpecDTO` field (only `VehicleSpecDTO`/`TrainsetDTO` carry it);
   a spec missing it falls back to `DEFAULT_GAUGE_MM` so every function here stays usable standalone.
 
+## Playback (`playback/`)
+
+T-123: evaluates a trainset's pose at 60 Hz from baked tables alone (ADR 0007 — nothing here issues an
+`_process`-path `Backend.request()`, and the backend's `domain/kinematics/trainset.py` is a golden generator,
+never a runtime dependency). `docs/data-contracts/trainset-chain.md` is the algorithm's specification;
+`shared/golden/trainset_chain.json` is the numeric reference both sides are pinned to.
+
+- **`TimelineState`** (`timeline_state.gd`) — pure playback clock: time, rate (`0.25`–`16.0`×), loop,
+  play/pause, one `changed` signal fired on every mutation. Knows nothing about alignments, trainsets or the
+  scene tree, so it is unit-testable standalone; the timeline UI (T-141) will read/drive it directly, and for
+  now `scene/main.gd` stands in with temporary keyboard bindings.
+- **`TrainsetKinematics`** (`trainset_kinematics.gd`) — the chain itself: `pose(table, trainset,
+  station_lead, direction, out_poses)` lays out every car's front/rear face and bogie pivots by station
+  arithmetic (never chord distance), looks up each pivot's frame via `AlignmentTable.sample`, and chords the
+  body rigidly between its two bogies rather than following the tangent at its own midpoint — a car visibly
+  cuts across a curve the way a real vehicle does. `forward` is the pivot-to-pivot chord with **no** extra
+  multiplication by `direction` (T-112's F11 defect: the sign is already carried by which pivot lays out as
+  lead vs. trail); `roll` is the mean of the two pivots' own rolls; `up` is the normalised mean of their `up`
+  vectors, Gram-Schmidt'd against `forward` **after** normalising, in that exact order, since floating-point
+  results depend on it, not just the closed-form math. `out_poses` is reused across frames — pre-size it once
+  at bind time — so the only per-call allocation left on this path is `AlignmentTable.sample`'s own
+  `FrameSample`, outside this file's control. Returns whether any pivot needed clamping into
+  `[station_start, station_end]` (F7: COYPU's kinematics grid can run past the alignment's own end).
+- **`PlaybackController`** (`playback_controller.gd`) — a `Node` that binds one `TrainsetNode` to one
+  `TimelineState`/`RunTable`. `_process` advances the timeline, reads the lead station off the run table's
+  own time axis (never re-integrates speed — the backend already did that, stops included), poses the
+  consist and writes the result straight into the `Car` nodes; no RPC and no `await` on this path. Reads the
+  bound `TrainsetNode`'s DTO back out of `Session.trainset(trainset_node.trainset_id())`, since `TrainsetNode`
+  itself keeps no reference to the dictionary it was assembled from. Re-emits `TimelineState.changed` as
+  `EventBus.playback_time_changed(t)` (every tick) and `EventBus.playback_state_changed()` (only when
+  play/pause actually flips).
+
 ## Launch modes
 
 - **Spawn mode** (no `--backend-url`): `Backend` locates `uv`, spawns
