@@ -18,6 +18,10 @@ against, and its tram block is the part that proves your cant handling.
 
 - T-115: `AlignmentTable.sample()`/`position_at()`, `RunTable.station_at()`/`speed_at()`, `GoldenLoader`.
 - T-122: `TrainsetNode`, `Car.apply_pose(body, front, rear)`, all three sub-nodes posed in global space.
+  **The body node's origin is at the rail head, not at the box centre** — T-122 baked
+  `floor_height_m + height_m/2` into the body mesh's vertices precisely because `apply_pose` overwrites the
+  node transform wholesale each frame and would wipe a build-time offset. So `body_xform` is the chain's
+  body origin unmodified: **add no vertical offset of your own**, or the car floats by half its height.
 - T-112: `docs/data-contracts/trainset-chain.md` and `shared/golden/trainset_chain.json`, which now carries
   a nine-sample Kralupy block (all rolls zero) and a five-sample `tram_block` with real cant ramps.
 - `client/playback/` is an empty placeholder.

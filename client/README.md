@@ -112,6 +112,35 @@ since per-instance placement is evaluation (ADR 0007).
 - **`TrackMaterials`** (`track_materials.gd`) — three cached placeholder `StandardMaterial3D`s (rail,
   sleeper, ballast), distinguishable by albedo/roughness only. T-144's view modes replace these.
 
+## Vehicle scene (`scene/vehicles/`)
+
+T-122: the procedural consist the trainset chain (T-123) will pose. Phase 1 renders every car as boxes and
+cylinders sized from its `CarSpecDTO`; `CarSpec.mesh` stays `null` until Phase 2's glTF loading.
+
+- **`TrainsetNode`** (`trainset_node.gd`) — an ordered set of `Car`s built from one `TrainsetDTO`.
+  `build(trainset)` only assembles the tree, front to back in wire order; it assigns no world transforms,
+  so every car sits at the scene origin until T-123 poses it frame by frame (assembly and posing are kept
+  separate on purpose). `gauge_mm` lives on the `TrainsetDTO`, not on a `CarSpecDTO` (see `CarMeshBuilder`
+  below), so `build` folds it into a copy of each per-car dictionary before handing it to `Car.from_spec`.
+- **`Car`** (`car.gd`, `car.tscn`) — `CarBody` + `BogieFront` + `BogieRear`, **siblings**, not nested: the
+  body chords rigidly between the two bogies' pivot positions
+  (`docs/data-contracts/trainset-chain.md` step 3), so nesting a bogie under the body would make its pose
+  depend on the body's, inverting the actual relationship. `car.tscn` is the bare node skeleton (no meshes,
+  no logic); `Car.from_spec` fills it in from a `CarSpecDTO` dictionary. `apply_pose(body_xform,
+  front_xform, rear_xform)` is T-123's per-frame entry point — three plain `Transform3D` property writes,
+  nothing allocated.
+- **`Bogie`** (`bogie.gd`) — a frame plus two wheelsets, built onto the `BogieFront`/`BogieRear` nodes
+  `car.tscn` already provides. Follows the track frame exactly once posed (position, orientation and roll
+  are the frame's own values); nothing here ever sets its own transform after `build()`.
+- **`CarMeshBuilder`** (`car_mesh_builder.gd`) — `CarSpecDTO` → `BoxMesh`/`CylinderMesh` primitives and
+  their local offsets. **Vertical datum: the rail head** — `lrs.frames` puts a bogie's origin at the
+  track-plane centre under `RotationPivot.LOW_RAIL`, and the body's origin at the midpoint of its two
+  bogies, so every offset here (body floor height, bogie frame height, wheel centre height) is a local Y
+  measured up from 0.0, never an absolute world height. Body/bogie/wheel get distinct materials so the
+  articulation reads clearly; body colour comes from `CarSpecDTO.color`, bogie/wheel are fixed placeholder
+  greys cached once. `gauge_mm` is not a `CarSpecDTO` field (only `VehicleSpecDTO`/`TrainsetDTO` carry it);
+  a spec missing it falls back to `DEFAULT_GAUGE_MM` so every function here stays usable standalone.
+
 ## Launch modes
 
 - **Spawn mode** (no `--backend-url`): `Backend` locates `uv`, spawns

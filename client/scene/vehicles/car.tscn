@@ -1,0 +1,27 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scene/vehicles/car.gd" id="1_car"]
+[ext_resource type="Script" path="res://scene/vehicles/bogie.gd" id="2_bogie"]
+
+[node name="Car" type="Node3D"]
+script = ExtResource("1_car")
+
+[node name="CarBody" type="MeshInstance3D" parent="."]
+
+[node name="BogieFront" type="Node3D" parent="."]
+script = ExtResource("2_bogie")
+
+[node name="BogieFrame" type="MeshInstance3D" parent="BogieFront"]
+
+[node name="Wheelset0" type="MeshInstance3D" parent="BogieFront"]
+
+[node name="Wheelset1" type="MeshInstance3D" parent="BogieFront"]
+
+[node name="BogieRear" type="Node3D" parent="."]
+script = ExtResource("2_bogie")
+
+[node name="BogieFrame" type="MeshInstance3D" parent="BogieRear"]
+
+[node name="Wheelset0" type="MeshInstance3D" parent="BogieRear"]
+
+[node name="Wheelset1" type="MeshInstance3D" parent="BogieRear"]

@@ -17,7 +17,9 @@ look broken.
 - T-121: `TrackCorridor`, `AlignmentTable`, and `update_lod(camera_position)` waiting for a real camera.
 - T-123: `PlaybackController.lead_station()`, `TimelineState`, a posed `TrainsetNode` whose `Car` nodes carry
   `body()`, `bogie_front()`, `bogie_rear()`.
-- T-122: `CarSpec.floor_height_m` and `height_m`, which locate a driver's eye point.
+- T-122: `CarSpec.floor_height_m` and `height_m`, which locate a driver's eye point. Note the `Car`'s body
+  node origin sits at the **rail head**, not at the box centre — T-122 baked the vertical offset into the
+  mesh vertices — so `floor_height_m + ~1.6 m` measured from that transform is already the right eye height.
 - T-103: `main.tscn` with its temporary `Camera3D` and status overlay — **remove the camera here**; the
   overlay stays until M4.
 - `client/cameras/` is an empty placeholder.

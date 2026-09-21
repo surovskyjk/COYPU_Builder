@@ -3,7 +3,8 @@ extends Node
 ## interpolates baked tables and computes no geometry of its own). T-103 populates project identity and
 ## alignment summaries from `project.get`/`project.new`/`import.landxml`; T-115 adds the alignment/run
 ## table caches, the vehicle catalogue, the entity registry and layer state; T-121 adds the
-## `alignment.track_mesh` page cache [TrackCorridor] pages through.
+## `alignment.track_mesh` page cache [TrackCorridor] pages through; T-122 adds the trainset cache
+## [TrainsetNode] builds from.
 ##
 ## Every `fetch_*` coroutine resolves even on `err` — returning `null`/`false` and emitting
 ## [signal EventBus.backend_error] — so no caller can hang waiting on a dead backend. Table caching is by
@@ -24,6 +25,9 @@ var _run_tables: Dictionary = {}
 ## alignment_id -> {page_key (int; a real chunk_index, or -1 for "all chunks") -> {"chunk_length_m": float,
 ## "spacing_m": float, "envelope": IpcEnvelope}}
 var _track_mesh_pages: Dictionary = {}
+
+## trainset_id -> TrainsetDTO dictionary, as decoded from `trainset.create`/`trainset.get`.
+var _trainsets: Dictionary = {}
 
 var _entities := EntityRegistry.new()
 var _layers := LayerState.new()
@@ -189,6 +193,47 @@ func fetch_catalogue() -> void:
 		if entry is Dictionary:
 			_catalogue.append(entry)
 	EventBus.catalogue_ready.emit()
+
+
+## Cached `TrainsetDTO` dictionary for `trainset_id`, or `null` when it has never been fetched or created.
+## Use [method fetch_trainset] or [method create_trainset] to populate it.
+func trainset(trainset_id: String) -> Variant:
+	return _trainsets.get(trainset_id)
+
+
+## Coroutine. Returns the cached `TrainsetDTO` dictionary for `trainset_id`, fetching it via `trainset.get`
+## on a cache miss. Resolves to `null` and emits [signal EventBus.backend_error] on failure rather than
+## hanging.
+func fetch_trainset(trainset_id: String) -> Variant:
+	if _trainsets.has(trainset_id):
+		return _trainsets[trainset_id]
+
+	var envelope := await Backend.request("trainset.get", {"trainset_id": trainset_id})
+	if envelope.type != "res":
+		EventBus.backend_error.emit(envelope.error.get("code", "E_INTERNAL"), envelope.error.get("message", ""))
+		return null
+
+	_trainsets[trainset_id] = envelope.result
+	EventBus.trainset_ready.emit(trainset_id)
+	return envelope.result
+
+
+## Coroutine. Creates a new trainset from catalogue entry `spec_key` via `trainset.create` (`units` repeats
+## the whole spec back to back; `name` overrides the default), caching and returning the resulting
+## `TrainsetDTO` dictionary. Resolves to `null` and emits [signal EventBus.backend_error] on failure rather
+## than hanging.
+func create_trainset(spec_key: String, units: int = 1, name: String = "") -> Variant:
+	var envelope := await Backend.request(
+		"trainset.create", {"spec_key": spec_key, "units": units, "name": name}
+	)
+	if envelope.type != "res":
+		EventBus.backend_error.emit(envelope.error.get("code", "E_INTERNAL"), envelope.error.get("message", ""))
+		return null
+
+	var trainset_id := str(envelope.result.get("trainset_id", ""))
+	_trainsets[trainset_id] = envelope.result
+	EventBus.trainset_ready.emit(trainset_id)
+	return envelope.result
 
 
 ## Coroutine. Imports a `.coypu` archive (its LandXML alignment(s), kinematics runs and stops) into the
