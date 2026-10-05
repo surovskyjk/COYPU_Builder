@@ -35,7 +35,10 @@ to drive (imports, envelope export, terrain), and client mods need the M4 UI she
    environment or stdin.
 3. **The listener stays local and refuses browsers.** It binds to loopback only and rejects WebSocket
    handshakes that carry a browser `Origin` header. Sessions get scopes later (read, edit, import,
-   file-system write), so an AI client can be granted read-only access.
+   file-system write), so an AI client can be granted read-only access. Every method that writes a file takes
+   an absolute path, refuses a path inside the repository, and never overwrites an existing file unless the
+   caller sets `overwrite`. `alignment.envelope` (T-138) is the first such method. Without these rules, any
+   client holding the token could replace goldens or tool configuration such as `.claude/settings.json`.
 4. *Proposed:* **Backend plugins are Python entry points.** Groups `coypu_builder.readers`,
    `coypu_builder.providers` and `coypu_builder.methods` are discovered at startup. Plugins add readers and
    providers behind the M3/M5 interfaces, and add methods only under a namespaced prefix

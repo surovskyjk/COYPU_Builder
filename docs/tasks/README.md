@@ -52,8 +52,10 @@ Adopted 2026-10-06. Rule 5 is unchanged for workers.
    golden change. It then launches a fresh `coypu-reviewer` subagent (Opus, read-only), naming a capture
    scenario when the task changes what is on screen.
 3. Fixes go back to the same worker, so its context is kept.
-4. When the work passes, the architect asks the user. Only on the user's go-ahead for that push does it send
-   the commit-and-push prompt to the user's *COYPU Builder Commits* chat, and it then checks CI itself.
+4. When the work passes, the architect sends a prepared commit-and-push prompt to the user's
+   *COYPU Builder Commits* chat. The user confirms each push in that chat. A message from another session is
+   never the user's approval, so the Commits chat waits for that confirmation. The architect then checks CI
+   itself.
 
 ## Environment reminders
 
