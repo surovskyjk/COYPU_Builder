@@ -173,6 +173,47 @@ never a runtime dependency). `docs/data-contracts/trainset-chain.md` is the algo
   `EventBus.playback_time_changed(t)` (every tick) and `EventBus.playback_state_changed()` (only when
   play/pause actually flips).
 
+## Cameras (`cameras/`)
+
+T-124: three deliberate ways to watch the railway, replacing T-103's temporary free-look `Camera3D` and
+closing M2. Built entirely in code from `scene/main.gd` (no `.tscn` of their own, same convention as
+`TrackCorridor`) so every rig's transform math is exercisable from a unit test without first adding it to
+a live `SceneTree` -- `CameraRig`/`CameraManager` both build their node structure in `_init()` rather than
+`_ready()` for exactly that reason.
+
+- **`CameraManager`** (`camera_manager.gd`) -- owns the three rigs and is the *only* place that flips a
+  `Camera3D.current` or calls `TrackCorridor.update_lod`, so LOD can never be driven by a stale or inactive
+  viewpoint. Each rig's `update(delta)` is called explicitly from `CameraManager`'s own `_process`, not the
+  rig's own automatic one, keeping the per-frame ordering (rig transform, then the one `update_lod` call
+  reading it) exact and same-frame. Mode-switch input (`camera_mode_orbit`/`camera_mode_wayside`/
+  `camera_mode_cab`, `project.godot`'s input map) is handled here; anything a mode switch didn't consume is
+  forwarded to the active rig alone.
+- **`CameraRig`** (`camera_rig.gd`) -- the shared base: builds the one `Camera3D` child every rig owns
+  (near/far chosen once for a corridor at this scale) and the exponential-smoothing helper
+  (`damp_vector`, frame-rate independent) every mode's own follow/look-at logic uses.
+- **`OrbitCamera`** (`orbit_camera.gd`) -- the default. Pivots about a focus point; mouse-drag rotates,
+  wheel zooms, middle-drag pans, all through `project.godot`'s input map
+  (`camera_orbit_rotate`/`camera_orbit_pan`/`camera_zoom_in`/`camera_zoom_out`), not hard-coded scancodes.
+  Pan/zoom speed scale with distance so the camera stays usable from 5 m to 5 km; pitch is clamped a few
+  degrees short of vertical so `look_at` never degenerates (no gimbal flip). Only the *chase* -- the focus
+  point easing toward the bound consist's lead car -- is damped; the user's own rotate/zoom/pan is applied
+  immediately, so the camera stays responsive rather than lagging behind the mouse.
+- **`WaysideCamera`** (`wayside_camera.gd`) -- a fixed observer beside the track at one station, offset
+  from `AlignmentTable.sample()`'s own `left`/`up` (never world axes) so it stays clear of the corridor
+  through curves and gradients. Its look-at eases onto the lead car as the train passes rather than
+  snapping; the observer position itself is never damped, since it is physically one fixed vantage point
+  until a re-seat picks the next one. Re-seat direction is inferred from the sign of consecutive
+  `PlaybackController.lead_station()` readings, since the controller's contract exposes only that one
+  value -- the station is always read straight from it, never re-derived from a position.
+- **`CabCamera`** (`cab_camera.gd`) -- inside the lead car at the driver's eye point, structured for a
+  Phase 4 XR swap with zero change to the follow logic: `CabCamera` (the parent) is posed from the lead
+  car's whole body transform every frame -- cant roll included, for free -- and `camera()` (the child)
+  carries only a local eye offset (forward to the cab end, laterally toward the driver's side,
+  `floor_height_m + 1.6 m` up) set once per bind. That split -- vehicle-following entirely on the parent,
+  eye offset entirely on the child -- is the whole XR-readiness claim: Phase 4 retargets the parent to
+  `XROrigin3D` and replaces the child with the headset's own pose, with no change to the line that copies
+  the body transform. No OpenXR dependency, XR interface, or `xr_` setting is added now (ADR 0002).
+
 ## Launch modes
 
 - **Spawn mode** (no `--backend-url`): `Backend` locates `uv`, spawns

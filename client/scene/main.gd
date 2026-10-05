@@ -1,31 +1,31 @@
 extends Node3D
-## Deliberately temporary bootstrap scene (T-103): a free-look camera and a status overlay showing
-## backend/session state. M2 replaces the camera (T-124); M4 replaces the overlay (T-140). Do not extend
-## this file's scope — see "Out of scope" in docs/tasks/task_103_client_app_shell.md.
+## Deliberately temporary bootstrap scene (T-103): a status overlay showing backend/session state. M4
+## replaces the overlay (T-140). Do not extend this file's scope -- see "Out of scope" in
+## docs/tasks/task_103_client_app_shell.md.
 ##
 ## T-121 adds exactly one thing on top of that: building [TrackCorridor] for the first alignment Session
-## knows about and driving its LOD from this scene's (still temporary) free-look camera every frame.
+## knows about, once one exists.
 ##
 ## T-123 adds one more: once a kinematics run is available (the `.coypu` import path -- a bare LandXML
 ## import carries no run), it fetches the run's trainset, builds a [TrainsetNode] and drives it with a
 ## [PlaybackController] from a paused [TimelineState]. Temporary keyboard bindings stand in for the
 ## timeline UI (T-141): Space toggles play/pause, Home/End seek to the run's start/end, `[`/`]` halve or
 ## double the rate.
-
-const _LOOK_SPEED := 0.005
-const _MOVE_SPEED := 12.0
-const _MOVE_SPEED_FAST := 40.0
+##
+## T-124 replaces T-103's temporary free-look `Camera3D` with [CameraManager] -- three deliberate ways to
+## watch the railway (orbit/wayside/cab) instead of the throwaway fly-cam. It is built here in code exactly
+## like [TrackCorridor] (no `.tscn` node of its own), wired to the corridor/table and trainset/controller
+## as soon as each becomes available, and owns both the one `Camera3D.current` and the one
+## `TrackCorridor.update_lod` call per frame from here on -- this scene no longer drives either itself.
 
 @onready var _status_label: Label = %StatusLabel
-@onready var _camera: Camera3D = %FreeLookCamera
 
 var _project_path := ""
-var _look_active := false
-var _yaw := 0.0
-var _pitch := 0.0
 
 var _corridor: TrackCorridor
 var _corridor_alignment_id := ""
+
+var _camera_manager: CameraManager
 
 var _timeline: TimelineState
 var _playback: PlaybackController
@@ -37,10 +37,6 @@ func _ready() -> void:
 	var args := CliArgs.from_cmdline()
 	_project_path = args.get("project", "")
 
-	var euler := _camera.rotation
-	_yaw = euler.y
-	_pitch = euler.x
-
 	Backend.state_changed.connect(_on_backend_state_changed)
 	EventBus.project_changed.connect(_refresh_status)
 	EventBus.alignments_changed.connect(_refresh_status)
@@ -50,6 +46,9 @@ func _ready() -> void:
 	_corridor = TrackCorridor.new()
 	add_child(_corridor)
 	Session.layers().define(TrackCorridor.LAYER_ID, "Track")
+
+	_camera_manager = CameraManager.new()
+	add_child(_camera_manager)
 
 	Backend.start()
 	_refresh_status()
@@ -108,6 +107,7 @@ func _build_track_corridor(alignment_id: String) -> void:
 	if table == null:
 		return
 	await _corridor.build(alignment_id, table)
+	_camera_manager.bind_corridor(_corridor, table)
 
 
 ## Wires the first run Session knows about, once (T-123) -- `import_coypu`'s `RunSummary` carries the
@@ -143,6 +143,8 @@ func _wire_playback(run_summary: Dictionary) -> void:
 	add_child(_playback)
 	_playback.bind(table, run, _trainset_node, _timeline)
 	_timeline.pause()
+
+	_camera_manager.bind_subject(_trainset_node, _playback)
 
 
 func _handle_playback_key(keycode: Key) -> void:
@@ -187,36 +189,5 @@ func _refresh_status() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
-		_look_active = event.pressed
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if _look_active else Input.MOUSE_MODE_VISIBLE
-	elif event is InputEventMouseMotion and _look_active:
-		_yaw -= event.relative.x * _LOOK_SPEED
-		_pitch = clampf(_pitch - event.relative.y * _LOOK_SPEED, -1.5, 1.5)
-		_camera.rotation = Vector3(_pitch, _yaw, 0.0)
-	elif event is InputEventKey and event.pressed and not event.echo:
+	if event is InputEventKey and event.pressed and not event.echo:
 		_handle_playback_key(event.keycode)
-
-
-func _process(delta: float) -> void:
-	_corridor.update_lod(_camera.global_position)
-
-	if not _look_active:
-		return
-	var input_dir := Vector3.ZERO
-	if Input.is_key_pressed(KEY_W):
-		input_dir.z -= 1.0
-	if Input.is_key_pressed(KEY_S):
-		input_dir.z += 1.0
-	if Input.is_key_pressed(KEY_A):
-		input_dir.x -= 1.0
-	if Input.is_key_pressed(KEY_D):
-		input_dir.x += 1.0
-	if Input.is_key_pressed(KEY_Q):
-		input_dir.y -= 1.0
-	if Input.is_key_pressed(KEY_E):
-		input_dir.y += 1.0
-	if input_dir == Vector3.ZERO:
-		return
-	var speed := _MOVE_SPEED_FAST if Input.is_key_pressed(KEY_SHIFT) else _MOVE_SPEED
-	_camera.translate(input_dir.normalized() * speed * delta)
