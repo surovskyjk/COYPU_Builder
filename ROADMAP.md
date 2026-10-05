@@ -5,7 +5,7 @@ has (or will have) a self-contained specification in [`docs/tasks/`](docs/tasks/
 
 **Status legend** — `done` · `in progress` · `ready` (spec written, not started) · `planned` (no spec yet)
 
-Last reviewed: 2026-09-21 against `5a2ead7` (master green, four consecutive runs) plus the uncommitted T-123 change set. **The train moves.** M2 is four of five done; T-124 closes it.
+Last reviewed: 2026-10-05 against `0899c35` plus the uncommitted T-124 change set and the prompt-audit edits (F26). **M2 is complete.** M3 is blocked on the DEM/imagery data question (F25).
 
 ---
 
@@ -86,7 +86,7 @@ against `shared/golden/origin_mapping.json` · D1, D2, D4, D5 retired.
 interpolate a frame table and a run table with results pinned to `shared/golden/` · a synthetic tram network
 with a junction exists and passes the same tests as heavy rail · D3, D6 retired.
 
-### P1.M2 — Track in 3D · `ready`
+### P1.M2 — Track in 3D · `done`
 
 *Goal:* the first real demo — a train running on rails.
 
@@ -95,12 +95,18 @@ with a junction exists and passes the same tests as heavy rail · D3, D6 retired
 | T-120 | Backend track mesh baker: rails + ballast prism, tile-local chunking | `done` (2026-09-20, `e8810f7`) | T-110 | [task_120](docs/tasks/task_120_track_mesh_baker.md) |
 | T-121 | Client track scene: chunk instancing, sleeper `MultiMesh`, LOD | `done` (2026-09-21, `2f14f50`) — F18 open | T-115, T-120 | [task_121](docs/tasks/task_121_client_track_scene.md) |
 | T-122 | Client vehicle scene: procedural car from the catalogue spec, consist assembly | `done` (2026-09-21, `5a2ead7`) | T-113, T-115 | [task_122](docs/tasks/task_122_client_vehicle_scene.md) |
-| T-123 | Client playback: transport, scrub, speed, trainset chain evaluation | `done` (2026-09-21, uncommitted) | T-112, T-115, T-122 | [task_123](docs/tasks/task_123_client_playback.md) |
-| T-124 | Cameras: manager, orbit, wayside, XR-ready cab rig | `ready` | T-121, T-123 | [task_124](docs/tasks/task_124_cameras.md) |
+| T-123 | Client playback: transport, scrub, speed, trainset chain evaluation | `done` (2026-09-21, `0899c35`) | T-112, T-115, T-122 | [task_123](docs/tasks/task_123_client_playback.md) |
+| T-124 | Cameras: manager, orbit, wayside, XR-ready cab rig | `done` (2026-09-21, uncommitted) | T-121, T-123 | [task_124](docs/tasks/task_124_cameras.md) |
 
-**Exit criteria.** The Kralupy corridor renders as rails, sleepers and ballast with no vertex shimmer at any
-zoom · a three-car consist plays back along it at a locked 60 fps with bogies on the rails and bodies chording
-the curves · the client chain matches `shared/golden/trainset_chain.json`.
+**Exit criteria — met, with one amended (2026-09-21).** The Kralupy corridor renders as rails, sleepers and
+ballast with no vertex shimmer at any zoom · **a consist** plays back along it at a locked 60 fps in all three
+camera modes, with bogies on the rails and bodies chording the curves · the client chain matches
+`shared/golden/trainset_chain.json`.
+
+The original wording said *three-car* consist. That was my assumption, not something the data produces: the
+Kralupy archive's vehicle is `DMU BR 650 (CD 840)`, a **single-car** RS1 railcar, so `import.coypu` correctly
+yields `car_count() == 1`. Multi-car geometry is proven at catalogue level (T-122, T-123's goldens) but has
+never run end to end through a live import — see F23.
 
 ### P1.M3 — Spatial context · `planned`
 
@@ -165,10 +171,14 @@ ramps, doubling as a visual regression check on the kernel.
 | F15 | `frame_eval.json`'s eight stations all land on exact table rows (uniform-grid integers or geometric key stations `bake_stations` always includes), so the client's *interpolation* between rows is never pinned — only its lookup. Measured deviations were at the float32 noise floor (6.1e-5 m against a 1e-3 budget) because no interpolation error entered the comparison | T-115 | Add off-row stations with backend-computed truth when a later task next regenerates the golden. Not urgent; T-121 and T-123 will exercise interpolation visually |
 | F16 | `RunTable` station error against its golden is 7.99e-4 m — **80% of the 1e-3 budget** — from float32 ULP at Kralupy's ~18 km stations. Not algorithmic, but the margin scales with corridor length | T-115 | A corridor much longer than 18 km will breach it. Revisit the budget, or carry station as float64, if M3 brings longer alignments |
 | F17 | T-120's full-corridor `alignment.track_mesh` payload is **24.62 MB**, but `IpcWebSocketClient.INBOUND_BUFFER_SIZE` is **16 MiB (16.78 MB)** — one `chunk_index: null` call produces a frame the client cannot receive. My T-120 spec set an abstract ~32 MB flag threshold without checking the limit already in the codebase | T-120 review | **Resolved in spec.** T-121 now must page by `chunk_index` (~337 KB per chunk) and assert no response exceeds 8 MB. `INBOUND_BUFFER_SIZE` stays 16 MiB — paging is the designed path and is what M3's terrain streaming needs anyway |
+| F26 | Prompt audit 2026-09-23 (`/claude-api prompt-audit`, judged against Claude Sonnet 5, the worker model). Applied: `CLAUDE.md` uv fallback now names the Packages path that exists, and its lint line matches CI (`ruff check . ../tools`, `ruff format --check . ../tools`); the contract and Deliverables rules in `CLAUDE.md` and `docs/tasks/README.md` now say *make the smallest change the acceptance criteria require and report it first*, matching six deviations the reviews endorsed (T-101, T-110 ×2, T-112, T-113, T-124) instead of the old *stop* / *touch only*; the F18 follow-up drops its stale absolute test counts and history asides and gains a Verification block with the backend lint gate. **Template notes for M3/M4 specs:** reserve bold for instructions workers have actually got wrong; state current rules without correction history or F-number archaeology inside Contracts; make every Out-of-scope entry name the task that owns the work; never put absolute test counts in acceptance criteria — use "no previously passing test removed, skipped or weakened" | architect | **Applied.** Memory corrected too (stale Phase 0 status, and a claim that a vendor fixture was once in the tree, which git history disproves). One recommendation open: replace the commit-only chats with a `tools/commit_task.ps1` script plus a verbatim commit message — unspecified tooling task |
+| F25 | **M3 is blocked on data.** Scope decision 2 builds the GIS pipeline against local GeoTIFF/ortho files first, but no such file exists in or near the repo, and `.tif`/`.tiff` are git-ignored by the privacy rules so a fixture cannot be committed. T-130 cannot be specified until it is known what DEM and imagery are actually available for the Kralupy corridor and where they will live | architect, 2026-09-21 | **Open — needs the user's answer before M3 specs are written** |
+| F23 | The live `.coypu` demo path produces a **one-car** consist, because the Kralupy archive's vehicle (`DMU BR 650 (CD 840)`) is a single RS1 railcar in the catalogue. Inter-car geometry — coupling gaps, car-to-car spacing, the body chord across a coupled pair — has therefore never been exercised end to end against a live backend, only in catalogue-level tests and the golden | T-124 review | **Open.** `trainset.create(spec_key, units=3)` already exists; fold a multi-unit consist into T-141 or T-143 where consist selection naturally lives |
+| F24 | The synthetic tram network is a Python test fixture with **no export path the client can reach** — `grep` finds no tram usage anywhere under `client/`. Several acceptance criteria across T-121, T-123 and T-124 asked for verification on the tram alignment; each was satisfied with a synthetic unit test instead, correctly flagged each time. The client has never loaded a 1000 mm-gauge canted alignment | T-124 review (accumulated since T-110) | **Open.** Export `tram_loop.py` to a LandXML file the client can `import.landxml`. Blocks nothing in Phase 1; blocks tram authoring in Phase 2 |
 | F21 | `shared/golden/trainset_chain.json` carries each pivot's station and position but **not its orientation**, so the client's bogie *basis* is not pinned cross-language. T-123 filled the gap by computing orientations once from `domain.lrs.frames()` and embedding them as literal fixtures in its own test — correct values, but self-generated, so a wrong bogie basis would still pass | T-123 review | **Open.** Add pivot `godot_quaternion_xyzw` to both golden blocks next time `make_golden.py` is touched. Until then the bogie basis is unpinned across the language boundary |
 | F22 | The 1e-5 quaternion-component budget in T-123's criterion 1 is tight for a float32 client reproducing a float64 reference through normalize → Gram-Schmidt → basis → quaternion. 26 of 27 car-samples fit; the clamped end-of-run car 0 measured 1.9e-5. Inspecting the golden, that car's chord is compressed to 6.5 m by clamping (against 17.5 m for cars 1 and 2) but is nowhere near degenerate, so this is ordinary float32 accumulation rather than an ill-conditioned sample — the budget was simply optimistic | T-123 review | Accept the scoped 3e-5 tolerance. Use **3e-5** for quaternion components in future client-vs-golden criteria rather than treating this as an anomaly |
 | F20 | `Car.apply_pose` replaces the body and bogie transforms wholesale each frame, so a build-time `CarBody.position` offset would be silently wiped on the first posed frame — leaving every car centred on the rail head, i.e. uniformly half-buried, which reads as deliberate. T-122 caught this with its own tests and baked `floor_height_m + height_m/2` into the body mesh's vertices instead | T-122 | **Closed by design.** The body node's origin is now the rail head; noted in task_123 and task_124 so neither re-adds a vertical offset |
-| F19 | `main.tscn` sets `ambient_light_source = 3` (`AMBIENT_SOURCE_SKY`) while `background_mode = 1` (`BG_COLOR`) and **no `Sky` resource exists**, so the `ambient_light_color` and `ambient_light_energy = 0.6` that were deliberately authored next to it contribute nothing. The scene is lit by the directional light alone, which is why the first corridor screenshot is nearly black | T-121 screenshot review | **Open** — likely a one-token fix to `AMBIENT_SOURCE_COLOR` (2). Folded into T-124, which closes M2 and owns the demo scene's presentation |
+| F19 | ~~`main.tscn` sets `ambient_light_source = 3` (`AMBIENT_SOURCE_SKY`) while `background_mode = 1` (`BG_COLOR`) and **no `Sky` resource exists**, so the `ambient_light_color` and `ambient_light_energy = 0.6` that were deliberately authored next to it contribute nothing~~ | T-121 screenshot review | **closed by T-124** (in its uncommitted change set): `ambient_light_source = 2`. T-124 also removed the 4 km placeholder ground plane and the free-look camera; M3's terrain replaces the former |
 | F18 | `TrackCorridor.build` derives the chunk count client-side as `ceil(span / 250.0)`, re-implementing the backend's chunking formula. Correct today and openly flagged by T-121, but if chunking ever stops being fixed-length the client pages too few chunks and **silently renders a truncated corridor** — a failure that looks like the data ending early. Root cause is T-120's API, which offers no cheap "how many chunks?" question | T-121 review | **Open** — follow-up in task_121 adds `metadata_only` to `alignment.track_mesh`. Should land before M3 builds a second paged resource on the same pattern |
 | F12 | `_stops_from_coypu` in `server/handlers.py` converts the archive's raw `[station_km, dwell_s, name]` rows into domain `Stop` tuples — format conversion in the wire layer, which `io/` should own. `io/coypu/archive.py` was not in T-114's Deliverables so it stayed in the handler, flagged in a docstring | T-114 | **Open**, low priority. Move to `CoypuProject` as a `stops()` accessor; fold into whichever later task next edits `io/coypu/` |
 | F10 | ~~Every `roll` in `shared/golden/trainset_chain.json` is zero, because the Kralupy fixture's cant block is a placeholder. That golden is the **only** reference T-123's client chain is pinned to, so a client that mishandles mean-roll averaging or the Gram-Schmidt correction would still pass it. T-112 covered the behaviour in Python via the tram fixture, which Godot cannot load~~ | T-112 review | **closed 2026-09-19.** A `tram_block` key adds 5 samples, 6 car-poses with non-zero roll and a max lead/trail divergence of 0.0236 rad; the Kralupy block is byte-unchanged. My criterion 3 was wrong twice over — the fixture has no gradient, and a *constant* gradient would not have broken lead/trail symmetry either. The correction is a no-op wherever curvature and cant are constant; only a **change** between the pivots (cant ramp, clothoid, vertical curve) exercises it, which is what the ramp samples do |
@@ -182,8 +192,9 @@ ramps, doubling as a visual regression check on the kernel.
 
 ## Definition of done — applies to every task
 
-1. `cd backend && uv run ruff check . && uv run ruff format --check . && uv run pytest` is green.
-2. `godot --headless --path client -s addons/gdUnit4/bin/GdUnitCmdTool.gd -a tests` is green (after T-102).
+1. `cd backend && uv run ruff check . ../tools && uv run ruff format --check . ../tools && uv run pytest` is green.
+2. `godot --headless --path client -s addons/gdUnit4/bin/GdUnitCmdTool.gd -a tests --ignoreHeadlessMode` is green,
+   and the latest CI run on `master` is green on all three jobs.
 3. No architecture invariant in `CLAUDE.md` or `docs/adr/` is violated; if one had to change, the ADR is
    updated in the same change and the reason is stated.
 4. Cross-language behaviour is pinned to `shared/golden/*.json`, regenerated only via `tools/make_golden.py`.

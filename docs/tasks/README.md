@@ -13,7 +13,7 @@ edit the roadmap, do not edit other task files, and do not invent scope.
 |---|---|
 | **Context** | Why this exists and which roadmap milestone it serves |
 | **Preconditions** | What already exists in the repository, and which tasks must have landed first |
-| **Deliverables** | Exact file paths to create or modify — nothing outside this list |
+| **Deliverables** | The file paths this task creates or modifies (rule 2 covers when another file must change) |
 | **Contract** | Interfaces, data shapes and semantics that downstream tasks will depend on. Signatures are binding; bodies are the worker's to write |
 | **Invariants** | The `CLAUDE.md` / ADR rules this task is most likely to break, stated explicitly |
 | **Acceptance criteria** | Observable conditions, each one testable |
@@ -23,10 +23,14 @@ edit the roadmap, do not edit other task files, and do not invent scope.
 
 ## Rules that apply to every task
 
-1. **The contract is binding.** Names, signatures and data shapes in the Contract section are how parallel
-   tasks stay compatible. If one is genuinely wrong, stop and say so in the closing summary rather than
-   silently improving it — a unilateral rename breaks a sibling task written against it.
-2. **Stay inside Deliverables.** Touching a file the task does not list is how two parallel workers collide.
+1. **The contract is binding.** Names, signatures and data shapes in the Contract section are what other
+   tasks are written against, so do not rename or reshape them — a sibling task cannot see the change until
+   it breaks. If the contract is wrong (it contradicts its own acceptance criteria, or cannot be implemented
+   as written), make the smallest change that satisfies the acceptance criteria and put it first in the
+   Report back, with the reason.
+2. **Stay inside Deliverables.** Unlisted edits are how two workers running in parallel collide, and how a
+   review misses a change. If the contract or an acceptance criterion can only be met by editing an unlisted
+   file, make the minimal edit and list it in the Report back.
 3. **Golden files are regenerated, never hand-edited.** Use `uv run python ../tools/make_golden.py` from
    `backend/`. A golden value that changes unexpectedly is a finding to report, not a file to overwrite.
 4. **Privacy guard is absolute.** No vendor, infrastructure-manager or otherwise proprietary data, filename

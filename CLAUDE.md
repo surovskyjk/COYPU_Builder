@@ -6,11 +6,11 @@ Guidance for Claude Code when working in this repository.
 
 ```powershell
 # backend (run from backend/)
-uv sync                                    # Python 3.13 venv + dev deps (uv is a winget package; if the
-                                           # current shell lacks it: %LOCALAPPDATA%\Microsoft\WinGet\Links\uv.exe)
+uv sync                                    # Python 3.13 venv + dev deps (uv is a winget package; if the current
+                                           # shell lacks it: %LOCALAPPDATA%\Microsoft\WinGet\Packages\astral-sh.uv_*\uv.exe)
 uv run pytest                              # all tests; golden fixtures live in tests/fixtures
 uv run pytest tests/test_lrs_golden.py -k dense
-uv run ruff check . ; uv run ruff format .
+uv run ruff check . ../tools ; uv run ruff format --check . ../tools   # CI's lint gate; drop --check to apply
 uv run coypu-builder-backend inspect tests/fixtures/kralupy/kralupy_neratovice_092.xml
 uv run python ../tools/make_golden.py      # regenerate shared/golden/*.json (both test suites consume them)
 
@@ -48,9 +48,11 @@ Implementation work is driven by self-contained work orders in `docs/tasks/task_
 `ROADMAP.md`. If the user names a task (e.g. "do T-110" or "implement task_110"), read that file plus
 `docs/tasks/README.md` first and treat both as binding:
 
-- Signatures and data shapes under **Contract** are what parallel tasks are written against — if one is
-  genuinely wrong, stop and say so rather than silently improving it.
-- Touch only the paths under **Deliverables**; anything else risks colliding with a concurrent worker.
+- Signatures and data shapes under **Contract** are what other tasks are written against, so do not rename or
+  reshape them. If the contract is wrong, make the smallest change that satisfies its acceptance criteria and
+  report it first, with the reason.
+- Edit the paths under **Deliverables**. If the contract or an acceptance criterion can only be met by editing
+  an unlisted file, make the minimal edit and list it in the report.
 - Golden files are regenerated with `tools/make_golden.py`, never hand-edited. An unexpected golden change
   is a finding to report.
 - `ROADMAP.md` is maintained by the architect session; workers do not edit it.

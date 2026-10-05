@@ -181,8 +181,8 @@ budget or wants changing.
 
 ## Follow-up F18 — ask the backend how many chunks there are
 
-*Added 2026-09-21 after the T-121 review. Small, spans both sides, and should land before M3 builds a second
-paged resource on the same pattern.*
+*Small, spans backend and client, and should land before M3 builds a second paged resource on the same
+pattern.*
 
 `TrackCorridor.build` currently derives the chunk count client-side:
 
@@ -191,16 +191,15 @@ const CHUNK_LENGTH_M := 250.0
 chunk_count_expected = maxi(1, int(ceil(span / CHUNK_LENGTH_M)))
 ```
 
-This re-implements the backend's chunking formula in the client. It is correct today because both sides use
-fixed-length chunks and the client passes `chunk_length_m` along — and T-121 flagged it openly in a docstring
-rather than hiding it, which is why it is a follow-up and not a defect.
+This re-implements the backend's chunking formula in the client. It is correct today only because both sides
+use fixed-length chunks and the client passes `chunk_length_m` along.
 
 It is still the wrong shape. The moment chunking becomes anything but `ceil(span / L)` — a vertex budget, a
 key-station-aligned split, a per-surface difference — the client pages too few chunks and **silently renders
 a truncated corridor**. That failure looks like the data ending early, not like a bug, which is the worst
 kind to ship.
 
-The real gap is in T-120's API, which I designed: `chunk_index: int | None` gives "one chunk with blobs" or
+The gap is in the `alignment.track_mesh` API: `chunk_index: int | None` gives "one chunk with blobs" or
 "all chunks with all blobs" (24.62 MB), and no way to ask the cheap question "how many chunks, and where?"
 
 ### Deliverables
@@ -237,7 +236,21 @@ for a count. The client must not contain a second expression of how chunking wor
 4. A test proves truncation is now impossible: stub or vary the backend's chunking so the naive
    `ceil(span / 250)` would give the wrong answer, and confirm the client still fetches every chunk.
 5. `gen_protocol_docs.py --check` exits 0 with the regenerated docs committed.
-6. Both suites green on Windows and on Linux CI: 143 pytest, 70 gdUnit4 cases.
+6. Both suites green on Windows and on Linux CI, with no previously passing test removed, skipped or weakened.
+
+### Verification
+
+```bash
+cd backend
+uv run ruff check . ../tools && uv run ruff format --check . ../tools
+uv run pytest -q
+uv run python ../tools/gen_protocol_docs.py --check
+```
+
+```bash
+tools\godot\Godot_v4.7.2-stable_win64_console.exe --headless --path client --editor --quit
+tools\godot\Godot_v4.7.2-stable_win64_console.exe --headless --path client -s addons/gdUnit4/bin/GdUnitCmdTool.gd -a tests --ignoreHeadlessMode
+```
 
 ### Report back
 
