@@ -65,6 +65,9 @@ private/
 *.cpg
 *.prj
 
+# Claude Code machine-local settings (shared agents under .claude/agents stay tracked)
+.claude/settings.local.json
+
 # OS / editors
 Thumbs.db
 .DS_Store
