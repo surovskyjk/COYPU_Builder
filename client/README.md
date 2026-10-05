@@ -90,9 +90,12 @@ since per-instance placement is evaluation (ADR 0007).
 - **`TrackCorridor`** (`track_corridor.gd`) — owns every chunk of one alignment. `build(alignment_id,
   table)` pages through `alignment.track_mesh` by `chunk_index` — **never** `chunk_index: null`: the full
   Kralupy corridor's all-chunks response is 24.62 MB against `IpcWebSocketClient.INBOUND_BUFFER_SIZE`
-  (16 MiB), one frame the client cannot receive (F17). The number of pages is computed client-side from
-  the already-baked `AlignmentTable`'s station bounds with the same `ceil(span / chunk_length_m)` the
-  backend uses, so it never has to probe past the last chunk. Each page's three surfaces
+  (16 MiB), one frame the client cannot receive (F17). How many pages there are is the backend's to say
+  (F18): `build` first calls `Session.fetch_track_mesh_chunks`, which sends `alignment.track_mesh` with
+  `metadata_only: true` and gets back every chunk's info with no blobs (about 36 KB for Kralupy), then pages
+  over the distinct `chunk_index` values it was returned. The client holds no chunk-count formula, so a
+  backend that chunks differently can never leave it with a silently truncated corridor;
+  `CHUNK_LENGTH_M` is only the length requested from the backend. Each page's three surfaces
   (`TrackChunk`) plus its `SleeperField` share one wrapper `Node3D` so `update_lod(camera_position)` can
   hide a whole chunk (beyond `CHUNK_LOD_FAR_M`) or just its sleeper field (beyond `SLEEPER_LOD_NEAR_M`) in
   one write — distance-based visibility, not decimation; T-120 emits a single detail level.

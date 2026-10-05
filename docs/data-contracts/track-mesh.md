@@ -156,6 +156,7 @@ class AlignmentTrackMeshParams(msgspec.Struct, frozen=True):
     chunk_length_m: float = 250.0
     spacing_m: float = 1.0
     chunk_index: int | None = None     # None = all chunks
+    metadata_only: bool = False        # True = every chunk's info, no blobs
 
 class TrackMeshChunkInfo(msgspec.Struct, frozen=True):
     chunk_index: int
@@ -190,6 +191,19 @@ way `alignment.frame_table`'s callers can.
 streaming protocol, per the roadmap's scope decision. It reduces response *size*; `bake_track_mesh` still
 computes the full corridor internally (baking is not cached across calls — out of scope for this task).
 
+### Two-step fetch (F18): ask how many chunks there are, then page
+
+`metadata_only: true` bakes the corridor and returns `chunks` for **every**
+`(chunk_index, surface)` pair with **no blobs** — about 36 KB for the 73-chunk, 219-entry Kralupy corridor
+(0.14 s, the same bake cost as any other call) against 24.62 MB with blobs. `chunk_index` is ignored in this
+mode: the answer to "how many chunks, and where?" is always the whole list.
+
+**This is the intended client pattern.** The backend owns how an alignment is split into chunks (today
+`ceil(span / chunk_length_m)`; tomorrow possibly a vertex budget or key-station-aligned cuts). A client must
+call once with `metadata_only: true`, then page `chunk_index` over the distinct `chunk_index` values it was
+returned. It must never derive a chunk count itself: a client that guesses too few chunks renders a truncated
+corridor that looks like the data ending early. `TrackCorridor.build` does exactly this.
+
 ## What T-121 needs to know
 
 - Build one `MeshInstance3D` (or `ArrayMesh` surface) per `(chunk_index, surface)`, positioned at
@@ -201,6 +215,8 @@ computes the full corridor internally (baking is not cached across calls — out
 - Sleepers are not here. Place them separately from the frame table (`alignment.frame_table`), the same table
   this baker's `frames()` calls draw from, so sleeper spacing and rail geometry agree by construction.
 - No materials, colour or LOD are emitted — geometry and UVs only (out of scope for T-120).
+- Learn the chunk list with one `metadata_only: true` call (see "Two-step fetch" above) and page `chunk_index`
+  over it; do not compute a chunk count client-side.
 - A multi-chunk response is far larger than any other method's — the `websockets` client default frame
   limit is 1 MiB, which an all-chunks-at-once request for anything but a short alignment will exceed. Either
   raise the client's max message size for this method, or page with `chunk_index` as intended; the wire

@@ -477,7 +477,7 @@ def handle_alignment_track_mesh(session: Session, params: dict[str, Any] | None)
         raise ProtocolError(ErrorCode.BAD_PARAMS, f"spacing_m must be > 0, got {req.spacing_m}")
 
     mesh_chunks = bake_track_mesh(entry.alignment, chunk_length_m=req.chunk_length_m, spacing_m=req.spacing_m)
-    if req.chunk_index is not None:
+    if req.chunk_index is not None and not req.metadata_only:
         mesh_chunks = tuple(c for c in mesh_chunks if c.chunk_index == req.chunk_index)
         if not mesh_chunks:
             raise ProtocolError(ErrorCode.NOT_FOUND, f"no chunk with chunk_index {req.chunk_index}")
@@ -502,6 +502,8 @@ def handle_alignment_track_mesh(session: Session, params: dict[str, Any] | None)
                 index_count=len(chunk.indices),
             )
         )
+        if req.metadata_only:
+            continue
         suffix = f"{chunk.chunk_index}_{chunk.surface}"
         blobs[f"vertices_{suffix}"] = chunk.vertices
         blobs[f"normals_{suffix}"] = chunk.normals

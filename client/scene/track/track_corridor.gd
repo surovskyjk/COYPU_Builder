@@ -9,15 +9,18 @@ extends Node3D
 ## **F17**: the full Kralupy corridor's `alignment.track_mesh` response (`chunk_index: null`, all chunks
 ## at once) measures 24.62 MB against `IpcWebSocketClient.INBOUND_BUFFER_SIZE` (16 MiB) -- one frame the
 ## client cannot receive. [method build] therefore never sends `chunk_index: null`; it requests
-## `chunk_index` `0, 1, 2, …` one at a time (~337 KB each for a 250 m chunk), instantiating as each page
-## arrives. The number of pages is computed client-side from the already-fetched [AlignmentTable]'s
-## station bounds with the exact same `ceil((station_end - station_start) / chunk_length_m)` the backend
-## uses (`io/mesh/track.py: _chunk_boundaries`) -- both sides start from the same alignment station bounds
-## (`bake_stations` always includes them exactly), so this never has to probe past the end and treat a
-## normal "no more chunks" as a [signal EventBus.backend_error].
+## `chunk_index` one at a time (~337 KB each for a 250 m chunk), instantiating as each page arrives.
+##
+## **F18**: how many pages there are is the backend's to say, not the client's. [method build] first asks
+## `alignment.track_mesh` with `metadata_only: true` ([method Session.fetch_track_mesh_chunks]) for every
+## chunk's info (a few tens of KB), then pages over the distinct `chunk_index` values it was handed. This
+## file holds no expression of how the backend chunks an alignment (a fixed length today, perhaps a vertex
+## budget or key-station-aligned cuts tomorrow): a client that guessed the count would silently render a
+## truncated corridor, which looks like the data ending early rather than like a bug.
 
 const LAYER_ID := "track"
 
+## The chunk length *requested from* the backend -- never the basis for a chunk count (F18).
 const CHUNK_LENGTH_M := 250.0
 const FRAME_SPACING_M := 1.0
 const SLEEPER_SPACING_M := SleeperField.DEFAULT_SPACING_M
@@ -69,19 +72,24 @@ func sleeper_instance_count() -> int:
 	return total
 
 
-## Coroutine. Replaces any previously built corridor with `alignment_id`'s track mesh, paging by
-## `chunk_index` (see F17 above) and placing one [SleeperField] per chunk from `table`.
-func build(alignment_id: String, table: AlignmentTable) -> void:
+## Coroutine. Replaces any previously built corridor with `alignment_id`'s track mesh: asks the backend for
+## the chunk list (F18), pages each listed chunk by `chunk_index` (see F17 above) and places one
+## [SleeperField] per chunk from `table`. `chunk_length_m` is only the value passed to the backend; the
+## number of chunks built is whatever the backend lists.
+func build(alignment_id: String, table: AlignmentTable, chunk_length_m: float = CHUNK_LENGTH_M) -> void:
 	_clear()
 	_alignment_id = alignment_id
 
-	var span := table.station_end() - table.station_start()
-	var chunk_count_expected := 1
-	if span > 0.0:
-		chunk_count_expected = maxi(1, int(ceil(span / CHUNK_LENGTH_M)))
+	var listed := await Session.fetch_track_mesh_chunks(alignment_id, chunk_length_m, FRAME_SPACING_M)
+	var chunk_indices: Array[int] = []
+	for info: Dictionary in listed:
+		var listed_index := int(info.get("chunk_index", 0))
+		if not chunk_indices.has(listed_index):
+			chunk_indices.append(listed_index)
+	chunk_indices.sort()
 
-	for chunk_index in chunk_count_expected:
-		var envelope := await Session.fetch_track_mesh(alignment_id, chunk_index, CHUNK_LENGTH_M, FRAME_SPACING_M)
+	for chunk_index in chunk_indices:
+		var envelope := await Session.fetch_track_mesh(alignment_id, chunk_index, chunk_length_m, FRAME_SPACING_M)
 		if envelope == null:
 			break
 		_build_chunk_group(envelope, table)

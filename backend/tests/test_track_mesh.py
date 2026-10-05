@@ -259,6 +259,63 @@ async def test_alignment_track_mesh_blobs_match_declared_counts(server_url):
         assert len(single.blobs) == len(SURFACES) * len(BLOB_FIELDS)
 
 
+METADATA_ONLY_BUDGET_BYTES = 64 * 1024  # task_121 F18: "a response of a few KB"
+
+
+async def _metadata_only(ws, request_id: str, alignment_id: str, chunk_length_m: float):
+    """Returns (envelope, tail, raw_frame_size_bytes)."""
+    params = {"alignment_id": alignment_id, "chunk_length_m": chunk_length_m, "metadata_only": True}
+    envelope = Envelope(
+        v=PROTOCOL_VERSION, id=request_id, type="req", method="alignment.track_mesh", params=params
+    )
+    await ws.send(encode_frame(envelope))
+    frame = await ws.recv()
+    response, tail = decode_frame(frame)
+    return response, tail, len(frame)
+
+
+async def test_alignment_track_mesh_metadata_only_lists_every_chunk_with_no_blobs(server_url):
+    async with connect(server_url, max_size=None) as ws:
+        await _call(ws, "1", "session.hello", {"client": "pytest", "client_version": "0"})
+        await _call(ws, "2", "project.new", {})
+        imported, _ = await _call(ws, "3", "import.landxml", {"path": str(KRALUPY_XML)})
+        assert imported.type == "res", imported.error
+        alignment_id = imported.result["alignments"][0]["alignment_id"]
+
+        full, _ = await _call(
+            ws, "4", "alignment.track_mesh", {"alignment_id": alignment_id, "chunk_length_m": 250.0}
+        )
+        assert full.type == "res", full.error
+
+        meta, tail, meta_bytes = await _metadata_only(ws, "5", alignment_id, 250.0)
+        assert meta.type == "res", meta.error
+        assert not meta.blobs
+        assert len(tail) == 0
+        assert meta.result["chunks"] == full.result["chunks"]
+        assert len(meta.result["chunks"]) == len(SURFACES) * len(
+            {c["chunk_index"] for c in meta.result["chunks"]}
+        )
+
+        assert meta_bytes < METADATA_ONLY_BUDGET_BYTES, meta_bytes
+
+        # A different chunk length changes the chunk list: the backend, not the caller, owns the count.
+        coarse, _, _ = await _metadata_only(ws, "6", alignment_id, 1000.0)
+        assert coarse.type == "res", coarse.error
+        fine_ids = {c["chunk_index"] for c in meta.result["chunks"]}
+        coarse_ids = {c["chunk_index"] for c in coarse.result["chunks"]}
+        assert len(coarse_ids) < len(fine_ids)
+        assert coarse_ids == set(range(len(coarse_ids)))
+
+        # chunk_index does not filter a metadata-only response; it always lists every chunk.
+        paged, _ = await _call(
+            ws,
+            "7",
+            "alignment.track_mesh",
+            {"alignment_id": alignment_id, "chunk_length_m": 250.0, "chunk_index": 0, "metadata_only": True},
+        )
+        assert paged.result["chunks"] == meta.result["chunks"]
+
+
 async def test_alignment_track_mesh_error_paths(server_url):
     async with connect(server_url) as ws:
         await _call(ws, "1", "session.hello", {"client": "pytest", "client_version": "0"})

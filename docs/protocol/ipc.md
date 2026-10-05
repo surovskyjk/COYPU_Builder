@@ -234,7 +234,7 @@ Bake a dense, render-ready frame table for one alignment.
 
 ### `alignment.track_mesh`
 
-Bake two swept rails plus one default ballast prism for one alignment, chunked and tile-local (ADR 0004): every vertex is relative to its own chunk's tile_origin, never in absolute project coordinates.
+Bake two swept rails plus one default ballast prism for one alignment, chunked and tile-local (ADR 0004): every vertex is relative to its own chunk's tile_origin, never in absolute project coordinates. `metadata_only` returns every chunk's info and no blobs, so a client can learn the chunk count before paging by `chunk_index`.
 
 **Params**
 
@@ -244,6 +244,7 @@ Bake two swept rails plus one default ballast prism for one alignment, chunked a
 | `chunk_length_m` | `float` | `250.0` |
 | `spacing_m` | `float` | `1.0` |
 | `chunk_index` | `int | None` | `None` |
+| `metadata_only` | `bool` | `False` |
 
 **Result**
 

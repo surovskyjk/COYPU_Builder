@@ -150,6 +150,7 @@ class AlignmentTrackMeshParams(msgspec.Struct, frozen=True):
     chunk_length_m: float = 250.0
     spacing_m: float = 1.0
     chunk_index: int | None = None  # None = all chunks
+    metadata_only: bool = False  # True = every chunk's info, no blobs (the cheap "how many, and where?")
 
 
 class TrackMeshChunkInfo(msgspec.Struct, frozen=True):
@@ -452,7 +453,8 @@ METHODS: tuple[MethodSpec, ...] = (
         summary=(
             "Bake two swept rails plus one default ballast prism for one alignment, chunked and tile-local "
             "(ADR 0004): every vertex is relative to its own chunk's tile_origin, never in absolute "
-            "project coordinates."
+            "project coordinates. `metadata_only` returns every chunk's info and no blobs, so a client can "
+            "learn the chunk count before paging by `chunk_index`."
         ),
         params=AlignmentTrackMeshParams,
         result=AlignmentTrackMeshResult,

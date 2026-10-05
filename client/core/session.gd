@@ -25,6 +25,9 @@ var _run_tables: Dictionary = {}
 ## alignment_id -> {page_key (int; a real chunk_index, or -1 for "all chunks") -> {"chunk_length_m": float,
 ## "spacing_m": float, "envelope": IpcEnvelope}}
 var _track_mesh_pages: Dictionary = {}
+## alignment_id -> {"chunk_length_m": float, "spacing_m": float, "chunks": Array[Dictionary]} -- the
+## metadata-only chunk list (F18), cached alongside the pages it indexes.
+var _track_mesh_chunk_lists: Dictionary = {}
 
 ## trainset_id -> TrainsetDTO dictionary, as decoded from `trainset.create`/`trainset.get`.
 var _trainsets: Dictionary = {}
@@ -178,6 +181,36 @@ func fetch_track_mesh(
 	pages[page_key] = {"chunk_length_m": chunk_length_m, "spacing_m": spacing_m, "envelope": envelope}
 	_track_mesh_pages[alignment_id] = pages
 	return envelope
+
+
+## Coroutine. Fetches (or returns the cached) chunk list for `alignment_id` -- every
+## `TrackMeshChunkInfo` dictionary the backend would produce for these `chunk_length_m`/`spacing_m`, with no
+## blobs (`alignment.track_mesh` with `metadata_only: true`, F18). The backend owns how an alignment is
+## chunked, so this list -- never client-side arithmetic -- is what a caller pages [method fetch_track_mesh]
+## over. Resolves to an empty array and emits [signal EventBus.backend_error] on failure rather than hanging.
+func fetch_track_mesh_chunks(
+	alignment_id: String, chunk_length_m: float = 250.0, spacing_m: float = 1.0
+) -> Array:
+	var cached: Dictionary = _track_mesh_chunk_lists.get(alignment_id, {})
+	if not cached.is_empty() and cached["chunk_length_m"] == chunk_length_m and cached["spacing_m"] == spacing_m:
+		return cached["chunks"]
+
+	var params := {
+		"alignment_id": alignment_id,
+		"chunk_length_m": chunk_length_m,
+		"spacing_m": spacing_m,
+		"metadata_only": true,
+	}
+	var envelope := await Backend.request("alignment.track_mesh", params)
+	if envelope.type != "res":
+		EventBus.backend_error.emit(envelope.error.get("code", "E_INTERNAL"), envelope.error.get("message", ""))
+		return []
+
+	var chunks: Array = envelope.result.get("chunks", [])
+	_track_mesh_chunk_lists[alignment_id] = {
+		"chunk_length_m": chunk_length_m, "spacing_m": spacing_m, "chunks": chunks
+	}
+	return chunks
 
 
 ## Coroutine. Replaces [method vehicle_catalogue] from `catalogue.vehicles`. Leaves the previous
