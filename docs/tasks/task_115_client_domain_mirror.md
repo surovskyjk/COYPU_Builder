@@ -164,7 +164,8 @@ func layers() -> Array[Dictionary]
 ```
 
 `LayerState` is pure state with a change signal; it renders nothing and knows nothing about the scene tree.
-T-142 builds the panel on top of it, and T-121/T-132 subscribe to apply visibility.
+T-142 builds the panel on top of it, and the track (T-121), terrain (T-135) and context (T-155) scenes
+subscribe to apply visibility.
 
 ### `Session` extension
 

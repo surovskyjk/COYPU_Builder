@@ -41,6 +41,20 @@ edit the roadmap, do not edit other task files, and do not invent scope.
 6. **Report honestly.** If part of the task is blocked, finish everything else and say plainly what was left
    and why. A partially-done task reported as done is worse than a blocked one reported as blocked.
 
+## How tasks run
+
+Adopted 2026-10-06. Rule 5 is unchanged for workers.
+
+1. The architect session launches each task as a fresh `coypu-worker` subagent
+   (`.claude/agents/coypu-worker.md`: Sonnet, high effort). The worker's final message is its Report back,
+   and it goes to the architect.
+2. The architect verifies the work independently: it reruns the suites, reads the diff and inspects any
+   golden change. It then launches a fresh `coypu-reviewer` subagent (Opus, read-only), naming a capture
+   scenario when the task changes what is on screen.
+3. Fixes go back to the same worker, so its context is kept.
+4. When the work passes, the architect asks the user. Only on the user's go-ahead for that push does it send
+   the commit-and-push prompt to the user's *COYPU Builder Commits* chat, and it then checks CI itself.
+
 ## Environment reminders
 
 - `uv` may not be on `PATH`; the fallback is `%LOCALAPPDATA%\Microsoft\WinGet\Links\uv.exe`, and failing
