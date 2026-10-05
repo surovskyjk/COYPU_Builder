@@ -168,6 +168,29 @@ class AlignmentTrackMeshResult(msgspec.Struct, frozen=True):
     chunks: tuple[TrackMeshChunkInfo, ...]
 
 
+# --- alignment.envelope ----------------------------------------------------------------------------------
+# Writes a corridor buffer polygon (GeoJSON or Shapefile, by the suffix of `path`) and returns metadata only.
+
+
+class AlignmentEnvelopeParams(msgspec.Struct, frozen=True):
+    path: str  # absolute output file outside the repository; the suffix decides the format
+    buffer_m: float = 250.0
+    alignment_ids: list[str] | None = None  # None = every alignment in the project
+    station_from: float | None = None
+    station_to: float | None = None
+    epsg: int | None = None  # None = 4326 for GeoJSON, the project CRS for Shapefile
+    cap: str = "round"
+    overwrite: bool = False  # True = replace existing output files (every Shapefile part)
+
+
+class AlignmentEnvelopeResult(msgspec.Struct, frozen=True):
+    files: list[str]
+    epsg: int
+    area_m2: float
+    vertex_count: int
+    bounds: list[float]
+
+
 # --- catalogue.* / vehicle DTOs -------------------------------------------------------------------------
 # `VehicleSpec`/`CarSpec`/`VehicleDynamics`/`TractionBand` (domain/model/vehicle.py) flattened into wire
 # Structs -- domain objects never cross the boundary (T-114 DTO discipline).
@@ -490,6 +513,28 @@ METHODS: tuple[MethodSpec, ...] = (
             ),
         ),
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
+    ),
+    MethodSpec(
+        name="alignment.envelope",
+        summary=(
+            "Write the corridor envelope -- a buffer polygon of `buffer_m` half-width around the plan "
+            "centreline of the chosen alignments -- as GeoJSON (.geojson, .json) or Shapefile (.shp), and "
+            "return its metadata. `path` must be absolute and outside the repository, `buffer_m` at most "
+            "5000 m, `epsg` a projected or geographic 2D CRS, and an existing file is only replaced when "
+            "`overwrite` is true. A station range needs exactly one alignment. Requires the backend's "
+            "`gis` extra; without it the call fails with an error that names `uv sync --extra gis`."
+        ),
+        params=AlignmentEnvelopeParams,
+        result=AlignmentEnvelopeResult,
+        errors=(
+            ErrorCode.BAD_PARAMS,
+            ErrorCode.NO_SESSION,
+            ErrorCode.NO_PROJECT,
+            ErrorCode.NOT_FOUND,
+            ErrorCode.EMPTY,
+            ErrorCode.CRS_REQUIRED,
+            ErrorCode.INTERNAL,
+        ),
     ),
     MethodSpec(
         name="run.list",

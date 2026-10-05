@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
-      - run: uv sync
+      - run: uv sync --extra gis
       - run: uv run ruff check . ../tools
       - run: uv run ruff format --check . ../tools
       - run: uv run pytest -q
@@ -36,7 +36,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
-      - run: uv sync
+      - run: uv sync --extra gis
         working-directory: backend
       - uses: chickensoft-games/setup-godot@v2
         with: { version: 4.7.2, use-dotnet: false }

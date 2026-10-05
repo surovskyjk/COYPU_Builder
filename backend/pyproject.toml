@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gis = ["rasterio>=1.4", "OWSLib>=0.32", "shapely>=2.1", "requests>=2.32", "pillow>=11"]
+gis = ["rasterio>=1.4", "OWSLib>=0.32", "shapely>=2.1", "pyshp>=3.1", "requests>=2.32", "pillow>=11"]
 ifc = ["ifcopenshell>=0.8"]
 
 [dependency-groups]

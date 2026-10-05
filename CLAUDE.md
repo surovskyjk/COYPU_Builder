@@ -6,12 +6,14 @@ Guidance for Claude Code when working in this repository.
 
 ```powershell
 # backend (run from backend/)
-uv sync                                    # Python 3.13 venv + dev deps (uv is a winget package; if the current
-                                           # shell lacks it: %LOCALAPPDATA%\Microsoft\WinGet\Packages\astral-sh.uv_*\uv.exe)
+uv sync --extra gis                        # Python 3.13 venv + dev deps + shapely/pyshp/rasterio (uv is a winget
+                                           # package; if the current shell lacks it:
+                                           # %LOCALAPPDATA%\Microsoft\WinGet\Packages\astral-sh.uv_*\uv.exe)
 uv run pytest                              # all tests; golden fixtures live in tests/fixtures
 uv run pytest tests/test_lrs_golden.py -k dense
 uv run ruff check . ../tools ; uv run ruff format --check . ../tools   # CI's lint gate; drop --check to apply
 uv run coypu-builder-backend inspect tests/fixtures/kralupy/kralupy_neratovice_092.xml
+uv run coypu-builder-backend envelope tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 -o D:/COYPU_Builder/Data/Envelopes/kralupy_250m.geojson   # or .shp
 uv run python ../tools/make_golden.py      # regenerate shared/golden/*.json (both test suites consume them)
 
 # client (Godot 4.7.x, standard build)

@@ -264,6 +264,35 @@ Bake two swept rails plus one default ballast prism for one alignment, chunked a
 
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
 
+### `alignment.envelope`
+
+Write the corridor envelope -- a buffer polygon of `buffer_m` half-width around the plan centreline of the chosen alignments -- as GeoJSON (.geojson, .json) or Shapefile (.shp), and return its metadata. `path` must be absolute and outside the repository, `buffer_m` at most 5000 m, `epsg` a projected or geographic 2D CRS, and an existing file is only replaced when `overwrite` is true. A station range needs exactly one alignment. Requires the backend's `gis` extra; without it the call fails with an error that names `uv sync --extra gis`.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `path` | `str` | required |
+| `buffer_m` | `float` | `250.0` |
+| `alignment_ids` | `list[str] | None` | `None` |
+| `station_from` | `float | None` | `None` |
+| `station_to` | `float | None` | `None` |
+| `epsg` | `int | None` | `None` |
+| `cap` | `str` | `'round'` |
+| `overwrite` | `bool` | `False` |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `files` | `list[str]` | required |
+| `epsg` | `int` | required |
+| `area_m2` | `float` | required |
+| `vertex_count` | `int` | required |
+| `bounds` | `list[float]` | required |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`, `E_INTERNAL`
+
 ### `run.list`
 
 List the kinematics runs attached to the current project, without their baked tables.

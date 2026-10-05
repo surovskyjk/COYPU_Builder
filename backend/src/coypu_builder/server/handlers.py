@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import msgspec
 import numpy as np
+from pyproj.exceptions import ProjError
 
 from coypu_builder import PROTOCOL_VERSION, __version__
 from coypu_builder.domain.crs import (
@@ -28,9 +29,19 @@ from coypu_builder.io.catalogue.vehicles import Catalogue, load_catalogue, resol
 from coypu_builder.io.coypu.archive import CoypuProject, read_coypu
 from coypu_builder.io.coypu.kinematics_csv import read_kinematics_csv, read_stops_csv
 from coypu_builder.io.coypu.vehicles import dynamics_from_coypu, merge_dynamics
+from coypu_builder.io.gis.envelope import (
+    EnvelopeOptions,
+    GisExtraMissing,
+    check_overwrite,
+    default_epsg,
+    export_corridor_envelope,
+    validate_output_crs,
+)
 from coypu_builder.io.landxml import LandXmlAlignment, read_landxml, to_alignment
 from coypu_builder.io.mesh.track import bake_track_mesh
 from coypu_builder.protocol.messages import (
+    AlignmentEnvelopeParams,
+    AlignmentEnvelopeResult,
     AlignmentFrameTableParams,
     AlignmentFrameTableResult,
     AlignmentSummary,
@@ -514,6 +525,80 @@ def handle_alignment_track_mesh(session: Session, params: dict[str, Any] | None)
     return msgspec.to_builtins(result), blobs
 
 
+def _repository_root() -> Path | None:
+    """The nearest ancestor of the `coypu_builder` package that holds `.git`; None outside a checkout."""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+def _checked_output_path(raw: str) -> Path:
+    """Envelope output must be an absolute path outside the repository: the server must not be steerable
+    into overwriting tracked files (golden data, editor settings) through a relative or in-tree path."""
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ProtocolError(ErrorCode.BAD_PARAMS, f"path must be absolute, got '{raw}'")
+    root = _repository_root()
+    if root is not None and path.resolve().is_relative_to(root):
+        raise ProtocolError(ErrorCode.BAD_PARAMS, f"path must be outside the repository ({root}): '{raw}'")
+    return path
+
+
+def handle_alignment_envelope(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    project = _require_project(session)
+    req = _convert(params, AlignmentEnvelopeParams)
+    if project.crs is None:
+        raise ProtocolError(ErrorCode.CRS_REQUIRED, "project has no CRS; import an alignment first")
+    if req.alignment_ids is None:
+        entries = list(project.alignments.values())
+        if not entries:
+            raise ProtocolError(ErrorCode.EMPTY, "project has no alignments")
+    else:
+        if not req.alignment_ids:
+            raise ProtocolError(ErrorCode.BAD_PARAMS, "alignment_ids must not be empty")
+        entries = []
+        for alignment_id in req.alignment_ids:
+            entry = project.alignments.get(alignment_id)
+            if entry is None:
+                raise ProtocolError(ErrorCode.NOT_FOUND, f"unknown alignment_id '{alignment_id}'")
+            entries.append(entry)
+    if req.cap not in ("round", "flat"):
+        raise ProtocolError(ErrorCode.BAD_PARAMS, f"cap must be 'round' or 'flat', got '{req.cap}'")
+    out_path = _checked_output_path(req.path)
+    if default_epsg(out_path, project.crs) is None and req.epsg is None:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, "the project CRS has no EPSG code; pass epsg")
+
+    try:
+        if req.epsg is not None:
+            validate_output_crs(req.epsg)
+        check_overwrite(out_path, req.overwrite)
+        options = EnvelopeOptions(
+            buffer_m=req.buffer_m,
+            station_from=req.station_from,
+            station_to=req.station_to,
+            cap="flat" if req.cap == "flat" else "round",
+        )
+        result = export_corridor_envelope(
+            [e.alignment for e in entries], options, project.crs, out_path, req.epsg, overwrite=req.overwrite
+        )
+    except GisExtraMissing as exc:
+        raise ProtocolError(ErrorCode.INTERNAL, str(exc)) from exc
+    except (ValueError, ProjError) as exc:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
+    except OSError as exc:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, f"cannot write {out_path}: {exc}") from exc
+
+    wire = AlignmentEnvelopeResult(
+        files=[str(f) for f in result.files],
+        epsg=result.epsg,
+        area_m2=result.area_m2,
+        vertex_count=result.vertex_count,
+        bounds=list(result.bounds),
+    )
+    return msgspec.to_builtins(wire), {}
+
+
 def handle_run_list(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     summaries = tuple(_run_summary(run_id, entry) for run_id, entry in project.runs.items())
@@ -591,6 +676,7 @@ DISPATCH: dict[str, Handler] = {
     "import.kinematics": handle_import_kinematics,
     "alignment.frame_table": handle_alignment_frame_table,
     "alignment.track_mesh": handle_alignment_track_mesh,
+    "alignment.envelope": handle_alignment_envelope,
     "run.list": handle_run_list,
     "run.get": handle_run_get,
     "catalogue.vehicles": handle_catalogue_vehicles,

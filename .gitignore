@@ -58,6 +58,13 @@ private/
 *.las
 *.laz
 
+# Exported corridor-envelope Shapefile parts (the .geojson form stays trackable)
+*.shp
+*.shx
+*.dbf
+*.cpg
+*.prj
+
 # OS / editors
 Thumbs.db
 .DS_Store
