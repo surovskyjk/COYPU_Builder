@@ -55,6 +55,8 @@ behaviour that must not regress).
 | `tools/run_dev.ps1` | no token parameter or argument |
 | `client/tests/` (affected unit and integration tests) | adapt; add supervisor argument tests |
 | `docs/protocol/attach.md` | new — how an external client finds and authenticates to a backend |
+| `backend/tests/test_repo_hygiene.py` | new — guard on committed Claude Code configuration |
+| `.gitignore` | add `.claude/worktrees/`, `.claude/agent-memory-local/`, `CLAUDE.local.md` |
 
 ## Contract
 
@@ -130,6 +132,18 @@ def live_records() -> list[DiscoveryRecord]: ...          # skips and removes re
   or the one whose port matches the URL — instead of taking a token on the command line.
 - `tools/run_dev.ps1` starts the backend, then the client with `--attach`.
 
+### Committed Claude Code configuration
+
+`.claude/agents/*.md` is committed so that the worker/reviewer workflow is versioned. Claude Code executes
+that configuration for anyone who opens the repository, and an agent definition may declare `hooks` (shell
+commands) and `mcpServers`. `test_repo_hygiene.py` fails if:
+
+- the frontmatter of any `.claude/agents/*.md` declares `hooks`, `mcpServers`, or a `permissionMode` other
+  than `default` or `plan`;
+- a committed `.claude/settings.json` declares `hooks` or `mcpServers`;
+- `git ls-files` lists `.claude/settings.local.json` or anything under `.claude/worktrees/` or
+  `.claude/agent-memory-local/`.
+
 ## Invariants
 
 - No regression in T-116's process-tree supervision on Windows or Linux: no orphan after a kill or a
@@ -154,8 +168,10 @@ def live_records() -> list[DiscoveryRecord]: ...          # skips and removes re
    never appears in either.
 8. `tools/run_dev.ps1` works end to end through `--attach`; a bare `godot --path client` launch still spawns
    and connects to its own backend.
-9. Both suites are green on Windows and on Linux CI, with no previously passing test removed, skipped or
-   weakened, and no orphaned backend process after the client suite.
+9. `test_repo_hygiene.py` passes on the current tree and fails, in a test using a temporary copy, for an agent
+   file that declares `hooks`.
+10. Both suites are green on Windows and on Linux CI, with no previously passing test removed, skipped or
+    weakened, and no orphaned backend process after the client suite.
 
 ## Out of scope
 

@@ -45,7 +45,10 @@ source, save and reopen, and IFC export in Phase 3.
 7. **Providers are interchangeable with files.** Generic open-data providers sit behind the same interface as
    file readers, fetch through the disk cache, are bounded to the corridor buffer and are never on the CI
    path. CI uses synthetic sources generated in code. Each provider's licence is verified in its task spec
-   before it ships.
+   before it ships. Each provider also declares an https-only host allow-list. A URL taken from fetched
+   content (a feed, a capabilities document) and every redirect hop must pass it before any request is sent,
+   because fetched content is untrusted input that names further downloads. Network XML is parsed with
+   `defusedxml`. T-139's ČÚZK client is the first provider to follow these rules.
 8. **Source data stays outside the repository.** The project stores the `SourceDataset` record and a
    reference to the source, never the source data itself.
 9. **Attribution is visible.** The client shows the attribution of every source contributing to the view.

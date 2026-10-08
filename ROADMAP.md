@@ -5,7 +5,7 @@ has (or will have) a self-contained specification in [`docs/tasks/`](docs/tasks/
 
 **Status legend** — `done` · `in progress` · `ready` (spec written, not started) · `planned` (no spec yet)
 
-Last reviewed: 2026-10-06 against `3ba9870` (CI run 37384504655 green on all three jobs; F18 landed as `8c5cd79`). **M2 is complete.** F25 is answered and Phase 1 is re-scoped (ADR 0009): M3 becomes terrain and imagery import with explicit settings and stable GUIDs, and a new M5 adds buildings, vegetation and water bodies. ADR 0010 plans the API for mods and AI: its seams and security now (T-126), the MCP server in M4 (T-146), mods in Phase 2.
+Last reviewed: 2026-10-06 against `98891e0` plus the uncommitted T-139 change set. T-138 landed as `535f857` (CI green). **M2 is complete.** F25 is answered and Phase 1 is re-scoped (ADR 0009): M3 becomes terrain and imagery import with explicit settings and stable GUIDs, and a new M5 adds buildings, vegetation and water bodies. ADR 0010 plans the API for mods and AI: its seams and security now (T-126), the MCP server in M4 (T-146), mods in Phase 2.
 
 ---
 
@@ -147,8 +147,8 @@ traceable (ADR 0009).
 
 | Task | Title | Status | Depends on |
 |---|---|---|---|
-| T-138 | Corridor envelope export: a buffer polygon around the alignments as GeoJSON or Shapefile, for selecting download areas (e.g. in the ČÚZK Geoprohlížeč); also the shared corridor-clip geometry — [task_138](docs/tasks/task_138_corridor_envelope.md) | `done` (2026-10-06; Kralupy at 250 m: 9.2885 km², 922 / 356 vertices; review hardened file writes per ADR 0010) | — |
-| T-139 | ČÚZK ATOM client: sheet index from the service feeds, envelope → SM5 sheet selection, cached and resumable download (DMR 5G, DMR 4G, DMP 1G, orthophoto), as a CLI first — [task_139](docs/tasks/task_139_cuzk_atom_download.md) | `ready` | T-138 |
+| T-138 | Corridor envelope export: a buffer polygon around the alignments as GeoJSON or Shapefile, for selecting download areas (e.g. in the ČÚZK Geoprohlížeč); also the shared corridor-clip geometry — [task_138](docs/tasks/task_138_corridor_envelope.md) | `done` (2026-10-06, `535f857`; Kralupy at 250 m: 9.2885 km², 922 / 356 vertices; review hardened file writes per ADR 0010) | — |
+| T-139 | ČÚZK ATOM client: sheet index from the service feeds, envelope → SM5 sheet selection, cached and resumable download (DMR 5G, DMR 4G, DMP 1G, orthophoto), as a CLI first — [task_139](docs/tasks/task_139_cuzk_atom_download.md) | `done` (2026-10-06; Kralupy: 15 DMR 5G sheets, 34.04 MB, downloaded; orthophoto 848 MB listed only; review added an https ČÚZK-host allow-list) | T-138 |
 | T-130 | Import framework: `import.inspect` / `import.run`, `ImportSettings`, `SourceDataset` provenance, GUID assignment, synthetic terrain fixtures | `planned` | T-101, T-110 |
 | T-131 | Terrain readers: LAS/LAZ, GeoTIFF/COG, LandXML TIN surface; multi-sheet merge, clip to corridor, reprojection | `planned` | T-130, T-138 |
 | T-132 | Terrain surface and tiling: TIN/grid analysis surface, heightfield display tiles with LOD, paged `terrain.*` methods | `planned` | T-131, F18 follow-up |
