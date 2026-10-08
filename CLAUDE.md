@@ -13,6 +13,7 @@ uv run pytest                              # all tests; golden fixtures live in 
 uv run pytest tests/test_lrs_golden.py -k dense
 uv run ruff check . ../tools ; uv run ruff format --check . ../tools   # CI's lint gate; drop --check to apply
 uv run coypu-builder-backend inspect tests/fixtures/kralupy/kralupy_neratovice_092.xml
+uv run coypu-builder-backend cuzk sheets tests/fixtures/kralupy/kralupy_neratovice_092.xml --dataset DMR5G   # ČÚZK sheets a corridor touches; `download --out <dir outside the repo>` fetches them
 uv run coypu-builder-backend envelope tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 -o D:/COYPU_Builder/Data/Envelopes/kralupy_250m.geojson   # or .shp
 uv run python ../tools/make_golden.py      # regenerate shared/golden/*.json (both test suites consume them)
 

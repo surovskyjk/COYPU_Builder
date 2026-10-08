@@ -60,3 +60,20 @@ def tram_network(tram_fixture):
 @pytest.fixture(scope="session")
 def tram_alignments(tram_fixture):
     return tram_fixture[1]
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "network: touches the live ČÚZK services; run with -m network")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Network tests run only when `-m` selects them; CI never does."""
+    expression = config.getoption("markexpr") or ""
+    if "network" in expression and "not network" not in expression:
+        return
+    kept, deselected = [], []
+    for item in items:
+        (deselected if item.get_closest_marker("network") else kept).append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = kept

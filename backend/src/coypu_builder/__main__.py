@@ -47,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     envelope.add_argument("--force", action="store_true", help="overwrite existing output files")
 
+    from coypu_builder.cli.cuzk import add_cuzk_parser
+
+    add_cuzk_parser(sub)
+
     serve = sub.add_parser("serve", help="run the IPC server for the Godot client")
     serve.add_argument("--port", type=int, default=0)
     serve.add_argument("--token", default="")
@@ -75,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
             args.crs,
             args.force,
         )
+    if args.command == "cuzk":
+        from coypu_builder.cli.cuzk import run_cuzk
+
+        return run_cuzk(args)
     if args.command == "serve":
         from coypu_builder.server import serve as ws_serve
 
