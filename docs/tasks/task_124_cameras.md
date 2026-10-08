@@ -182,3 +182,58 @@ whether the XR split (parent = vehicle pose, child = eye offset) survived contac
 Kralupy corridor rendering without shimmer at any zoom, a three-car consist playing back at a locked 60 fps
 with bogies on the rails and bodies chording the curves, and the client chain matching
 `shared/golden/trainset_chain.json`.
+
+---
+
+## Follow-up F29 — the orbit camera starts below the track
+
+*Small, client-only. The T-125 capture harness exposed it; run it right after T-125 lands.*
+
+`OrbitCamera` places the camera at `focus + direction * distance` with
+`direction.y = sin(_pitch)`, and `_pitch` starts at `-0.35`. The default view is therefore about 20 m
+*below* the rail head, looking up at the underside of the corridor. The unit tests check the maths of the
+placement but never its sign, so nothing caught it until a screenshot did. The `kralupy_m2` capture scenario
+currently compensates with an `orbit_drag_px` of `[0, -300]` on its first orbit shot.
+
+### Deliverables
+
+| Path | Action |
+|---|---|
+| `client/cameras/orbit_camera.gd` | default and clamp fixed; the pitch convention documented |
+| `client/tests/unit/test_camera_rigs.gd` | tests that pin the sign, not just the magnitude |
+| `client/tools/capture/scenarios/kralupy_m2.json` | drags and zooms retuned to the corrected rig |
+
+### Contract
+
+- `_pitch` is the camera's **elevation above the horizontal plane through the focus**: positive means
+  above. The default is `+0.35` rad.
+- The elevation is clamped to `[0.02, _PITCH_LIMIT]`, so the camera never drops below the focus plane. Once
+  M3 adds terrain, a view from below the ground shows nothing.
+- Dragging the mouse up still increases elevation, so the view becomes more top-down; keep today's drag
+  direction. State the convention in the class doc comment.
+
+### Acceptance
+
+1. On activation with default settings, the camera's world `y` is above the focus `y` by
+   `distance · sin(0.35)`, within 1e-4 m.
+2. A rotate-drag with negative `motion.y` raises the camera; positive lowers it, but never below the
+   elevation clamp. Both are asserted on the camera's world position, not on `_pitch`.
+3. The `kralupy_m2` scenario no longer needs a drag to look from above: `orbit_overview` shows the corridor
+   from above, `orbit_curve_closeup` shows the curve from above at a low angle, and `orbit_run_end` shows the
+   stopped train from above. Rerun `tools\capture.ps1 -Scenario kralupy_m2`, open each PNG, and state what it
+   shows.
+4. Both suites are green on Windows and on Linux CI, with no previously passing test removed, skipped or
+   weakened.
+
+### Verification
+
+```bash
+tools\godot\Godot_v4.7.2-stable_win64_console.exe --headless --path client --editor --quit
+tools\godot\Godot_v4.7.2-stable_win64_console.exe --headless --path client -s addons/gdUnit4/bin/GdUnitCmdTool.gd -a tests --ignoreHeadlessMode
+powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Scenario kralupy_m2
+```
+
+### Report back
+
+State: the camera height above the focus at the default settings; what each orbit shot shows after
+retuning; and the scenario values you changed.
