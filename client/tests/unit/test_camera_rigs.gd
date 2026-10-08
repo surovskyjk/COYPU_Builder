@@ -161,20 +161,68 @@ func test_orbit_zoom_out_clamps_at_the_maximum_distance() -> void:
 	assert_float(orbit.distance()).is_equal_approx(OrbitCamera.MAX_DISTANCE_M, 1e-3)
 
 
-## AC2: no gimbal flip at the poles -- pitch is clamped a few degrees short of vertical no matter how much
-## drag input arrives.
-func test_orbit_rotate_clamps_pitch_short_of_the_poles() -> void:
+## AC2: no gimbal flip at the pole, and (F29) never below the focus plane -- the elevation is clamped to
+## [constant OrbitCamera.MIN_ELEVATION] .. [constant OrbitCamera._PITCH_LIMIT] no matter how much drag input
+## arrives.
+func test_orbit_rotate_clamps_elevation_between_the_horizon_and_the_pole() -> void:
 	var orbit: OrbitCamera = auto_free(OrbitCamera.new())
 	orbit.handle_input(_mouse_button_event(MOUSE_BUTTON_LEFT, true))
 	for _i in 500:
 		orbit.handle_input(_mouse_motion(Vector2(0.0, 1000.0)))
 	assert_float(orbit.pitch()).append_failure_message(
-		"pitch must stay short of +PI/2 or look_at's up hint degenerates"
-	).is_between(-1.5, -OrbitCamera._PITCH_LIMIT + 0.001)
+		"elevation must stay at or above the focus plane"
+	).is_between(OrbitCamera.MIN_ELEVATION - 1e-6, OrbitCamera.MIN_ELEVATION + 1e-6)
 
 	for _i in 1000:
 		orbit.handle_input(_mouse_motion(Vector2(0.0, -1000.0)))
-	assert_float(orbit.pitch()).is_between(OrbitCamera._PITCH_LIMIT - 0.001, 1.5)
+	assert_float(orbit.pitch()).append_failure_message(
+		"elevation must stay short of +PI/2 or look_at's up hint degenerates"
+	).is_between(OrbitCamera._PITCH_LIMIT - 1e-6, 1.5)
+
+
+## F29 AC1: on activation with default settings the camera sits above the focus, by `distance * sin(0.35)`.
+func test_orbit_default_camera_is_above_the_focus() -> void:
+	var orbit: OrbitCamera = _in_tree(OrbitCamera.new())
+	orbit.bind_corridor(null, _build_straight_table(1000.0))
+	orbit.activated()
+	orbit.update(0.0)
+
+	var focus := Vector3.ZERO
+	assert_float(orbit.camera().global_position.y - focus.y).append_failure_message(
+		"the default orbit view must be above the focus, looking down at the track"
+	).is_equal_approx(OrbitCamera.DEFAULT_DISTANCE_M * sin(0.35), 1e-4)
+	assert_float(orbit.camera().global_transform.basis.z.y).append_failure_message(
+		"a camera above its focus looks down: its -Z axis has a negative y"
+	).is_greater(0.0)
+
+
+## F29 AC2: dragging up (negative `motion.y`) raises the camera, dragging down lowers it but never below the
+## elevation clamp. Asserted on the camera's world position, not on `pitch()`.
+func test_orbit_drag_up_raises_and_drag_down_lowers_but_never_below_the_clamp() -> void:
+	var orbit: OrbitCamera = _in_tree(OrbitCamera.new())
+	orbit.bind_corridor(null, _build_straight_table(1000.0))
+	orbit.update(0.0)
+	var start_y := orbit.camera().global_position.y
+	orbit.handle_input(_mouse_button_event(MOUSE_BUTTON_LEFT, true))
+
+	orbit.handle_input(_mouse_motion(Vector2(0.0, -40.0)))
+	orbit.update(0.0)
+	var raised_y := orbit.camera().global_position.y
+	assert_float(raised_y).append_failure_message("dragging up must raise the camera").is_greater(start_y)
+
+	orbit.handle_input(_mouse_motion(Vector2(0.0, 80.0)))
+	orbit.update(0.0)
+	var lowered_y := orbit.camera().global_position.y
+	assert_float(lowered_y).append_failure_message("dragging down must lower the camera").is_less(raised_y)
+
+	for _i in 200:
+		orbit.handle_input(_mouse_motion(Vector2(0.0, 1000.0)))
+	orbit.update(0.0)
+	var floor_y := orbit.distance() * sin(OrbitCamera.MIN_ELEVATION)
+	assert_float(orbit.camera().global_position.y).append_failure_message(
+		"the camera must stop at the elevation clamp, above the focus plane"
+	).is_equal_approx(floor_y, 1e-4)
+	assert_float(orbit.camera().global_position.y).is_greater(0.0)
 
 
 ## AC2: no precision breakdown at the far end of the corridor -- zoomed all the way out to

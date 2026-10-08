@@ -3,8 +3,8 @@
   "resolution": [1600, 900],
   "ready_timeout_s": 120,
   "shots": [
-    {"name": "orbit_overview", "camera": "orbit", "time_s": 790.0, "orbit_zoom_notches": 22, "orbit_drag_px": [0, -300], "settle_frames": 90},
-    {"name": "orbit_curve_closeup", "camera": "orbit", "time_s": 208.0, "orbit_zoom_notches": -19, "orbit_drag_px": [0, 140], "settle_frames": 90},
+    {"name": "orbit_overview", "camera": "orbit", "time_s": 790.0, "orbit_zoom_notches": 22, "orbit_drag_px": [0, -100], "settle_frames": 90},
+    {"name": "orbit_curve_closeup", "camera": "orbit", "time_s": 208.0, "orbit_zoom_notches": -19, "orbit_drag_px": [0, 70], "settle_frames": 90},
     {"name": "wayside_pass", "camera": "wayside", "time_s": 154.8, "focus_station_m": 2070.0, "settle_frames": 90},
     {"name": "cab_curve", "camera": "cab", "time_s": 208.0, "settle_frames": 60},
     {"name": "orbit_run_end", "camera": "orbit", "time_s": 1159.0, "settle_frames": 90}

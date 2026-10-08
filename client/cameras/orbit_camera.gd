@@ -2,9 +2,15 @@ class_name OrbitCamera
 extends CameraRig
 ## Default camera (T-124): pivots about a focus point, mouse-drag to rotate, wheel to zoom, middle-drag to
 ## pan. Distance-scaled pan speed and multiplicative zoom keep it equally usable at 5 m and at 5 km, and
-## pitch is clamped a few degrees short of vertical so [method Node3D.look_at] never receives a view
-## direction parallel to its up hint (the gimbal flip AC2 calls out) -- clamping is simpler and cheaper
-## than special-casing the exact pole.
+## the elevation is clamped a few degrees short of vertical so [method Node3D.look_at] never receives a
+## view direction parallel to its up hint (the gimbal flip AC2 calls out) -- clamping is simpler and
+## cheaper than special-casing the exact pole.
+##
+## Pitch convention: `_pitch` (and [method pitch]) is the camera's *elevation above the horizontal plane
+## through the focus*, in radians. Positive is above, so the camera's height over the focus is
+## `distance * sin(pitch)`. It is clamped to `[MIN_ELEVATION, _PITCH_LIMIT]`: the camera never drops below
+## the focus plane (once M3 adds terrain, a view from below the ground shows nothing). Dragging the mouse
+## up (negative `relative.y`) raises the elevation, so the view becomes more top-down.
 ##
 ## "Follows the consist with damping": only the *chase* -- the anchor point easing toward the lead car's
 ## position -- is damped ([constant FOLLOW_TAU_SEC]); the user's own rotate/zoom/pan input is applied
@@ -25,8 +31,13 @@ const ROTATE_SPEED := 0.005
 const ZOOM_STEP_FACTOR := 0.9
 const PAN_SPEED := 0.0015
 
-## A few degrees short of +-PI/2: beyond that the view direction and the `Vector3.UP` hint `look_at` uses
-## become parallel and the resulting basis degenerates (AC2's "no gimbal flip at the poles").
+## Lowest elevation (about 1 degree) above the focus plane; the camera never goes below it.
+const MIN_ELEVATION := 0.02
+
+const DEFAULT_PITCH := 0.35
+
+## A few degrees short of PI/2: beyond that the view direction and the `Vector3.UP` hint `look_at` uses
+## become parallel and the resulting basis degenerates (AC2's "no gimbal flip at the pole").
 const _PITCH_LIMIT := 1.45
 
 var _trainset: TrainsetNode
@@ -37,7 +48,7 @@ var _damped_anchor := Vector3.ZERO
 var _pan_offset := Vector3.ZERO
 
 var _yaw := -0.6
-var _pitch := -0.35
+var _pitch := DEFAULT_PITCH
 var _distance := DEFAULT_DISTANCE_M
 
 var _rotating := false
@@ -105,7 +116,7 @@ func handle_input(event: InputEvent) -> void:
 		var motion := (event as InputEventMouseMotion).relative
 		if _rotating:
 			_yaw -= motion.x * ROTATE_SPEED
-			_pitch = clampf(_pitch - motion.y * ROTATE_SPEED, -_PITCH_LIMIT, _PITCH_LIMIT)
+			_pitch = clampf(_pitch - motion.y * ROTATE_SPEED, MIN_ELEVATION, _PITCH_LIMIT)
 		if _panning:
 			var right := _camera.global_transform.basis.x
 			var up := _camera.global_transform.basis.y

@@ -197,8 +197,9 @@ a live `SceneTree` -- `CameraRig`/`CameraManager` both build their node structur
 - **`OrbitCamera`** (`orbit_camera.gd`) -- the default. Pivots about a focus point; mouse-drag rotates,
   wheel zooms, middle-drag pans, all through `project.godot`'s input map
   (`camera_orbit_rotate`/`camera_orbit_pan`/`camera_zoom_in`/`camera_zoom_out`), not hard-coded scancodes.
-  Pan/zoom speed scale with distance so the camera stays usable from 5 m to 5 km; pitch is clamped a few
-  degrees short of vertical so `look_at` never degenerates (no gimbal flip). Only the *chase* -- the focus
+  Pan/zoom speed scale with distance so the camera stays usable from 5 m to 5 km; pitch is the elevation
+  above the focus plane (default +0.35 rad), clamped to 0.02..1.45 so the camera never drops below the focus
+  and `look_at` never degenerates (no gimbal flip). Only the *chase* -- the focus
   point easing toward the bound consist's lead car -- is damped; the user's own rotate/zoom/pan is applied
   immediately, so the camera stays responsive rather than lagging behind the mouse.
 - **`WaysideCamera`** (`wayside_camera.gd`) -- a fixed observer beside the track at one station, offset
@@ -268,10 +269,10 @@ A scenario is JSON (`tools/capture/scenario.gd` is the parser, and lists every e
   `Scenario` in `tools/capture/scenario.gd`.
 - Orbit shots also record `orbit_pitch`, `orbit_distance_m` and `camera_above_focus` (the view direction
   points downward) in the manifest, so a review can see where the camera really was.
-- **The `kralupy_m2` orbit drags currently compensate for `OrbitCamera`'s default pitch sign** (the default
-  pitch puts the camera below the focus, and dragging up lowers it). They must be retuned when F29 (the end
-  of `docs/tasks/task_124_cameras.md`) lands; the manifest's `camera_above_focus` shows whether they still
-  give a view from above.
+- `OrbitCamera`'s `pitch` is the camera's elevation above the horizontal plane through the focus (default
+  0.35 rad, clamped to 0.02..1.45), and dragging up raises it, so the default view is already from above. The
+  `kralupy_m2` drags only choose the angle (0.85 rad overview, 0.50 rad from the curve close-up on); the
+  manifest's `camera_above_focus` and `orbit_pitch` confirm it.
 
 The driver (`tools/capture/capture_driver.gd`) is added by `scene/main.gd` only when `--capture <scenario>` is
 on the command line (`--capture-out <dir>` names the output folder); it uses the cameras, timeline and corridor
