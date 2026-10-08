@@ -1,7 +1,7 @@
 # ADR 0010 — Extensibility: one public API, plugins, and an MCP server
 
-Status: decisions 1–3 accepted (2026-10-06); decisions 4–6 proposed, to be confirmed by the user when their
-tasks are specified.
+Status: decisions 1–3 accepted (2026-10-06); decision 4 accepted for readers and providers (2026-10-08);
+the rest of decision 4 and decisions 5–6 proposed, to be confirmed by the user when their tasks are specified.
 
 ## Context
 
@@ -39,11 +39,17 @@ to drive (imports, envelope export, terrain), and client mods need the M4 UI she
    an absolute path, refuses a path inside the repository, and never overwrites an existing file unless the
    caller sets `overwrite`. `alignment.envelope` (T-138) is the first such method. Without these rules, any
    client holding the token could replace goldens or tool configuration such as `.claude/settings.json`.
-4. *Proposed:* **Backend plugins are Python entry points.** Groups `coypu_builder.readers`,
-   `coypu_builder.providers` and `coypu_builder.methods` are discovered at startup. Plugins add readers and
-   providers behind the M3/M5 interfaces, and add methods only under a namespaced prefix
-   (`x.<plugin>.<name>`). Plugins are trusted code the user installs. `session.hello` lists them, and each
-   can be disabled.
+4. **Backend plugins are Python entry points loaded from an opt-in allow-list.** The user confirmed the
+   reader and provider half on 2026-10-08; T-130 implements it.
+   - **Discovery:** groups `coypu_builder.readers` and `coypu_builder.providers` are discovered at startup.
+   - **Opt-in loading:** a plugin is imported only if its entry-point name appears in the user's allow-list
+     (`[plugins] allow = [...]` in the per-user `config.toml`). Plugins that are discovered but not listed
+     are reported as available and are never imported.
+   - **Failures:** a plugin that fails to load is reported with its error and never stops the backend.
+   - **Visibility:** `plugins.list` shows every plugin, its version and its state.
+   - **Trust:** plugins are trusted code.
+   - *Still proposed, for Phase 2:* a `coypu_builder.methods` group that adds protocol methods, only under the
+     namespaced prefix `x.<plugin>.<name>`.
 5. *Proposed:* **Client mods are Godot resource packs** loaded from a per-user mods folder at startup. They
    register panels, tools and layers through a small `ModApi` autoload. Each mod is trusted code with
    explicit opt-in. This is Phase 2, once the UI shell's extension points exist.
