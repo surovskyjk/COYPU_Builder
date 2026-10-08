@@ -12,7 +12,7 @@ playback/       playback_controller, trainset_kinematics, timeline_state
 cameras/        camera_manager, orbit_camera, wayside_camera, cab_camera (XR-ready rig)
 ui/             theme, top_bar, bottom_dock, layers_panel, inspector_panel, timeline_bar, dialogs, widgets
 view_modes/     view_mode_controller + materials (realistic, wireframe, xray, diagnostics)
-tools/          (Phase 2) placement_tool, snapping, ghost_preview, plan_view (SubViewport + ortho Camera3D)
+tools/          capture/ (T-125 scripted screenshots); (Phase 2) placement_tool, snapping, ghost_preview, plan_view (SubViewport + ortho Camera3D)
 tests/          gdUnit4 — unit/, integration/, helpers/ (see below)
 assets/         placeholder materials/icons; vehicle glTF later
 ```
@@ -45,7 +45,7 @@ Four singletons, in the order `project.godot` registers them:
   repeat fetch with the same parameters never round-trips twice.
 
 `core/cli_args.gd` (`CliArgs`, not an autoload) parses the arguments after `--` on the command line:
-`--backend-url`, `--backend-token`, `--project`.
+`--backend-url`, `--backend-token`, `--project`, and (T-125) `--capture`, `--capture-out`.
 
 ## Domain mirror (`domain_mirror/`)
 
@@ -216,6 +216,67 @@ a live `SceneTree` -- `CameraRig`/`CameraManager` both build their node structur
   eye offset entirely on the child -- is the whole XR-readiness claim: Phase 4 retargets the parent to
   `XROrigin3D` and replaces the child with the headset's own pose, with no change to the line that copies
   the body transform. No OpenXR dependency, XR interface, or `xr_` setting is added now (ADR 0002).
+
+## Capturing screenshots
+
+`tools\capture.ps1` runs the real app (real backend, real window, desktop GPU) through a scenario file and
+writes one PNG per shot plus `manifest.json` with frame-time statistics. It exists so a reviewer can look at
+the screen without a person taking screenshots, and so "it is not black" and "it holds 60 fps" are numbers.
+It never runs on CI: the headless dummy renderer produces no pixels.
+
+```powershell
+tools\capture.ps1                          # client/tools/capture/scenarios/kralupy_m2.json
+tools\capture.ps1 -Scenario my_scenario    # a name, or a path to a scenario file
+tools\capture.ps1 -Out D:\somewhere -TimeoutS 120
+```
+
+Output goes to `captures\<yyyyMMdd-HHmmss>-<scenario>\` at the repository root (git-ignored). The script
+prints the folder, one line per shot (camera, time, lead station, mean and spread of the luma) and one for
+`perf`. Exit code: 0 ok; 1 the capture failed (a shot not written, a black/blank/overexposed frame, an invalid
+scenario; the errors are printed and are in `manifest.json`); 2 timed out and the process tree was killed;
+3 a backend process started by the run was still alive afterwards (the script kills it). The app always
+leaves through `Backend.shutdown()`, so exit 3 means a bug.
+
+A scenario is JSON (`tools/capture/scenario.gd` is the parser, and lists every error it finds):
+
+```json
+{
+  "project": "backend/tests/fixtures/kralupy/kralupy_neratovice_092.coypu",
+  "resolution": [1600, 900],
+  "ready_timeout_s": 120,
+  "shots": [
+    {"name": "wayside_pass", "camera": "wayside", "time_s": 154.8, "focus_station_m": 2070.0, "settle_frames": 90}
+  ],
+  "perf": {"camera": "cab", "time_s": 570.0, "rate": 4.0, "duration_s": 10.0}
+}
+```
+
+- `project` is repo-relative. A shot needs a unique `name` (`[a-z0-9_]+`) and a `camera` (`orbit`, `wayside`
+  or `cab`). `time_s` seeks and pauses the timeline (it needs a run, and must not exceed the run's duration);
+  `focus_station_m` calls `CameraManager.focus_station`; `settle_frames` (default 30) frames are rendered
+  before the capture so damping, LOD and chunk paging finish.
+- Orbit shots may also give `orbit_zoom_notches` (positive zooms out) and `orbit_drag_px` (`[dx, dy]`, a left
+  drag that tilts the view). They are sent as mouse input, and the orbit rig keeps its distance and pitch
+  between shots, so both are *relative to the previous orbit shot*.
+- `perf` plays from `time_s` at `rate` for `duration_s` with vsync off and records every frame time
+  (`p50`/`p95`/`p99`/`max` and counts over 16.7 ms and 33.3 ms). The run must be long enough for it.
+- The status overlay is hidden while capturing (and restored afterwards), so each PNG and its statistics show
+  only the 3D render. Each manifest shot carries `scene_fraction` (the share of pixels that differ from the
+  environment's background colour by more than 0.02), `luma_mean` and `luma_std`. A shot fails the run when
+  `scene_fraction` is below 0.0005 (an empty scene), `luma_mean` is outside 0.05..0.95, or `luma_std` is at
+  most 0.005 (a flat fill). The limits are derived from the default scenario's sparsest shot; see
+  `Scenario` in `tools/capture/scenario.gd`.
+- Orbit shots also record `orbit_pitch`, `orbit_distance_m` and `camera_above_focus` (the view direction
+  points downward) in the manifest, so a review can see where the camera really was.
+- **The `kralupy_m2` orbit drags currently compensate for `OrbitCamera`'s default pitch sign** (the default
+  pitch puts the camera below the focus, and dragging up lowers it). They must be retuned when F29 (the end
+  of `docs/tasks/task_124_cameras.md`) lands; the manifest's `camera_above_focus` shows whether they still
+  give a view from above.
+
+The driver (`tools/capture/capture_driver.gd`) is added by `scene/main.gd` only when `--capture <scenario>` is
+on the command line (`--capture-out <dir>` names the output folder); it uses the cameras, timeline and corridor
+through their public API and adds no behaviour of its own. `manifest.json` carries no IPC token: the client
+picks its own and never passes it to the driver.
 
 ## Launch modes
 

@@ -4,11 +4,16 @@ extends RefCounted
 ## `--backend-token` and `--project` this way). Pure and unit-testable: [method parse] takes a
 ## [PackedStringArray] and returns a [Dictionary]; [method from_cmdline] is the only place that reads
 ## the real command line.
+##
+## `--capture <scenario.json>` and `--capture-out <dir>` (T-125) switch the app into scripted screenshot mode;
+## see `tools/capture/capture_driver.gd`.
 
 const _FLAGS := {
 	"--backend-url": "backend_url",
 	"--backend-token": "backend_token",
 	"--project": "project",
+	"--capture": "capture",
+	"--capture-out": "capture_out",
 }
 
 

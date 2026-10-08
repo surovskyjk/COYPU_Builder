@@ -17,6 +17,13 @@ extends Node3D
 ## like [TrackCorridor] (no `.tscn` node of its own), wired to the corridor/table and trainset/controller
 ## as soon as each becomes available, and owns both the one `Camera3D.current` and the one
 ## `TrackCorridor.update_lod` call per frame from here on -- this scene no longer drives either itself.
+##
+## T-125 adds the seam scripted screenshots need and nothing more: read-only accessors for the camera
+## manager, timeline, playback controller, corridor and status overlay; [signal scene_ready]; and, only when `--capture` is
+## on the command line, a [CaptureDriver] child. A launch without `--capture` behaves exactly as before.
+
+## Emitted once, when the corridor is built and -- if the project has a run -- playback is wired.
+signal scene_ready()
 
 @onready var _status_label: Label = %StatusLabel
 
@@ -31,6 +38,10 @@ var _timeline: TimelineState
 var _playback: PlaybackController
 var _trainset_node: TrainsetNode
 var _playback_wired := false
+
+var _corridor_built := false
+var _playback_settled := false
+var _scene_ready_emitted := false
 
 
 func _ready() -> void:
@@ -52,6 +63,36 @@ func _ready() -> void:
 
 	Backend.start()
 	_refresh_status()
+
+	var capture_scenario: String = args.get("capture", "")
+	if not capture_scenario.is_empty():
+		var driver := CaptureDriver.new()
+		add_child(driver)
+		driver.start(self, capture_scenario, args.get("capture_out", ""))
+
+
+func camera_manager() -> CameraManager:
+	return _camera_manager
+
+
+## Null until a run is wired (a bare LandXML import has none).
+func timeline() -> TimelineState:
+	return _timeline
+
+
+## Null until a run is wired.
+func playback() -> PlaybackController:
+	return _playback
+
+
+func corridor() -> TrackCorridor:
+	return _corridor
+
+
+## The status text overlay (T-103). [CaptureDriver] hides it while capturing so a screenshot and its
+## statistics show only the 3D render.
+func status_overlay() -> CanvasItem:
+	return _status_label
 
 
 func _notification(what: int) -> void:
@@ -108,6 +149,8 @@ func _build_track_corridor(alignment_id: String) -> void:
 		return
 	await _corridor.build(alignment_id, table)
 	_camera_manager.bind_corridor(_corridor, table)
+	_corridor_built = true
+	_check_scene_ready()
 
 
 ## Wires the first run Session knows about, once (T-123) -- `import_coypu`'s `RunSummary` carries the
@@ -119,7 +162,20 @@ func _on_runs_changed() -> void:
 	if runs.is_empty():
 		return
 	_playback_wired = true
-	_wire_playback(runs[0])
+	await _wire_playback(runs[0])
+	_playback_settled = true
+	_check_scene_ready()
+
+
+## A run's trainset is only wired after `Session.runs()` is populated, which happens before the corridor
+## build finishes, so "the project has a run" is already known when the corridor completes.
+func _check_scene_ready() -> void:
+	if _scene_ready_emitted or not _corridor_built:
+		return
+	if not Session.runs().is_empty() and not _playback_settled:
+		return
+	_scene_ready_emitted = true
+	scene_ready.emit()
 
 
 func _wire_playback(run_summary: Dictionary) -> void:

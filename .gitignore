@@ -73,3 +73,6 @@ Thumbs.db
 .DS_Store
 .vscode/
 .idea/
+
+# Scripted screenshot output (tools/capture.ps1)
+captures/
