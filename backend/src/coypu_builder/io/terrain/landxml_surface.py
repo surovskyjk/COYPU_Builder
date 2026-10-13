@@ -220,7 +220,11 @@ def _faces(surface: _Surface) -> np.ndarray:
     return rows.reshape(-1, 3).astype(np.int32)
 
 
-def _extent(tokens: np.ndarray, declared: str | None) -> tuple[float, float, float, float]:
+def _extent(tokens: np.ndarray, declared: str | None) -> tuple[float, float, float, float] | None:
+    """Plan extent of the finite points, or None when there are none."""
+    tokens = tokens[np.isfinite(tokens[:, :2]).all(axis=1)]
+    if not len(tokens):
+        return None
     crs = ProjectCRS(declared) if declared else None
     if crs is not None and crs.is_krovak:
         en = resolve_coordinates(tokens[:, :2], crs, "auto", "NE")
@@ -259,8 +263,9 @@ class LandXmlSurfaceReader:
             invisible += len(surface.face_text) - sum(surface.face_visible)
             if not surface.face_text:
                 warnings.append(f"surface '{surface.key}' has no faces and will be skipped")
-            if len(tokens):
-                extents.append(_extent(tokens, document.declared_crs))
+            extent_here = _extent(tokens, document.declared_crs) if len(tokens) else None
+            if extent_here is not None:
+                extents.append(extent_here)
         extent = (
             (
                 min(e[0] for e in extents),
@@ -316,6 +321,16 @@ def _build(
     if settings.nodata is not None:
         triangles = triangles[~(tokens[:, 2] == settings.nodata)[triangles].any(axis=1)]
     points = transform(tokens)
+    broken = ~np.isfinite(points).all(axis=1)
+    if broken.any():
+        keep = ~broken[triangles].any(axis=1)
+        note(
+            f"{label}: dropped {int(broken.sum())} vertices and {int((~keep).sum())} faces "
+            "with non-finite coordinates"
+        )
+        triangles = triangles[keep]
+        if not len(triangles):
+            return None
     if polygon is not None:
         from shapely import contains_xy
 

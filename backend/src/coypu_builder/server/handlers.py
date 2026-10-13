@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -27,6 +28,8 @@ from coypu_builder.domain.model.trainset import Trainset
 from coypu_builder.domain.model.vehicle import CarSpec, TractionBand, VehicleDynamics, VehicleSpec
 from coypu_builder.domain.sampling import bake_frame_table
 from coypu_builder.domain.sources import BBoxClip, CorridorClip, FileOrigin, ImportSettings, SourceKind
+from coypu_builder.domain.terrain import TerrainGrid, TerrainPoints, TerrainTin
+from coypu_builder.domain.terrain_surface import TerrainStack, surface_for_source
 from coypu_builder.io.catalogue.vehicles import Catalogue, load_catalogue, resolve
 from coypu_builder.io.coypu.archive import CoypuProject, read_coypu
 from coypu_builder.io.coypu.kinematics_csv import read_kinematics_csv, read_stops_csv
@@ -40,6 +43,13 @@ from coypu_builder.io.gis.envelope import (
     validate_output_crs,
 )
 from coypu_builder.io.landxml import LandXmlAlignment, read_landxml, to_alignment
+from coypu_builder.io.mesh.terrain_tiles import (
+    TerrainTile,
+    bake_tile,
+    check_level,
+    tile_edge,
+    tiles_for_coverage,
+)
 from coypu_builder.io.mesh.track import bake_track_mesh
 from coypu_builder.io.sources.registry import InspectReport, plugin_report
 from coypu_builder.io.sources.runner import (
@@ -47,6 +57,7 @@ from coypu_builder.io.sources.runner import (
     NoAlignments,
     ReaderFailure,
     UnknownAlignment,
+    clip_polygon,
     inspect_source,
     run_import,
 )
@@ -96,6 +107,11 @@ from coypu_builder.protocol.messages import (
     SourceListResult,
     SourceSummary,
     StopDTO,
+    TerrainTileInfo,
+    TerrainTileParams,
+    TerrainTileResult,
+    TerrainTilesParams,
+    TerrainTilesResult,
     TrackMeshChunkInfo,
     TractionBandDTO,
     TrainsetCreateParams,
@@ -105,12 +121,21 @@ from coypu_builder.protocol.messages import (
     VehicleDynamicsDTO,
     VehicleSpecDTO,
 )
-from coypu_builder.server.session import AlignmentEntry, ProjectState, RunEntry, Session, SourceEntry
+from coypu_builder.server.session import (
+    AlignmentEntry,
+    ProjectState,
+    RunEntry,
+    Session,
+    SourceEntry,
+    TerrainCache,
+)
 
 register_builtin_readers()
 
 HandlerResult = tuple[dict[str, Any], dict[str, np.ndarray]]
-Handler = Callable[[Session, "dict[str, Any] | None"], HandlerResult]
+# A handler is a plain function, or a coroutine function for work that must not block the event loop: the
+# server runs those as tasks (ADR 0003, long calls never block the event loop).
+Handler = Callable[[Session, "dict[str, Any] | None"], "HandlerResult | Awaitable[HandlerResult]"]
 
 
 class ProtocolError(Exception):
@@ -118,6 +143,13 @@ class ProtocolError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+async def _offload[T](session: Session, fn: Callable[..., T], *args: Any) -> T:
+    """Run blocking `fn` in a worker thread so the event loop keeps answering pings (ADR 0003 addendum), with
+    at most `MAX_EXECUTING` such threads per connection."""
+    async with session.gate:
+        return await asyncio.to_thread(fn, *args)
 
 
 def _convert(params: dict[str, Any] | None, kind: type) -> Any:
@@ -385,39 +417,47 @@ def _trainset_for_vehicle(coypu_project: CoypuProject, index: int) -> tuple[Trai
     return Trainset.from_spec(merge_dynamics(spec, dynamics)), None
 
 
-def handle_import_landxml(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+async def handle_import_landxml(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     req = _convert(params, ImportLandxmlParams)
     path = Path(req.path)
     if not path.is_file():
         raise ProtocolError(ErrorCode.NOT_FOUND, f"no such file: {path}")
-    raws = read_landxml(path)
+    raws = await _offload(session, read_landxml, path)
     if not raws:
         raise ProtocolError(ErrorCode.EMPTY, "file carries no <Alignment> elements")
-
     summaries, _alignment_ids = _import_alignments(project, raws, req.crs)
     return msgspec.to_builtins(ImportLandxmlResult(tuple(summaries))), {}
 
 
-def handle_import_coypu(session: Session, params: dict[str, Any] | None) -> HandlerResult:
-    project = _require_project(session)
-    req = _convert(params, ImportCoypuParams)
-    path = Path(req.path)
-    if not path.is_file():
-        raise ProtocolError(ErrorCode.NOT_FOUND, f"no such file: {path}")
+def _read_coypu_bundle(path: Path):
+    """Blocking: everything `import.coypu` reads from the archive, with no project state touched. Returns the
+    LandXML alignments, the stops, and per kinematics run its run, trainset and catalogue warning."""
     coypu_project = read_coypu(path)
-
     xml_texts = [text for name, text in coypu_project.raw_assets.items() if name.endswith(".xml")]
     if not xml_texts:
         raise ProtocolError(ErrorCode.EMPTY, "archive carries no embedded assets/*.xml LandXML")
     raws = [raw for text in xml_texts for raw in read_landxml(text.encode("utf-8"))]
     if not raws:
         raise ProtocolError(ErrorCode.EMPTY, "embedded LandXML carries no <Alignment> elements")
+    stops = _stops_from_coypu(coypu_project.stops)
+    runs = []
+    for index, run in enumerate(coypu_project.kinematics_runs(stops=stops)):
+        trainset, warning = _trainset_for_vehicle(coypu_project, index)
+        runs.append((run, trainset, warning))
+    return raws, stops, runs
 
+
+async def handle_import_coypu(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    project = _require_project(session)
+    req = _convert(params, ImportCoypuParams)
+    path = Path(req.path)
+    if not path.is_file():
+        raise ProtocolError(ErrorCode.NOT_FOUND, f"no such file: {path}")
+    raws, stops, bundle = await _offload(session, _read_coypu_bundle, path)
     alignment_summaries, alignment_ids = _import_alignments(project, raws, req.crs)
     sole_alignment_id = alignment_ids[0] if len(alignment_ids) == 1 else None
 
-    stops = _stops_from_coypu(coypu_project.stops)
     project.stops = stops
 
     warnings: list[str] = []
@@ -426,8 +466,7 @@ def handle_import_coypu(session: Session, params: dict[str, Any] | None) -> Hand
 
     run_summaries = []
     trainset_summaries = []
-    for index, run in enumerate(coypu_project.kinematics_runs(stops=stops)):
-        trainset, warning = _trainset_for_vehicle(coypu_project, index)
+    for run, trainset, warning in bundle:
         if warning is not None:
             warnings.append(warning)
         trainset_id = None
@@ -451,23 +490,27 @@ def handle_import_coypu(session: Session, params: dict[str, Any] | None) -> Hand
     return msgspec.to_builtins(result), {}
 
 
-def handle_import_kinematics(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+def _read_kinematics(path: Path, stops_path: Path | None):
+    stops: tuple[Stop, ...] = ()
+    if stops_path is not None:
+        stops = read_stops_csv(stops_path)
+    return read_kinematics_csv(path, stops=stops)
+
+
+async def handle_import_kinematics(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     req = _convert(params, ImportKinematicsParams)
     path = Path(req.path)
     if not path.is_file():
         raise ProtocolError(ErrorCode.NOT_FOUND, f"no such file: {path}")
-    if req.alignment_id is not None and req.alignment_id not in project.alignments:
-        raise ProtocolError(ErrorCode.NOT_FOUND, f"unknown alignment_id '{req.alignment_id}'")
-
-    stops: tuple[Stop, ...] = ()
+    stops_path = None
     if req.stops_path is not None:
         stops_path = Path(req.stops_path)
         if not stops_path.is_file():
             raise ProtocolError(ErrorCode.NOT_FOUND, f"no such file: {stops_path}")
-        stops = read_stops_csv(stops_path)
-
-    run = read_kinematics_csv(path, stops=stops)
+    if req.alignment_id is not None and req.alignment_id not in project.alignments:
+        raise ProtocolError(ErrorCode.NOT_FOUND, f"unknown alignment_id '{req.alignment_id}'")
+    run = await _offload(session, _read_kinematics, path, stops_path)
     run_id = str(uuid4())
     entry = RunEntry(run=run, source="csv", alignment_id=req.alignment_id)
     project.runs[run_id] = entry
@@ -595,13 +638,13 @@ def _inspect_result(report: InspectReport) -> ImportInspectResult:
     )
 
 
-def handle_import_inspect(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+async def handle_import_inspect(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     _require_hello(session)
     req = _convert(params, ImportInspectParams)
     paths = _source_paths(req.path, req.paths)
     plugin_report()  # allow-listed plugin readers must be registered before one is looked up
     try:
-        _reader, report = inspect_source(paths, req.format_id)
+        _reader, report = await _offload(session, inspect_source, paths, req.format_id)
         result = _inspect_result(report)
     except (GisExtraMissing, ReaderFailure) as exc:
         raise ProtocolError(ErrorCode.INTERNAL, str(exc)) from exc
@@ -612,7 +655,16 @@ def handle_import_inspect(session: Session, params: dict[str, Any] | None) -> Ha
     return msgspec.to_builtins(result), {}
 
 
-def handle_import_run(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+def _run_import_with_coverage(paths, kind, settings, project_crs, alignments, name, format_id, previous):
+    """Blocking: the import and the clip polygon it used (the source's coverage), from a snapshot of the
+    alignments. Touches no project state."""
+    outcome = run_import(
+        paths, kind, settings, project_crs, alignments, name=name, format_id=format_id, previous=previous
+    )
+    return outcome, clip_polygon(settings.clip, alignments)
+
+
+async def handle_import_run(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     req = _convert(params, ImportRunParams)
     paths = _source_paths(req.path, req.paths)
@@ -629,17 +681,19 @@ def handle_import_run(session: Session, params: dict[str, Any] | None) -> Handle
             ErrorCode.CRS_REQUIRED,
             "project has no CRS; import an alignment or open the project with a crs first",
         )
-
+    alignments = {alignment_id: entry.alignment for alignment_id, entry in project.alignments.items()}
     try:
-        outcome = run_import(
+        outcome, coverage = await _offload(
+            session,
+            _run_import_with_coverage,
             paths,
             kind,
             settings,
             project.crs,
-            {alignment_id: entry.alignment for alignment_id, entry in project.alignments.items()},
-            name=req.name,
-            format_id=req.format_id,
-            previous=previous.dataset if previous is not None else None,
+            alignments,
+            req.name,
+            req.format_id,
+            previous.dataset if previous is not None else None,
         )
     except CrsRequired as exc:
         raise ProtocolError(ErrorCode.CRS_REQUIRED, str(exc)) from exc
@@ -654,8 +708,14 @@ def handle_import_run(session: Session, params: dict[str, Any] | None) -> Handle
     except Exception as exc:  # a plugin's malformed answer must not drop the connection
         raise ProtocolError(ErrorCode.INTERNAL, f"import failed: {type(exc).__name__}: {exc}") from exc
 
+    if coverage is not None:
+        import shapely
+
+        shapely.prepare(coverage)  # here on the loop, so worker threads never prepare it concurrently
     dataset = outcome.dataset
-    project.sources[dataset.id] = SourceEntry(dataset, outcome.payloads, outcome.warnings)
+    project.sources[dataset.id] = SourceEntry(dataset, outcome.payloads, outcome.warnings, coverage)
+    project.invalidate_terrain()
+
     recon = outcome.reconciliation
     result = ImportRunResult(
         source_id=dataset.id,
@@ -710,40 +770,46 @@ def handle_plugins_list(session: Session, params: dict[str, Any] | None) -> Hand
     return msgspec.to_builtins(result), {}
 
 
-def handle_alignment_frame_table(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+async def handle_alignment_frame_table(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     req = _convert(params, AlignmentFrameTableParams)
     entry = project.alignments.get(req.alignment_id)
     if entry is None:
         raise ProtocolError(ErrorCode.NOT_FOUND, f"unknown alignment_id '{req.alignment_id}'")
     pivot = RotationPivot(req.pivot) if req.pivot else None
-    table = bake_frame_table(entry.alignment, spacing_m=req.spacing_m, pivot=pivot)
     base = project.base_point or BasePoint(0.0, 0.0, 0.0)
+    alignment = entry.alignment
 
-    position = points_to_godot(table.origin, base, dtype=np.float32)
-    rotation = quaternion_from_matrix(basis_to_godot(table.tangent, table.left, table.up)).astype(np.float32)
-    blobs = {
-        "station": table.station.astype(np.float32),
-        "position": position,
-        "rotation": rotation,
-        "roll": table.roll.astype(np.float32),
-        "pitch": table.pitch.astype(np.float32),
-        "cant_mm": table.cant_mm.astype(np.float32),
-        "curvature": table.curvature.astype(np.float32),
-        "gradient": table.gradient.astype(np.float32),
-        "elevation": table.elevation.astype(np.float32),
-        "segment_index": table.segment_index,
-    }
-    result = AlignmentFrameTableResult(
-        alignment_id=req.alignment_id,
-        row_count=len(table),
-        station_start=float(table.station[0]),
-        station_end=float(table.station[-1]),
-    )
-    return msgspec.to_builtins(result), blobs
+    def work() -> HandlerResult:
+        table = bake_frame_table(alignment, spacing_m=req.spacing_m, pivot=pivot)
+        position = points_to_godot(table.origin, base, dtype=np.float32)
+        rotation = quaternion_from_matrix(basis_to_godot(table.tangent, table.left, table.up)).astype(
+            np.float32
+        )
+        blobs = {
+            "station": table.station.astype(np.float32),
+            "position": position,
+            "rotation": rotation,
+            "roll": table.roll.astype(np.float32),
+            "pitch": table.pitch.astype(np.float32),
+            "cant_mm": table.cant_mm.astype(np.float32),
+            "curvature": table.curvature.astype(np.float32),
+            "gradient": table.gradient.astype(np.float32),
+            "elevation": table.elevation.astype(np.float32),
+            "segment_index": table.segment_index,
+        }
+        result = AlignmentFrameTableResult(
+            alignment_id=req.alignment_id,
+            row_count=len(table),
+            station_start=float(table.station[0]),
+            station_end=float(table.station[-1]),
+        )
+        return msgspec.to_builtins(result), blobs
+
+    return await _offload(session, work)
 
 
-def handle_alignment_track_mesh(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+async def handle_alignment_track_mesh(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     req = _convert(params, AlignmentTrackMeshParams)
     entry = project.alignments.get(req.alignment_id)
@@ -753,43 +819,268 @@ def handle_alignment_track_mesh(session: Session, params: dict[str, Any] | None)
         raise ProtocolError(ErrorCode.BAD_PARAMS, f"chunk_length_m must be > 0, got {req.chunk_length_m}")
     if req.spacing_m <= 0.0:
         raise ProtocolError(ErrorCode.BAD_PARAMS, f"spacing_m must be > 0, got {req.spacing_m}")
-
-    mesh_chunks = bake_track_mesh(entry.alignment, chunk_length_m=req.chunk_length_m, spacing_m=req.spacing_m)
-    if req.chunk_index is not None and not req.metadata_only:
-        mesh_chunks = tuple(c for c in mesh_chunks if c.chunk_index == req.chunk_index)
-        if not mesh_chunks:
-            raise ProtocolError(ErrorCode.NOT_FOUND, f"no chunk with chunk_index {req.chunk_index}")
-
     base = project.base_point or BasePoint(0.0, 0.0, 0.0)
-    infos: list[TrackMeshChunkInfo] = []
-    blobs: dict[str, np.ndarray] = {}
-    for chunk in mesh_chunks:
-        tile_origin_godot = points_to_godot(chunk.tile_origin[None, :], base, dtype=np.float64)[0]
+    alignment = entry.alignment
+
+    def work() -> HandlerResult:
+        mesh_chunks = bake_track_mesh(alignment, chunk_length_m=req.chunk_length_m, spacing_m=req.spacing_m)
+        if req.chunk_index is not None and not req.metadata_only:
+            mesh_chunks = tuple(c for c in mesh_chunks if c.chunk_index == req.chunk_index)
+            if not mesh_chunks:
+                raise ProtocolError(ErrorCode.NOT_FOUND, f"no chunk with chunk_index {req.chunk_index}")
+
+        infos: list[TrackMeshChunkInfo] = []
+        blobs: dict[str, np.ndarray] = {}
+        for chunk in mesh_chunks:
+            tile_origin_godot = points_to_godot(chunk.tile_origin[None, :], base, dtype=np.float64)[0]
+            infos.append(
+                TrackMeshChunkInfo(
+                    chunk_index=chunk.chunk_index,
+                    surface=chunk.surface,
+                    station_start=chunk.station_start,
+                    station_end=chunk.station_end,
+                    tile_origin=(
+                        float(tile_origin_godot[0]),
+                        float(tile_origin_godot[1]),
+                        float(tile_origin_godot[2]),
+                    ),
+                    vertex_count=len(chunk.vertices),
+                    index_count=len(chunk.indices),
+                )
+            )
+            if req.metadata_only:
+                continue
+            suffix = f"{chunk.chunk_index}_{chunk.surface}"
+            blobs[f"vertices_{suffix}"] = chunk.vertices
+            blobs[f"normals_{suffix}"] = chunk.normals
+            blobs[f"uvs_{suffix}"] = chunk.uvs
+            blobs[f"indices_{suffix}"] = chunk.indices
+
+        result = AlignmentTrackMeshResult(alignment_id=req.alignment_id, chunks=tuple(infos))
+        return msgspec.to_builtins(result), blobs
+
+    return await _offload(session, work)
+
+
+# --- terrain display tiles (T-132) -----------------------------------------------------------------------
+
+MAX_LISTED_TILES = 5000  # about 140-170 bytes each as JSON: keeps a `terrain.tiles` answer under 1 MB
+
+
+def _source_coverage(coverage, bounds: tuple[float, float, float, float]):
+    """The area a source is expected to cover: its clip polygon cut to the extent of its data, else that
+    extent. None when the clip and the data do not meet."""
+    if coverage is None:
+        return bounds
+    from shapely import box
+
+    area = coverage.intersection(box(*bounds))
+    return None if area.is_empty else area
+
+
+def _clip_test(coverage):
+    """A source's clip polygon as the `inside(e, n)` callable that `tin_from_points` expects; None when the
+    source was imported without a clip."""
+    if coverage is None:
+        return None
+    from shapely import intersects_xy
+
+    def inside(e: np.ndarray, n: np.ndarray) -> np.ndarray:
+        return intersects_xy(coverage, e, n)
+
+    return inside
+
+
+def _terrain_snapshot(project: ProjectState) -> tuple[tuple[str, list, object | None], ...]:
+    """(name, payloads, clip polygon) of each terrain source, newest first: what a worker thread builds from,
+    taken on the event loop so an import cannot change the dicts under it. Newer sources take precedence
+    over older ones until T-133 sets a policy."""
+    snapshot = []
+    for entry in reversed(list(project.sources.values())):
+        if entry.dataset.kind != SourceKind.TERRAIN:
+            continue
+        payloads = [
+            entry.payloads[o.id]
+            for o in entry.dataset.objects
+            if isinstance(entry.payloads.get(o.id), (TerrainPoints, TerrainGrid, TerrainTin))
+        ]
+        if payloads:
+            snapshot.append((entry.dataset.name, payloads, entry.coverage))
+    return tuple(snapshot)
+
+
+def _build_terrain(snapshot) -> tuple[TerrainStack, tuple, tuple[str, ...]]:
+    """Blocking: the stack, per-source coverage and warnings. A source that cannot be triangulated is skipped
+    with a warning. A source's point triangles are cut to its import clip (centroid test) and to edges of at
+    most 30 m. Runs in a worker thread (the triangulation releases the GIL)."""
+    surfaces = []
+    coverage = []
+    warnings = []
+    for name, payloads, clip in snapshot:
+        try:
+            surface = surface_for_source(payloads, inside=_clip_test(clip))
+        except ValueError as exc:
+            warnings.append(f"terrain source '{name}' skipped: {exc}")
+            continue
+        surfaces.append(surface)
+        area = _source_coverage(clip, surface.bounds())
+        if area is not None:
+            coverage.append(area)
+    stack = TerrainStack(tuple(surfaces))
+    stack.warm_up()  # the locators are built here, once, not by several baking threads at their first query
+    return stack, tuple(coverage), tuple(warnings)
+
+
+async def _build_into(session: Session, project: ProjectState, cache: TerrainCache, snapshot) -> None:
+    try:
+        async with project.terrain_build_lock:  # one Qhull at a time, so a superseded build is not doubled
+            async with session.gate:
+                stack, coverage, warnings = await asyncio.to_thread(_build_terrain, snapshot)
+    except BaseException:
+        cache.build = None
+        raise
+    # `cache` is this revision's own object: if the sources changed meanwhile it is no longer the project's
+    # current cache, so filling it cannot make stale data current.
+    cache.stack, cache.coverage, cache.warnings = stack, coverage, warnings
+
+
+async def _ensure_terrain(session: Session, project: ProjectState) -> TerrainCache:
+    """The terrain cache current when the request was ordered, with its stack built off the event loop. The
+    answer is for that revision even if an import supersedes it while it builds (the client then fetches with
+    the old revision, gets `E_NOT_FOUND` and lists again). Concurrent callers for one revision share one
+    build, and builds are serialised per project."""
+    cache = project.terrain_cache()
+    if cache.stack is None:
+        if cache.build is None:
+            snapshot = _terrain_snapshot(project)  # taken now, before any await
+            cache.build = asyncio.ensure_future(_build_into(session, project, cache, snapshot))
+            cache.build.add_done_callback(lambda f: f.cancelled() or f.exception())
+        try:
+            await asyncio.shield(cache.build)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ProtocolError(
+                ErrorCode.INTERNAL, f"terrain build failed: {type(exc).__name__}: {exc}"
+            ) from exc
+    return cache
+
+
+async def _bake(session: Session, cache: TerrainCache, level: int, ix: int, iy: int) -> TerrainTile:
+    """The tile, from the cache or baked in a worker thread. Concurrent requests for one tile of one
+    revision share one bake."""
+    tile = cache.get_tile(level, ix, iy)
+    if tile is not None:
+        return tile
+    key = (level, ix, iy)
+    future = cache.baking.get(key)
+    if future is None:
+        future = asyncio.ensure_future(_bake_into(session, cache, level, ix, iy))
+        cache.baking[key] = future
+        future.add_done_callback(lambda f: f.cancelled() or f.exception())
+    return await asyncio.shield(future)
+
+
+async def _bake_into(session: Session, cache: TerrainCache, level: int, ix: int, iy: int) -> TerrainTile:
+    key = (level, ix, iy)
+    try:
+        async with session.gate:
+            tile = await asyncio.to_thread(bake_tile, cache.stack, level, ix, iy)
+        cache.put_tile(tile)
+        return tile
+    finally:
+        cache.baking.pop(key, None)
+
+
+def _level_keys(cache: TerrainCache, level: int) -> tuple[tuple[int, int], ...]:
+    keys = cache.level_keys.get(level)
+    if keys is None:
+        keys = tuple(tiles_for_coverage(level, cache.coverage))
+        cache.level_keys[level] = keys
+    return keys
+
+
+def _tile_origin_godot(base: BasePoint, origin: tuple[float, float, float]) -> tuple[float, float, float]:
+    x, y, z = points_to_godot(np.array([origin], dtype=np.float64), base, dtype=np.float64)[0]
+    return (float(x), float(y), float(z))
+
+
+def _level(raw: int) -> int:
+    try:
+        return check_level(raw)
+    except ValueError as exc:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
+
+
+async def handle_terrain_tiles(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    project = _require_project(session)
+    req = _convert(params, TerrainTilesParams)
+    level = _level(req.level)
+    base = project.base_point or BasePoint(0.0, 0.0, 0.0)  # as of this request's place in the order
+    cache = await _ensure_terrain(session, project)
+    keys = _level_keys(cache, level)
+    if len(keys) > MAX_LISTED_TILES:
+        raise ProtocolError(
+            ErrorCode.BAD_PARAMS,
+            f"level {level} has {len(keys)} tiles, more than the {MAX_LISTED_TILES} one answer lists; "
+            "ask for a coarser level",
+        )
+    # tile_origin and valid_fraction come from the baked heights, so the first listing of a level bakes all
+    # of its tiles (about 10 ms each at L0 for Kralupy), in worker threads; the metadata is kept for the
+    # revision.
+    missing = [key for key in keys if (level, *key) not in cache.meta]
+    if missing:
+        results = await asyncio.gather(
+            *(_bake(session, cache, level, ix, iy) for ix, iy in missing), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+    infos = []
+    for ix, iy in keys:
+        origin, valid_fraction = cache.meta[(level, ix, iy)]
         infos.append(
-            TrackMeshChunkInfo(
-                chunk_index=chunk.chunk_index,
-                surface=chunk.surface,
-                station_start=chunk.station_start,
-                station_end=chunk.station_end,
-                tile_origin=(
-                    float(tile_origin_godot[0]),
-                    float(tile_origin_godot[1]),
-                    float(tile_origin_godot[2]),
-                ),
-                vertex_count=len(chunk.vertices),
-                index_count=len(chunk.indices),
+            TerrainTileInfo(
+                level=level,
+                ix=ix,
+                iy=iy,
+                edge_m=tile_edge(level),
+                tile_origin=_tile_origin_godot(base, origin),
+                valid_fraction=valid_fraction,
             )
         )
-        if req.metadata_only:
-            continue
-        suffix = f"{chunk.chunk_index}_{chunk.surface}"
-        blobs[f"vertices_{suffix}"] = chunk.vertices
-        blobs[f"normals_{suffix}"] = chunk.normals
-        blobs[f"uvs_{suffix}"] = chunk.uvs
-        blobs[f"indices_{suffix}"] = chunk.indices
+    result = TerrainTilesResult(
+        level=level, revision=cache.revision, tiles=tuple(infos), warnings=cache.warnings
+    )
+    return msgspec.to_builtins(result), {}
 
-    result = AlignmentTrackMeshResult(alignment_id=req.alignment_id, chunks=tuple(infos))
-    return msgspec.to_builtins(result), blobs
+
+async def handle_terrain_tile(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    project = _require_project(session)
+    req = _convert(params, TerrainTileParams)
+    level = _level(req.level)
+    base = project.base_point or BasePoint(0.0, 0.0, 0.0)
+    stale = ProtocolError(
+        ErrorCode.NOT_FOUND, f"terrain revision {req.revision} is out of date; list the tiles again"
+    )
+    if req.revision != project.terrain_cache().revision:  # no build for a request that is already stale
+        raise stale
+    cache = await _ensure_terrain(session, project)
+    if req.revision != cache.revision:
+        raise stale
+    if (req.ix, req.iy) not in set(_level_keys(cache, level)):
+        raise ProtocolError(ErrorCode.NOT_FOUND, f"no terrain tile {level}/{req.ix}/{req.iy}")
+    tile = await _bake(session, cache, level, req.ix, req.iy)
+    result = TerrainTileResult(
+        level=tile.level,
+        ix=tile.ix,
+        iy=tile.iy,
+        edge_m=tile.edge_m,
+        tile_origin=_tile_origin_godot(base, tile.origin),
+        valid_fraction=tile.valid_fraction,
+        revision=cache.revision,
+    )
+    return msgspec.to_builtins(result), {"heights": tile.heights}
 
 
 def _repository_root() -> Path | None:
@@ -812,7 +1103,7 @@ def _checked_output_path(raw: str) -> Path:
     return path
 
 
-def handle_alignment_envelope(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+async def handle_alignment_envelope(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     req = _convert(params, AlignmentEnvelopeParams)
     if project.crs is None:
@@ -835,8 +1126,10 @@ def handle_alignment_envelope(session: Session, params: dict[str, Any] | None) -
     out_path = _checked_output_path(req.path)
     if default_epsg(out_path, project.crs) is None and req.epsg is None:
         raise ProtocolError(ErrorCode.BAD_PARAMS, "the project CRS has no EPSG code; pass epsg")
+    alignments = [e.alignment for e in entries]
+    project_crs = project.crs
 
-    try:
+    def work():
         if req.epsg is not None:
             validate_output_crs(req.epsg)
         check_overwrite(out_path, req.overwrite)
@@ -846,9 +1139,12 @@ def handle_alignment_envelope(session: Session, params: dict[str, Any] | None) -
             station_to=req.station_to,
             cap="flat" if req.cap == "flat" else "round",
         )
-        result = export_corridor_envelope(
-            [e.alignment for e in entries], options, project.crs, out_path, req.epsg, overwrite=req.overwrite
+        return export_corridor_envelope(
+            alignments, options, project_crs, out_path, req.epsg, overwrite=req.overwrite
         )
+
+    try:
+        result = await _offload(session, work)
     except GisExtraMissing as exc:
         raise ProtocolError(ErrorCode.INTERNAL, str(exc)) from exc
     except (ValueError, ProjError) as exc:
@@ -948,6 +1244,8 @@ DISPATCH: dict[str, Handler] = {
     "plugins.list": handle_plugins_list,
     "alignment.frame_table": handle_alignment_frame_table,
     "alignment.track_mesh": handle_alignment_track_mesh,
+    "terrain.tiles": handle_terrain_tiles,
+    "terrain.tile": handle_terrain_tile,
     "alignment.envelope": handle_alignment_envelope,
     "run.list": handle_run_list,
     "run.get": handle_run_get,

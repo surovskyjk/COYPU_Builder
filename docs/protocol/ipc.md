@@ -26,6 +26,23 @@ and restarts the backend on connection loss. An external client finds a running 
 discovery record instead; see [attach.md](attach.md). A WebSocket handshake that carries an `Origin` header
 is refused with HTTP 403.
 
+**Ordering.** Within one connection, every request observes all state changes made by the requests sent
+before it, and none made by requests sent after it; `session.ping` is the exception and is always answered
+at once. Each method says whether it **changes state** (`session.hello`, `project.new`, the imports,
+`trainset.create`). The server keeps a chain of barriers per connection: a request that changes state waits
+for the previous barrier, then runs and becomes the new barrier; any other request waits for the latest
+barrier that arrived before it, then takes its snapshot. Requests between two barriers may run concurrently,
+so replies need not come back in request order; they carry the `id` of their request. A request is always
+refused or answered against the state it is ordered after: a request pipelined before `session.hello` gets
+`E_NO_SESSION`, one before `project.new` gets `E_NO_PROJECT`.
+
+**Long requests.** A request whose handler can run for more than about 100 ms (imports, inspection, frame and
+track-mesh baking, the envelope export, terrain builds and bakes) does its blocking work off the server's
+event loop, so `session.ping` and the waiting itself never block the connection. One connection runs at most
+4 such requests at a time and holds at most 64 more waiting; a further one is answered `E_BUSY` (retry
+later); `E_BUSY` is listed under every method that can return it. An exception inside a handler is answered
+`E_INTERNAL` for that request and the connection stays open.
+
 ## Blob encoding
 
 A method result may carry zero or more named blobs instead of putting bulk numeric data in the JSON
@@ -58,12 +75,13 @@ Every method declares how far a caller may rely on it (ADR 0010):
 | `EMPTY` | `E_EMPTY` |
 | `CRS_REQUIRED` | `E_CRS_REQUIRED` |
 | `INTERNAL` | `E_INTERNAL` |
+| `BUSY` | `E_BUSY` |
 
 ## Methods
 
 ### `session.hello`
 
-**Stability**: `stable`
+**Stability**: `stable`  ·  **Changes state**: yes
 
 Authenticate the connection and negotiate the protocol version.
 
@@ -87,7 +105,7 @@ Authenticate the connection and negotiate the protocol version.
 
 ### `session.ping`
 
-**Stability**: `stable`
+**Stability**: `stable`  ·  **Changes state**: no
 
 Liveness probe for the client heartbeat (ADR 0003, 2 s interval).
 
@@ -108,7 +126,7 @@ Liveness probe for the client heartbeat (ADR 0003, 2 s interval).
 
 ### `project.new`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: yes
 
 Open a new, empty project, optionally pinning its CRS and base point.
 
@@ -132,7 +150,7 @@ Open a new, empty project, optionally pinning its CRS and base point.
 
 ### `project.get`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 Return the current project's state.
 
@@ -153,7 +171,7 @@ None.
 
 ### `import.landxml`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: yes
 
 Import alignments from a LandXML file into the current project.
 
@@ -170,11 +188,11 @@ Import alignments from a LandXML file into the current project.
 |---|---|---|
 | `alignments` | `tuple[AlignmentSummary, ...]` | required |
 
-**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`, `E_BUSY`
 
 ### `import.coypu`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: yes
 
 Import a .coypu archive: its embedded LandXML alignment(s), every kinematics run normalised and attached to a trainset where the vehicle name matches a catalogue entry, and its stops.
 
@@ -195,11 +213,11 @@ Import a .coypu archive: its embedded LandXML alignment(s), every kinematics run
 | `stops` | `tuple[StopDTO, ...]` | required |
 | `warnings` | `tuple[str, ...]` | `()` |
 
-**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`, `E_BUSY`
 
 ### `import.kinematics`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: yes
 
 Import a standalone kinematics CSV (either dialect) attached to an already-imported alignment.
 
@@ -219,11 +237,11 @@ Import a standalone kinematics CSV (either dialect) attached to an already-impor
 | `stops` | `tuple[StopDTO, ...]` | required |
 | `warnings` | `tuple[str, ...]` | `()` |
 
-**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_BUSY`
 
 ### `import.inspect`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 Read a context-data source cheaply (terrain, imagery, later buildings, vegetation, water) and report its format, declared CRS (null when it has none, with a warning), extent, counts and proposed import settings. Step one of ADR 0009's inspect, confirm, import. Give exactly one of `path` and `paths` (several files of one format, e.g. the sheets of one survey, are one source: counts are summed, extents united, and differing declared CRSs are warned about and reported as null); every path must be absolute. `format_id` picks a reader instead of sniffing; a ZIP holding a single supported file reads like the bare file. Needs no project.
 
@@ -248,11 +266,11 @@ Read a context-data source cheaply (terrain, imagery, later buildings, vegetatio
 | `licence_hint` | `str | None` | required |
 | `warnings` | `tuple[str, ...]` | `()` |
 
-**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NOT_FOUND`, `E_INTERNAL`
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NOT_FOUND`, `E_INTERNAL`, `E_BUSY`
 
 ### `import.run`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: yes
 
 Import a context-data source with the confirmed `settings`, exactly as given, and record it as a `SourceDataset` with licence, attribution and provenance. A source with no declared CRS and no `settings.horizontal_crs` is refused with `E_CRS_REQUIRED`, never guessed; the project must have a CRS. Every object gets a GUID. `reimport_of` names an earlier source of the same kind and format: objects are matched on their own source key, matched ones keep their GUID, and the source keeps its id. Without it the import is a new source with all-new GUIDs. Counts report added, changed, unchanged and removed objects. Give exactly one of `path` and `paths`; every path must be absolute. With `paths` all files must resolve to the same reader (mixed formats are `E_BAD_PARAMS`) and each file yields its own objects.
 
@@ -283,11 +301,11 @@ Import a context-data source with the confirmed `settings`, exactly as given, an
 | `removed` | `int` | required |
 | `warnings` | `tuple[str, ...]` | `()` |
 
-**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`, `E_INTERNAL`
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`, `E_INTERNAL`, `E_BUSY`
 
 ### `source.list`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 List the context-data sources imported into the current project, one summary each.
 
@@ -305,7 +323,7 @@ None.
 
 ### `source.get`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 Fetch one source's full provenance record: origin with file hashes, the settings as confirmed, declared and effective CRS, the transformation used, licence, attribution, import time, tool version and every object's key and GUID.
 
@@ -340,7 +358,7 @@ Fetch one source's full provenance record: origin with file hashes, the settings
 
 ### `plugins.list`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 List the reader and provider plugins found as entry points, with their state: `loaded` (allow-listed and imported), `available` (found but not in the user's allow-list, never imported) or `failed` (allow-listed but raised on load, with the error). Also reports problems with the per-user `config.toml`.
 
@@ -359,7 +377,7 @@ None.
 
 ### `alignment.frame_table`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 Bake a dense, render-ready frame table for one alignment.
 
@@ -395,11 +413,11 @@ Bake a dense, render-ready frame table for one alignment.
 | `elevation` | `<f4` | `(n,)` | Profile elevation at the pivot [m]. |
 | `segment_index` | `<i4` | `(n,)` | Index of the horizontal segment containing this row. |
 
-**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_BUSY`
 
 ### `alignment.track_mesh`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 Bake two swept rails plus one default ballast prism for one alignment, chunked and tile-local (ADR 0004): every vertex is relative to its own chunk's tile_origin, never in absolute project coordinates. `metadata_only` returns every chunk's info and no blobs, so a client can learn the chunk count before paging by `chunk_index`.
 
@@ -429,11 +447,69 @@ Bake two swept rails plus one default ballast prism for one alignment, chunked a
 | `uvs_<i>_<surface>` | `<f4` | `(n, 2)` | Same naming scheme. `u` is accumulated perimeter distance around the profile; `v` is absolute station [m], so it matches exactly across a shared chunk boundary. |
 | `indices_<i>_<surface>` | `<i4` | `(m,)` | Same naming scheme. Triangle indices into that same blob's vertices, wound counter-clockwise as seen from outside. |
 
-**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_BUSY`
+
+### `terrain.tiles`
+
+**Stability**: `experimental`  ·  **Changes state**: no
+
+List the terrain display tiles of one level (0 to 4; edge 512 m * 2**level) that cover the project's terrain sources, metadata only: `level`, `ix`, `iy`, `edge_m`, `tile_origin` (Godot axes relative to the base point; its y is the tile's minimum valid height) and `valid_fraction`, plus the `revision` that changes whenever the sources change. Tiles are regular 129 x 129 heightfields derived from the analysis surface, for display only. A project without terrain returns an empty list. Page by calling `terrain.tile` for each listed tile.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `level` | `int` | `0` |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `level` | `int` | required |
+| `revision` | `int` | required |
+| `tiles` | `tuple[TerrainTileInfo, ...]` | required |
+| `warnings` | `tuple[str, ...]` | `()` |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_BUSY`
+
+### `terrain.tile`
+
+**Stability**: `experimental`  ·  **Changes state**: no
+
+Fetch one terrain display tile listed by `terrain.tiles`: its metadata plus the `heights` blob. `revision` must be the one the list returned; a stale revision, or a tile not in the list, is `E_NOT_FOUND`, and the client re-lists instead of mixing old and new tiles.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `level` | `int` | required |
+| `ix` | `int` | required |
+| `iy` | `int` | required |
+| `revision` | `int` | required |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `level` | `int` | required |
+| `ix` | `int` | required |
+| `iy` | `int` | required |
+| `edge_m` | `float` | required |
+| `tile_origin` | `tuple[float, float, float]` | required |
+| `valid_fraction` | `float` | required |
+| `revision` | `int` | required |
+
+**Blobs**
+
+| Name | dtype | Shape | Description |
+|---|---|---|---|
+| `heights` | `<f4` | `(129, 129)` | Heights in metres relative to the y of `tile_origin`; row 0 is the south edge, column 0 the west edge, spacing `edge_m / 128`. NaN where the tile has no data. Position the node at `tile_origin`; the origin is never folded into the values. |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_BUSY`
 
 ### `alignment.envelope`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 Write the corridor envelope -- a buffer polygon of `buffer_m` half-width around the plan centreline of the chosen alignments -- as GeoJSON (.geojson, .json) or Shapefile (.shp), and return its metadata. `path` must be absolute and outside the repository, `buffer_m` at most 5000 m, `epsg` a projected or geographic 2D CRS, and an existing file is only replaced when `overwrite` is true. A station range needs exactly one alignment. Requires the backend's `gis` extra; without it the call fails with an error that names `uv sync --extra gis`.
 
@@ -460,11 +536,11 @@ Write the corridor envelope -- a buffer polygon of `buffer_m` half-width around 
 | `vertex_count` | `int` | required |
 | `bounds` | `list[float]` | required |
 
-**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`, `E_INTERNAL`
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`, `E_INTERNAL`, `E_BUSY`
 
 ### `run.list`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 List the kinematics runs attached to the current project, without their baked tables.
 
@@ -482,7 +558,7 @@ None.
 
 ### `run.get`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 Fetch a kinematics run resampled onto a uniform time grid, as float32 blobs. Called once per run (ADR 0007), never per frame. There is no `time` blob: the table is time-uniform, so the client reconstructs t = i*dt from `dt` in the result.
 
@@ -519,7 +595,7 @@ Fetch a kinematics run resampled onto a uniform time grid, as float32 blobs. Cal
 
 ### `catalogue.vehicles`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 Return the process-wide vehicle catalogue as a flat JSON projection (cars and dynamics, no blobs).
 
@@ -537,7 +613,7 @@ None.
 
 ### `trainset.create`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: yes
 
 Assemble a consist from a catalogue key and attach it to the current project.
 
@@ -566,7 +642,7 @@ Assemble a consist from a catalogue key and attach it to the current project.
 
 ### `trainset.get`
 
-**Stability**: `experimental`
+**Stability**: `experimental`  ·  **Changes state**: no
 
 Fetch an assembled consist by id, cars already resolved. No poses (ADR 0007).
 

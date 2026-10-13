@@ -7,6 +7,7 @@ Every fixture is generated here, in `tmp_path`, from T-130's synthetic surface; 
 from __future__ import annotations
 
 import hashlib
+import re
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -1016,6 +1017,49 @@ def test_a_raster_emptied_by_the_clip_or_by_nodata_is_explained(tmp_path):
     empty = _import(plain, ImportSettings(clip=sliver))
     assert not empty.payloads
     assert any(w.startswith("grid: no valid heights") for w in empty.warnings)
+
+
+def _corrupt_point(text: str, point_id: int, token: int, value: str) -> str:
+    """Replace one of the three tokens (0 north, 1 east, 2 elevation) of <P id=point_id>."""
+    pattern = re.compile(rf'(<P id="{point_id}">)([^<]*)(</P>)')
+    match = pattern.search(text)
+    assert match is not None
+    tokens = match.group(2).split()
+    tokens[token] = value
+    return text[: match.start()] + match.group(1) + " ".join(tokens) + match.group(3) + text[match.end() :]
+
+
+def test_landxml_vertices_with_non_finite_coordinates_are_dropped_with_their_faces(tmp_path):
+    box = (-746800.0, -1025000.0, -746760.0, -1024960.0)
+    surf = grid_tin(box, 10.0, clockwise_every=10**6, hidden_every=10**6)  # 5 x 5 nodes
+    clean_faces = sum(1 for face in surf["faces"] if face[3])  # the visible ones
+    text = landxml_text([{"name": "EG", "points": surf["points"], "faces": surf["faces"]}])
+    text = _corrupt_point(text, 1, 0, "NaN")  # a corner node: north is NaN
+    text = _corrupt_point(text, 13, 2, "inf")  # an interior node: elevation is infinite
+    path = tmp_path / "surf.xml"
+    path.write_text(text, encoding="utf-8")
+
+    outcome = _import(path)
+    (tin,) = _payloads(outcome)
+    assert isinstance(tin, TerrainTin) and np.isfinite(tin.points).all()
+    dropped = clean_faces - len(tin.triangles)
+    assert dropped > 1 and len(tin.triangles) > 0
+    assert f"surf/EG: dropped 2 vertices and {dropped} faces with non-finite coordinates" in outcome.warnings
+    assert len(tin.points) <= 25 - 2
+
+
+def test_a_landxml_surface_with_nothing_finite_left_is_an_empty_source_with_a_warning(tmp_path):
+    points = np.array(
+        [[-746790.0, -1024990.0, 100.0], [-746780.0, -1024990.0, 101.0], [-746790.0, -1024980.0, 102.0]]
+    )
+    text = landxml_text([{"name": "EG", "points": points, "faces": [(0, 1, 2, True)]}])
+    path = tmp_path / "all.xml"
+    path.write_text(_corrupt_point(text, 1, 0, "NaN"), encoding="utf-8")
+    outcome = _import(path)
+    assert not outcome.payloads
+    assert "all/EG: dropped 1 vertices and 1 faces with non-finite coordinates" in outcome.warnings
+    assert any("produced no objects" in w for w in outcome.warnings)
+    assert inspect_source(path)[1].counts["points"] == 3  # a NaN token does not break the inspection either
 
 
 # --- the wire -

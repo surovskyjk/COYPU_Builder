@@ -93,6 +93,8 @@ class TerrainTin:
             raise ValueError(f"triangles must be an (m, 3) int32 array, got {tri.dtype} {tri.shape}")
         if len(tri) and (int(tri.min()) < 0 or int(tri.max()) >= len(self.points)):
             raise ValueError("triangle indices must refer to rows of points")
+        if not np.isfinite(self.points).all():
+            raise ValueError("a TIN's points must be finite (NaN or infinity found)")
 
 
 TerrainPayload = TerrainPoints | TerrainGrid | TerrainTin

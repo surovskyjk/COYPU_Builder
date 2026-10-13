@@ -29,6 +29,7 @@ class ErrorCode(StrEnum):
     EMPTY = "E_EMPTY"
     CRS_REQUIRED = "E_CRS_REQUIRED"
     INTERNAL = "E_INTERNAL"
+    BUSY = "E_BUSY"  # too many long requests in flight on this connection; retry later
 
 
 class BlobRef(msgspec.Struct, frozen=True):
@@ -305,6 +306,50 @@ class AlignmentTrackMeshResult(msgspec.Struct, frozen=True):
     chunks: tuple[TrackMeshChunkInfo, ...]
 
 
+# --- terrain.tiles / terrain.tile ------------------------------------------------------------------------
+# Display heightfield tiles (T-132): list a level, then fetch tiles one at a time (the F18 paging pattern).
+# See docs/data-contracts/terrain-tiles.md.
+
+
+class TerrainTilesParams(msgspec.Struct, frozen=True):
+    level: int = 0  # 0 to 4; edge 512 m * 2**level
+
+
+class TerrainTileInfo(msgspec.Struct, frozen=True):
+    level: int
+    ix: int
+    iy: int
+    edge_m: float
+    tile_origin: tuple[
+        float, float, float
+    ]  # Godot axes, relative to the base point; y = minimum valid height
+    valid_fraction: float
+
+
+class TerrainTilesResult(msgspec.Struct, frozen=True):
+    level: int
+    revision: int
+    tiles: tuple[TerrainTileInfo, ...]
+    warnings: tuple[str, ...] = ()
+
+
+class TerrainTileParams(msgspec.Struct, frozen=True):
+    level: int
+    ix: int
+    iy: int
+    revision: int  # from the `terrain.tiles` that listed this tile
+
+
+class TerrainTileResult(msgspec.Struct, frozen=True):
+    level: int
+    ix: int
+    iy: int
+    edge_m: float
+    tile_origin: tuple[float, float, float]
+    valid_fraction: float
+    revision: int
+
+
 # --- alignment.envelope ----------------------------------------------------------------------------------
 # Writes a corridor buffer polygon (GeoJSON or Shapefile, by the suffix of `path`) and returns metadata only.
 
@@ -510,6 +555,7 @@ class MethodSpec(msgspec.Struct, frozen=True):
     name: str
     summary: str  # one line, imperative
     stability: Stability
+    mutates: bool  # changes session or project state: see the dispatch rules in docs/protocol/ipc.md
     params: type | None
     result: type | None
     blobs: tuple[BlobSpec, ...] = ()
@@ -521,6 +567,7 @@ METHODS: tuple[MethodSpec, ...] = (
         name="session.hello",
         summary="Authenticate the connection and negotiate the protocol version.",
         stability=Stability.STABLE,
+        mutates=True,
         params=SessionHelloParams,
         result=SessionHelloResult,
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.UNAUTHORIZED),
@@ -529,6 +576,7 @@ METHODS: tuple[MethodSpec, ...] = (
         name="session.ping",
         summary="Liveness probe for the client heartbeat (ADR 0003, 2 s interval).",
         stability=Stability.STABLE,
+        mutates=False,
         params=SessionPingParams,
         result=SessionPingResult,
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION),
@@ -537,6 +585,7 @@ METHODS: tuple[MethodSpec, ...] = (
         name="project.new",
         summary="Open a new, empty project, optionally pinning its CRS and base point.",
         stability=Stability.EXPERIMENTAL,
+        mutates=True,
         params=ProjectNewParams,
         result=ProjectInfoResult,
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION),
@@ -545,6 +594,7 @@ METHODS: tuple[MethodSpec, ...] = (
         name="project.get",
         summary="Return the current project's state.",
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=None,
         result=ProjectInfoResult,
         errors=(ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT),
@@ -553,6 +603,7 @@ METHODS: tuple[MethodSpec, ...] = (
         name="import.landxml",
         summary="Import alignments from a LandXML file into the current project.",
         stability=Stability.EXPERIMENTAL,
+        mutates=True,
         params=ImportLandxmlParams,
         result=ImportLandxmlResult,
         errors=(
@@ -562,6 +613,7 @@ METHODS: tuple[MethodSpec, ...] = (
             ErrorCode.NOT_FOUND,
             ErrorCode.EMPTY,
             ErrorCode.CRS_REQUIRED,
+            ErrorCode.BUSY,
         ),
     ),
     MethodSpec(
@@ -571,6 +623,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "and attached to a trainset where the vehicle name matches a catalogue entry, and its stops."
         ),
         stability=Stability.EXPERIMENTAL,
+        mutates=True,
         params=ImportCoypuParams,
         result=ImportCoypuResult,
         errors=(
@@ -580,6 +633,7 @@ METHODS: tuple[MethodSpec, ...] = (
             ErrorCode.NOT_FOUND,
             ErrorCode.EMPTY,
             ErrorCode.CRS_REQUIRED,
+            ErrorCode.BUSY,
         ),
     ),
     MethodSpec(
@@ -588,9 +642,16 @@ METHODS: tuple[MethodSpec, ...] = (
             "Import a standalone kinematics CSV (either dialect) attached to an already-imported alignment."
         ),
         stability=Stability.EXPERIMENTAL,
+        mutates=True,
         params=ImportKinematicsParams,
         result=ImportKinematicsResult,
-        errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
+        errors=(
+            ErrorCode.BAD_PARAMS,
+            ErrorCode.NO_SESSION,
+            ErrorCode.NO_PROJECT,
+            ErrorCode.NOT_FOUND,
+            ErrorCode.BUSY,
+        ),
     ),
     MethodSpec(
         name="import.inspect",
@@ -604,6 +665,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "sniffing; a ZIP holding a single supported file reads like the bare file. Needs no project."
         ),
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=ImportInspectParams,
         result=ImportInspectResult,
         errors=(
@@ -611,6 +673,7 @@ METHODS: tuple[MethodSpec, ...] = (
             ErrorCode.NO_SESSION,
             ErrorCode.NOT_FOUND,
             ErrorCode.INTERNAL,
+            ErrorCode.BUSY,
         ),
     ),
     MethodSpec(
@@ -627,6 +690,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "same reader (mixed formats are `E_BAD_PARAMS`) and each file yields its own objects."
         ),
         stability=Stability.EXPERIMENTAL,
+        mutates=True,
         params=ImportRunParams,
         result=ImportRunResult,
         errors=(
@@ -637,12 +701,14 @@ METHODS: tuple[MethodSpec, ...] = (
             ErrorCode.EMPTY,
             ErrorCode.CRS_REQUIRED,
             ErrorCode.INTERNAL,
+            ErrorCode.BUSY,
         ),
     ),
     MethodSpec(
         name="source.list",
         summary="List the context-data sources imported into the current project, one summary each.",
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=None,
         result=SourceListResult,
         errors=(ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT),
@@ -655,6 +721,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "version and every object's key and GUID."
         ),
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=SourceGetParams,
         result=SourceDatasetDTO,
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
@@ -668,6 +735,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "with the per-user `config.toml`."
         ),
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=None,
         result=PluginsListResult,
         errors=(ErrorCode.NO_SESSION,),
@@ -676,6 +744,7 @@ METHODS: tuple[MethodSpec, ...] = (
         name="alignment.frame_table",
         summary="Bake a dense, render-ready frame table for one alignment.",
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=AlignmentFrameTableParams,
         result=AlignmentFrameTableResult,
         blobs=(
@@ -703,7 +772,13 @@ METHODS: tuple[MethodSpec, ...] = (
             BlobSpec("elevation", "<f4", "(n,)", "Profile elevation at the pivot [m]."),
             BlobSpec("segment_index", "<i4", "(n,)", "Index of the horizontal segment containing this row."),
         ),
-        errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
+        errors=(
+            ErrorCode.BAD_PARAMS,
+            ErrorCode.NO_SESSION,
+            ErrorCode.NO_PROJECT,
+            ErrorCode.NOT_FOUND,
+            ErrorCode.BUSY,
+        ),
     ),
     MethodSpec(
         name="alignment.track_mesh",
@@ -714,6 +789,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "learn the chunk count before paging by `chunk_index`."
         ),
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=AlignmentTrackMeshParams,
         result=AlignmentTrackMeshResult,
         blobs=(
@@ -747,7 +823,58 @@ METHODS: tuple[MethodSpec, ...] = (
                 "counter-clockwise as seen from outside.",
             ),
         ),
-        errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
+        errors=(
+            ErrorCode.BAD_PARAMS,
+            ErrorCode.NO_SESSION,
+            ErrorCode.NO_PROJECT,
+            ErrorCode.NOT_FOUND,
+            ErrorCode.BUSY,
+        ),
+    ),
+    MethodSpec(
+        name="terrain.tiles",
+        summary=(
+            "List the terrain display tiles of one level (0 to 4; edge 512 m * 2**level) that cover the "
+            "project's terrain sources, metadata only: `level`, `ix`, `iy`, `edge_m`, `tile_origin` "
+            "(Godot axes relative to the base point; its y is the tile's minimum valid height) and "
+            "`valid_fraction`, plus the `revision` that changes whenever the sources change. Tiles are "
+            "regular 129 x 129 heightfields derived from the analysis surface, for display only. A project "
+            "without terrain returns an empty list. Page by calling `terrain.tile` for each listed tile."
+        ),
+        stability=Stability.EXPERIMENTAL,
+        mutates=False,
+        params=TerrainTilesParams,
+        result=TerrainTilesResult,
+        errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.BUSY),
+    ),
+    MethodSpec(
+        name="terrain.tile",
+        summary=(
+            "Fetch one terrain display tile listed by `terrain.tiles`: its metadata plus the `heights` blob. "
+            "`revision` must be the one the list returned; a stale revision, or a tile not in the list, is "
+            "`E_NOT_FOUND`, and the client re-lists instead of mixing old and new tiles."
+        ),
+        stability=Stability.EXPERIMENTAL,
+        mutates=False,
+        params=TerrainTileParams,
+        result=TerrainTileResult,
+        blobs=(
+            BlobSpec(
+                "heights",
+                "<f4",
+                "(129, 129)",
+                "Heights in metres relative to the y of `tile_origin`; row 0 is the south edge, column 0 the "
+                "west edge, spacing `edge_m / 128`. NaN where the tile has no data. Position the node at "
+                "`tile_origin`; the origin is never folded into the values.",
+            ),
+        ),
+        errors=(
+            ErrorCode.BAD_PARAMS,
+            ErrorCode.NO_SESSION,
+            ErrorCode.NO_PROJECT,
+            ErrorCode.NOT_FOUND,
+            ErrorCode.BUSY,
+        ),
     ),
     MethodSpec(
         name="alignment.envelope",
@@ -760,6 +887,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "`gis` extra; without it the call fails with an error that names `uv sync --extra gis`."
         ),
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=AlignmentEnvelopeParams,
         result=AlignmentEnvelopeResult,
         errors=(
@@ -770,12 +898,14 @@ METHODS: tuple[MethodSpec, ...] = (
             ErrorCode.EMPTY,
             ErrorCode.CRS_REQUIRED,
             ErrorCode.INTERNAL,
+            ErrorCode.BUSY,
         ),
     ),
     MethodSpec(
         name="run.list",
         summary="List the kinematics runs attached to the current project, without their baked tables.",
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=None,
         result=RunListResult,
         errors=(ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT),
@@ -788,6 +918,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "client reconstructs t = i*dt from `dt` in the result."
         ),
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=RunGetParams,
         result=RunGetResult,
         blobs=(
@@ -831,6 +962,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "blobs)."
         ),
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=None,
         result=CatalogueVehiclesResult,
         errors=(ErrorCode.NO_SESSION,),
@@ -839,6 +971,7 @@ METHODS: tuple[MethodSpec, ...] = (
         name="trainset.create",
         summary="Assemble a consist from a catalogue key and attach it to the current project.",
         stability=Stability.EXPERIMENTAL,
+        mutates=True,
         params=TrainsetCreateParams,
         result=TrainsetDTO,
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
@@ -847,6 +980,7 @@ METHODS: tuple[MethodSpec, ...] = (
         name="trainset.get",
         summary="Fetch an assembled consist by id, cars already resolved. No poses (ADR 0007).",
         stability=Stability.EXPERIMENTAL,
+        mutates=False,
         params=TrainsetGetParams,
         result=TrainsetDTO,
         errors=(ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),

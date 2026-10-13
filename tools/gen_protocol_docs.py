@@ -50,6 +50,23 @@ on its command line), sends `session.hello` with that token, then heartbeats wit
 and restarts the backend on connection loss. An external client finds a running backend through its
 discovery record instead; see [attach.md](attach.md). A WebSocket handshake that carries an `Origin` header
 is refused with HTTP 403.
+
+**Ordering.** Within one connection, every request observes all state changes made by the requests sent
+before it, and none made by requests sent after it; `session.ping` is the exception and is always answered
+at once. Each method says whether it **changes state** (`session.hello`, `project.new`, the imports,
+`trainset.create`). The server keeps a chain of barriers per connection: a request that changes state waits
+for the previous barrier, then runs and becomes the new barrier; any other request waits for the latest
+barrier that arrived before it, then takes its snapshot. Requests between two barriers may run concurrently,
+so replies need not come back in request order; they carry the `id` of their request. A request is always
+refused or answered against the state it is ordered after: a request pipelined before `session.hello` gets
+`E_NO_SESSION`, one before `project.new` gets `E_NO_PROJECT`.
+
+**Long requests.** A request whose handler can run for more than about 100 ms (imports, inspection, frame and
+track-mesh baking, the envelope export, terrain builds and bakes) does its blocking work off the server's
+event loop, so `session.ping` and the waiting itself never block the connection. One connection runs at most
+4 such requests at a time and holds at most 64 more waiting; a further one is answered `E_BUSY` (retry
+later); `E_BUSY` is listed under every method that can return it. An exception inside a handler is answered
+`E_INTERNAL` for that request and the connection stays open.
 """
 
 _STABILITY_SECTION = """\
@@ -111,7 +128,15 @@ def _render_struct_table(struct_type: type) -> list[str]:
 
 
 def _render_method(spec: MethodSpec) -> list[str]:
-    lines = [f"### `{spec.name}`", "", f"**Stability**: `{spec.stability.value}`", "", spec.summary, ""]
+    changes = "yes" if spec.mutates else "no"
+    lines = [
+        f"### `{spec.name}`",
+        "",
+        f"**Stability**: `{spec.stability.value}`  ·  **Changes state**: {changes}",
+        "",
+        spec.summary,
+        "",
+    ]
     lines.extend(["**Params**", ""])
     lines.extend(_render_struct_table(spec.params) if spec.params is not None else ["None."])
     lines.extend(["", "**Result**", ""])
