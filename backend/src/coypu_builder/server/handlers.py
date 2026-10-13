@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -141,10 +142,17 @@ def _project_info(project: ProjectState) -> ProjectInfoResult:
     )
 
 
+def _token_matches(expected: str, supplied: str) -> bool:
+    """Constant-time comparison; an empty expected token matches nothing, so it never disables the check."""
+    if not expected:
+        return False
+    return hmac.compare_digest(expected.encode("utf-8"), supplied.encode("utf-8"))
+
+
 def handle_session_hello(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     req = _convert(params, SessionHelloParams)
-    if session.expected_token and req.token != session.expected_token:
-        raise ProtocolError(ErrorCode.UNAUTHORIZED, "token mismatch")
+    if session.expected_token is not None and not _token_matches(session.expected_token, req.token):
+        raise ProtocolError(ErrorCode.UNAUTHORIZED, "unauthorized")
     session.hello_received = True
     result = SessionHelloResult(
         session_id=session.session_id, protocol_version=PROTOCOL_VERSION, server_version=__version__

@@ -44,9 +44,24 @@ The JSON header is the `Envelope`: `v` (protocol version), `id`, `type` (`req` |
 (little-endian, C-order). Godot decodes a span with `PackedByteArray.slice(...).to_float32_array()` etc.;
 Python with `np.frombuffer`.
 
-The client spawns `coypu-builder-backend serve --port 0 --token <random>`, reads `{"port": N}` from stdout,
-sends `session.hello`, then heartbeats with `session.ping` every 2 s and restarts the backend on connection
-loss. `--backend-url` attaches to an externally started backend for debugging.
+The client spawns `coypu-builder-backend serve --port 0`, reads the one JSON line the backend prints on
+stdout (`{"port", "token", "pid", "protocol"}`; the backend creates its own session token and never takes one
+on its command line), sends `session.hello` with that token, then heartbeats with `session.ping` every 2 s
+and restarts the backend on connection loss. An external client finds a running backend through its
+discovery record instead; see [attach.md](attach.md). A WebSocket handshake that carries an `Origin` header
+is refused with HTTP 403.
+"""
+
+_STABILITY_SECTION = """\
+## Stability tiers
+
+Every method declares how far a caller may rely on it (ADR 0010):
+
+| Tier | Meaning |
+|---|---|
+| `internal` | the Godot client only; may change at any time |
+| `experimental` | usable by external clients; may change with a release note |
+| `stable` | changes only with a `PROTOCOL_VERSION` bump and a deprecation period |
 """
 
 _BLOB_SECTION = """\
@@ -96,7 +111,8 @@ def _render_struct_table(struct_type: type) -> list[str]:
 
 
 def _render_method(spec: MethodSpec) -> list[str]:
-    lines = [f"### `{spec.name}`", "", spec.summary, "", "**Params**", ""]
+    lines = [f"### `{spec.name}`", "", f"**Stability**: `{spec.stability.value}`", "", spec.summary, ""]
+    lines.extend(["**Params**", ""])
     lines.extend(_render_struct_table(spec.params) if spec.params is not None else ["None."])
     lines.extend(["", "**Result**", ""])
     lines.extend(_render_struct_table(spec.result) if spec.result is not None else ["None."])
@@ -122,6 +138,7 @@ def render() -> str:
         "",
         _ENVELOPE_SECTION,
         _BLOB_SECTION,
+        _STABILITY_SECTION,
         "## Error codes",
         "",
         "| Name | Value |",

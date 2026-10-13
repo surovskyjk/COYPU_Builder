@@ -31,8 +31,9 @@ to drive (imports, envelope export, terrain), and client mods need the M4 UI she
    id, protocol version, token) to a per-user runtime file only that user can read. External clients attach
    with that token. The token is 256 bits from a cryptographic source, always required (an empty token is
    accepted only by the test harness), compared in constant time, never logged, never written into the
-   repository, and never passed on a command line — the client hands it to the backend through the
-   environment or stdin.
+   repository, and never passed on a command line. T-126 reversed the direction: the backend creates the
+   token itself and reports it to the process that spawned it on its first stdout line (and, for external
+   clients, in the discovery record), so no secret has to be handed in at all.
 3. **The listener stays local and refuses browsers.** It binds to loopback only and rejects WebSocket
    handshakes that carry a browser `Origin` header. Sessions get scopes later (read, edit, import,
    file-system write), so an AI client can be granted read-only access. Every method that writes a file takes

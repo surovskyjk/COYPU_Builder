@@ -39,6 +39,6 @@ class ProjectState:
 @dataclass
 class Session:
     session_id: str
-    expected_token: str = ""
+    expected_token: str | None  # required (fails closed); None only in the test-only no-token mode
     hello_received: bool = False
     project: ProjectState | None = None

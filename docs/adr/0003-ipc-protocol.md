@@ -12,9 +12,11 @@ Status: accepted (2026-09-06)
   `PackedByteArray.slice(...).to_float32_array()` etc.; Python with `np.frombuffer`.
 - Bulk static assets (terrain height tiles, ortho images) are written to a session cache directory and referenced
   by path in the header.
-- Lifecycle: client spawns `coypu-builder-backend serve --port 0 --token <random>` via `OS.execute_with_pipe`,
-  reads `{"port": N}` from stdout, sends `session.hello`, heartbeats every 2 s, restarts on loss. `--backend-url`
-  attaches to an externally started backend for debugging.
+- Lifecycle: client spawns `coypu-builder-backend serve --port 0` via `OS.execute_with_pipe`, reads
+  `{"port": N, "token": "...", "pid": P, "protocol": "..."}` from stdout (the backend creates its own token,
+  ADR 0010), sends `session.hello` with it, heartbeats every 2 s, restarts on loss. `--attach` (optionally with
+  `--backend-url`) attaches to an externally started backend through its discovery record
+  (`docs/protocol/attach.md`).
 - `protocol/messages.py` (msgspec Structs) is the single source of truth; `tools/gen_protocol_docs.py` renders
   `docs/protocol/ipc.md` and CI fails when it is stale.
 

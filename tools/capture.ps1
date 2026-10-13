@@ -61,8 +61,7 @@ $Out = [System.IO.Path]::GetFullPath($(if ([System.IO.Path]::IsPathRooted($Out))
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 function Get-BackendProcesses {
-    # Matches the uv wrapper and the Python interpreter the client spawns. Command lines carry the IPC
-    # token, so callers print ids only.
+    # Matches the uv wrapper and the Python interpreter the client spawns; callers print ids only.
     Get-CimInstance Win32_Process |
         Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match "coypu-builder-backend" }
 }

@@ -6,10 +6,13 @@
   Open the Godot editor instead of running the main scene.
 .PARAMETER NoBackend
   Do not spawn the backend (e.g. it is already running under a debugger).
+.DESCRIPTION
+  The backend creates its own session token and publishes it, with its port, in a discovery record that
+  only the current user can read (docs/protocol/attach.md). The client is started with --attach and finds
+  that record itself; no token is ever passed on a command line.
 #>
 param(
     [int]$Port = 8765,
-    [string]$Token = "dev",
     [switch]$Editor,
     [switch]$NoBackend
 )
@@ -34,8 +37,26 @@ if (-not (Test-Path $uv)) { throw "uv not found; install with: winget install --
 if (-not $NoBackend) {
     Write-Host "Starting backend on ws://127.0.0.1:$Port"
     Start-Process -FilePath $uv `
-        -ArgumentList @("run", "coypu-builder-backend", "serve", "--port", "$Port", "--token", $Token) `
+        -ArgumentList @("run", "coypu-builder-backend", "serve", "--port", "$Port") `
         -WorkingDirectory (Join-Path $root "backend")
+
+    # Wait until the backend has published its discovery record (the record is read here only to compare
+    # its port and pid; the token in it is never printed).
+    $runtime = Join-Path $env:LOCALAPPDATA "COYPU Builder\runtime"
+    $deadline = (Get-Date).AddSeconds(60)
+    $published = $false
+    while (-not $published -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+        foreach ($file in @(Get-ChildItem -Path $runtime -Filter "backend-*.json" -ErrorAction SilentlyContinue)) {
+            try {
+                $record = [System.IO.File]::ReadAllText($file.FullName) | ConvertFrom-Json
+                if ($record.port -eq $Port -and (Get-Process -Id $record.pid -ErrorAction SilentlyContinue)) {
+                    $published = $true
+                }
+            } catch { }
+        }
+    }
+    if (-not $published) { throw "the backend did not publish a discovery record on port $Port within 60 s" }
 }
 
 $godot = Get-ChildItem (Join-Path $PSScriptRoot "godot") -Filter "Godot_v*_win64.exe" -ErrorAction SilentlyContinue |
@@ -46,6 +67,6 @@ $godotArgs = @("--path", (Join-Path $root "client"))
 if ($Editor) {
     $godotArgs += "--editor"
 } else {
-    $godotArgs += @("--", "--backend-url", "ws://127.0.0.1:$Port", "--backend-token", $Token)
+    $godotArgs += @("--", "--attach", "--backend-url", "ws://127.0.0.1:$Port")
 }
 & $godot.FullName @godotArgs

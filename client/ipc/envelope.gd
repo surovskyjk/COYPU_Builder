@@ -5,7 +5,7 @@ extends RefCounted
 ## Mirrors `backend/src/coypu_builder/protocol/messages.py` and `server/codec.py` — this is the only
 ## place on the client that knows the wire shape.
 
-const PROTOCOL_VERSION := 1  # must match coypu_builder.PROTOCOL_VERSION
+const PROTOCOL_VERSION := 2  # must match coypu_builder.PROTOCOL_VERSION
 const _HEADER_LEN_BYTES := 4
 
 var v: int

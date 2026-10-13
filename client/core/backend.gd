@@ -2,11 +2,15 @@ extends Node
 ## Autoload `Backend`: owns one [IpcProcessSupervisor] and one [IpcWebSocketClient] and is the only
 ## object in the client that talks to them (ADR 0003).
 ##
-## Lifecycle: [method start] spawns (or attaches, when `--backend-url` was given) -> connects ->
-## `session.hello` -> READY. A [Timer] heartbeats `session.ping` every [constant HEARTBEAT_INTERVAL_SEC]
+## Lifecycle: [method start] spawns (or attaches, when `--attach` or `--backend-url` was given) -> connects
+## -> `session.hello` -> READY. A [Timer] heartbeats `session.ping` every [constant HEARTBEAT_INTERVAL_SEC]
 ## once READY; three consecutive misses, a socket close or a supervisor crash all mean the connection is
 ## lost. Reconnection backs off 1s, 2s, 4s, 8s, 10s, then FAILED — except in attach mode, which retries
 ## forever at the last step, since the developer may be restarting the backend under a debugger.
+##
+## Token (ADR 0010): a spawned backend creates its own and reports it on stdout; an attached one is looked
+## up in its discovery record (see [IpcDiscovery]) on every attempt, so a restarted backend is picked up.
+## The token lives in memory only and is never printed, logged or put on a command line.
 
 enum State { DISCONNECTED, SPAWNING, CONNECTING, HANDSHAKING, READY, RECONNECTING, FAILED }
 
@@ -101,22 +105,27 @@ func debug_kill_backend_process() -> void:
 		_supervisor.debug_kill()
 
 
-func start() -> void:
+## Test-only (`test_token_hygiene.gd`), deliberately underscored: the token of the current session, so a test
+## can assert it never shows up in the client's output. It is not API; nothing else may call it, and no mod
+## surface may expose it.
+func _debug_session_token() -> String:
+	return _token
+
+
+## [param overrides] replace command-line arguments of the same name (a test seam: the tests cannot change
+## the command line gdUnit4 was started with).
+func start(overrides: Dictionary = {}) -> void:
 	if _state != State.DISCONNECTED and _state != State.FAILED:
 		return
 	_shutting_down = false
 	_reconnect_attempt = 0
 	var args := CliArgs.from_cmdline()
+	args.merge(overrides, true)
 	_attach_url = args.get("backend_url", "")
-	_token = args.get("backend_token", "")
-	_attach_mode = not _attach_url.is_empty()
-	if not _attach_mode and _token.is_empty():
-		# We choose the token for our own spawned process either way; an empty command-line argument is
-		# worth avoiding regardless of its cause, so pick a random one instead of "" when none was given
-		# (e.g. a bare `godot --path client` launch with no `--backend-token`).
-		_token = "%d-%d" % [Time.get_ticks_usec(), randi()]
+	_attach_mode = bool(args.get("attach", false)) or not _attach_url.is_empty()
+	_token = ""
 	if _attach_mode:
-		_connect_to(_attach_url)
+		_attach_and_connect()
 	else:
 		_spawn_and_connect()
 
@@ -194,10 +203,34 @@ func _spawn_and_connect() -> void:
 
 	var backend_dir := ProjectSettings.globalize_path("res://").path_join("../backend")
 	var args := PackedStringArray(["run", "--project", backend_dir, "coypu-builder-backend", "serve"])
-	_supervisor.start(uv, args, _token)
+	_supervisor.start(uv, args)
+
+
+## Attach mode: find the backend's discovery record (the one on `--backend-url`'s port, else the newest
+## live one), take the token from it and connect. The URL we connect to is never the caller's: the
+## argument is validated strictly ([method IpcDiscovery.parse_attach_url]) and the URL is built from the
+## matching record's port, so the token can only ever be sent to 127.0.0.1. A missing record is retried like
+## any lost connection (at most once a second, one liveness check per attempt).
+func _attach_and_connect() -> void:
+	var port := -1
+	if not _attach_url.is_empty():
+		var parsed := IpcDiscovery.parse_attach_url(_attach_url)
+		if parsed.is_empty():
+			push_error("Backend: refusing to attach: the URL must be ws://127.0.0.1:<port>")
+			_set_state(State.FAILED)
+			return
+		port = int(parsed["port"])
+	var record := IpcDiscovery.find(port)
+	if record.is_empty():
+		push_warning("Backend: no running backend found to attach to (waiting for its discovery record)")
+		_handle_connection_lost()
+		return
+	_token = record["token"]
+	_connect_to("ws://127.0.0.1:%d" % int(record["port"]))
 
 
 func _on_backend_ready(url: String) -> void:
+	_token = _supervisor.session_token()
 	_connect_to(url)
 
 
@@ -306,7 +339,7 @@ func _on_reconnect_timeout() -> void:
 	if _shutting_down:
 		return
 	if _attach_mode:
-		_connect_to(_attach_url)
+		_attach_and_connect()
 	else:
 		_spawn_and_connect()
 

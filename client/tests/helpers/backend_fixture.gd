@@ -6,8 +6,6 @@ extends RefCounted
 ## `after_test()` cannot leak a backend process even when the test that called [method start] or
 ## [method request] failed or timed out first.
 
-const TOKEN := "gdunit-tests"
-
 const _CONNECT_TIMEOUT_SEC := 10.0
 const _REQUEST_TIMEOUT_SEC := 10.0
 const _POLL_STEP_SEC := 0.02
@@ -16,6 +14,9 @@ const _POLL_STEP_SEC := 0.02
 ## callers can assert on it (e.g. `protocol_version`) without `start()` having to hand back the
 ## envelope itself.
 var hello_result: Dictionary
+
+## `ws://127.0.0.1:<port>` of the spawned backend.
+var backend_url := ""
 
 var _supervisor: IpcProcessSupervisor
 var _client: IpcWebSocketClient
@@ -41,6 +42,7 @@ static func start() -> BackendFixture:
 	if ready_url.is_empty():
 		fixture.stop()
 		return null
+	fixture.backend_url = ready_url
 
 	fixture._client = IpcWebSocketClient.new()
 	fixture._tree.root.add_child(fixture._client)
@@ -52,7 +54,8 @@ static func start() -> BackendFixture:
 		return null
 
 	var hello := await fixture.request(
-		"session.hello", {"client": "gdunit-tests", "client_version": "0", "token": TOKEN}
+		"session.hello",
+		{"client": "gdunit-tests", "client_version": "0", "token": fixture._supervisor.session_token()}
 	)
 	if hello.type != "res":
 		fixture.stop()
@@ -64,6 +67,16 @@ static func start() -> BackendFixture:
 
 func client() -> IpcWebSocketClient:
 	return _client
+
+
+## The backend interpreter's pid from its startup line, or -1.
+func backend_pid() -> int:
+	return _supervisor.backend_pid() if _supervisor != null else -1
+
+
+## The token the spawned backend reported, for tests that assert it never leaks. Memory only.
+func session_token() -> String:
+	return _supervisor.session_token() if _supervisor != null else ""
 
 
 ## Sends a request and waits (with a timeout) for the matching envelope; on timeout returns a
@@ -121,7 +134,7 @@ func _await_backend_ready(uv: String, backend_dir: String) -> String:
 	_supervisor.backend_ready.connect(on_ready)
 	_supervisor.backend_failed.connect(on_failed)
 
-	_supervisor.start(uv, args, TOKEN)
+	_supervisor.start(uv, args)
 
 	var elapsed := 0.0
 	while url_box[0].is_empty() and not failed_box[0] and elapsed < _CONNECT_TIMEOUT_SEC:

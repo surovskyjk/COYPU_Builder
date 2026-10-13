@@ -45,7 +45,7 @@ Four singletons, in the order `project.godot` registers them:
   repeat fetch with the same parameters never round-trips twice.
 
 `core/cli_args.gd` (`CliArgs`, not an autoload) parses the arguments after `--` on the command line:
-`--backend-url`, `--backend-token`, `--project`, and (T-125) `--capture`, `--capture-out`.
+`--attach`, `--backend-url`, `--project`, and (T-125) `--capture`, `--capture-out`. There is no token argument (T-126).
 
 ## Domain mirror (`domain_mirror/`)
 
@@ -276,17 +276,22 @@ A scenario is JSON (`tools/capture/scenario.gd` is the parser, and lists every e
 
 The driver (`tools/capture/capture_driver.gd`) is added by `scene/main.gd` only when `--capture <scenario>` is
 on the command line (`--capture-out <dir>` names the output folder); it uses the cameras, timeline and corridor
-through their public API and adds no behaviour of its own. `manifest.json` carries no IPC token: the client
-picks its own and never passes it to the driver.
+through their public API and adds no behaviour of its own. `manifest.json` carries no IPC token: the backend
+creates its own and the client never passes it to the driver.
 
 ## Launch modes
 
-- **Spawn mode** (no `--backend-url`): `Backend` locates `uv`, spawns
-  `coypu-builder-backend serve --port 0 --token <token>` itself, and owns its lifecycle — killing it on
-  shutdown and respawning it if it crashes. This is what a bare `godot --path client` does.
-- **Attach mode** (`--backend-url` given, as `tools\run_dev.ps1` does): `Backend` never spawns or kills a
-  process; it only connects. A lost connection still retries, since the developer may be restarting the
-  backend under a debugger.
+- **Spawn mode** (neither `--attach` nor `--backend-url`): `Backend` locates `uv`, spawns
+  `coypu-builder-backend serve --port 0` itself, reads the port and the session token the backend generated
+  from its one startup line on stdout (the token is kept in memory only and never goes on a command line),
+  and owns its lifecycle: killing it on shutdown and respawning it if it crashes. This is what a bare
+  `godot --path client` does.
+- **Attach mode** (`--attach`, optionally with `--backend-url ws://127.0.0.1:<port>`, as `tools\run_dev.ps1`
+  does; `--backend-url` alone also attaches): `Backend` never spawns or kills a process; it reads the
+  backend's discovery record (the one on that port, else the newest live one; see
+  `docs/protocol/attach.md`) for the token and connects, only to a loopback address. A lost connection still
+  retries, re-reading the record each time, since the developer may be restarting the backend under a
+  debugger.
 
 ## Tests
 

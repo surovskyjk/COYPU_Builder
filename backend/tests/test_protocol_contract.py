@@ -77,7 +77,7 @@ async def _call(
 
 
 async def test_session_ping_round_trip():
-    srv = await serve(host="127.0.0.1", port=0)
+    srv = await serve(host="127.0.0.1", port=0, allow_no_token=True)
     try:
         port = srv.sockets[0].getsockname()[1]
         async with connect(f"ws://127.0.0.1:{port}") as ws:

@@ -361,9 +361,18 @@ class BlobSpec(msgspec.Struct, frozen=True):
     description: str
 
 
+class Stability(StrEnum):
+    """How much a caller may rely on a method (ADR 0010, decision 1)."""
+
+    INTERNAL = "internal"  # the Godot client only; may change any time
+    EXPERIMENTAL = "experimental"  # usable externally; may change with a release note
+    STABLE = "stable"  # changes only with a PROTOCOL_VERSION bump and a deprecation period
+
+
 class MethodSpec(msgspec.Struct, frozen=True):
     name: str
     summary: str  # one line, imperative
+    stability: Stability
     params: type | None
     result: type | None
     blobs: tuple[BlobSpec, ...] = ()
@@ -374,6 +383,7 @@ METHODS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="session.hello",
         summary="Authenticate the connection and negotiate the protocol version.",
+        stability=Stability.STABLE,
         params=SessionHelloParams,
         result=SessionHelloResult,
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.UNAUTHORIZED),
@@ -381,6 +391,7 @@ METHODS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="session.ping",
         summary="Liveness probe for the client heartbeat (ADR 0003, 2 s interval).",
+        stability=Stability.STABLE,
         params=SessionPingParams,
         result=SessionPingResult,
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION),
@@ -388,6 +399,7 @@ METHODS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="project.new",
         summary="Open a new, empty project, optionally pinning its CRS and base point.",
+        stability=Stability.EXPERIMENTAL,
         params=ProjectNewParams,
         result=ProjectInfoResult,
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION),
@@ -395,6 +407,7 @@ METHODS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="project.get",
         summary="Return the current project's state.",
+        stability=Stability.EXPERIMENTAL,
         params=None,
         result=ProjectInfoResult,
         errors=(ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT),
@@ -402,6 +415,7 @@ METHODS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="import.landxml",
         summary="Import alignments from a LandXML file into the current project.",
+        stability=Stability.EXPERIMENTAL,
         params=ImportLandxmlParams,
         result=ImportLandxmlResult,
         errors=(
@@ -419,6 +433,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "Import a .coypu archive: its embedded LandXML alignment(s), every kinematics run normalised "
             "and attached to a trainset where the vehicle name matches a catalogue entry, and its stops."
         ),
+        stability=Stability.EXPERIMENTAL,
         params=ImportCoypuParams,
         result=ImportCoypuResult,
         errors=(
@@ -435,6 +450,7 @@ METHODS: tuple[MethodSpec, ...] = (
         summary=(
             "Import a standalone kinematics CSV (either dialect) attached to an already-imported alignment."
         ),
+        stability=Stability.EXPERIMENTAL,
         params=ImportKinematicsParams,
         result=ImportKinematicsResult,
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
@@ -442,6 +458,7 @@ METHODS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="alignment.frame_table",
         summary="Bake a dense, render-ready frame table for one alignment.",
+        stability=Stability.EXPERIMENTAL,
         params=AlignmentFrameTableParams,
         result=AlignmentFrameTableResult,
         blobs=(
@@ -479,6 +496,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "project coordinates. `metadata_only` returns every chunk's info and no blobs, so a client can "
             "learn the chunk count before paging by `chunk_index`."
         ),
+        stability=Stability.EXPERIMENTAL,
         params=AlignmentTrackMeshParams,
         result=AlignmentTrackMeshResult,
         blobs=(
@@ -524,6 +542,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "`overwrite` is true. A station range needs exactly one alignment. Requires the backend's "
             "`gis` extra; without it the call fails with an error that names `uv sync --extra gis`."
         ),
+        stability=Stability.EXPERIMENTAL,
         params=AlignmentEnvelopeParams,
         result=AlignmentEnvelopeResult,
         errors=(
@@ -539,6 +558,7 @@ METHODS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="run.list",
         summary="List the kinematics runs attached to the current project, without their baked tables.",
+        stability=Stability.EXPERIMENTAL,
         params=None,
         result=RunListResult,
         errors=(ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT),
@@ -550,6 +570,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "run (ADR 0007), never per frame. There is no `time` blob: the table is time-uniform, so the "
             "client reconstructs t = i*dt from `dt` in the result."
         ),
+        stability=Stability.EXPERIMENTAL,
         params=RunGetParams,
         result=RunGetResult,
         blobs=(
@@ -592,6 +613,7 @@ METHODS: tuple[MethodSpec, ...] = (
             "Return the process-wide vehicle catalogue as a flat JSON projection (cars and dynamics, no "
             "blobs)."
         ),
+        stability=Stability.EXPERIMENTAL,
         params=None,
         result=CatalogueVehiclesResult,
         errors=(ErrorCode.NO_SESSION,),
@@ -599,6 +621,7 @@ METHODS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="trainset.create",
         summary="Assemble a consist from a catalogue key and attach it to the current project.",
+        stability=Stability.EXPERIMENTAL,
         params=TrainsetCreateParams,
         result=TrainsetDTO,
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
@@ -606,6 +629,7 @@ METHODS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="trainset.get",
         summary="Fetch an assembled consist by id, cars already resolved. No poses (ADR 0007).",
+        stability=Stability.EXPERIMENTAL,
         params=TrainsetGetParams,
         result=TrainsetDTO,
         errors=(ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),

@@ -40,7 +40,7 @@ def _dispatch(session: Session, envelope: Envelope) -> bytes:
     return encode_frame(response, tail)
 
 
-async def _handle_connection(ws: ServerConnection, token: str) -> None:
+async def _handle_connection(ws: ServerConnection, token: str | None) -> None:
     session = Session(session_id=str(uuid.uuid4()), expected_token=token)
     try:
         async for raw in ws:
@@ -56,11 +56,30 @@ async def _handle_connection(ws: ServerConnection, token: str) -> None:
         pass
 
 
-async def serve(host: str = "127.0.0.1", port: int = 0, token: str = "") -> Server:
+async def serve(
+    host: str = "127.0.0.1",
+    port: int = 0,
+    token: str | None = None,
+    *,
+    allow_no_token: bool = False,
+) -> Server:
     """Start accepting connections; the returned `Server` is already listening (awaitable, use as a context
-    manager or call `.close()` / `.wait_closed()` to stop)."""
+    manager or call `.close()` / `.wait_closed()` to stop).
+
+    `token` is required and non-empty. The only way to run without one is the Python test API
+    (`token=None, allow_no_token=True`); the command line cannot. A handshake carrying any `Origin` header
+    (a browser) is refused with HTTP 403 before a single message is read; one without it is accepted."""
+    if token is None:
+        if not allow_no_token:
+            raise ValueError(
+                "serve() needs a session token; no-token mode is for tests (allow_no_token=True)"
+            )
+    elif not token:
+        raise ValueError("serve() refuses an empty token")
+    elif allow_no_token:
+        raise ValueError("allow_no_token=True contradicts an explicit token")
 
     async def connection_handler(ws: ServerConnection) -> None:
         await _handle_connection(ws, token)
 
-    return await ws_serve(connection_handler, host, port)
+    return await ws_serve(connection_handler, host, port, origins=[None])

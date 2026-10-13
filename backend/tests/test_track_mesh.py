@@ -189,7 +189,7 @@ async def _call(
 
 @pytest.fixture
 async def server():
-    srv = await serve(host="127.0.0.1", port=0)
+    srv = await serve(host="127.0.0.1", port=0, allow_no_token=True)
     try:
         yield srv
     finally:

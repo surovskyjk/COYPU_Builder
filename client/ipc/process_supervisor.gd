@@ -1,8 +1,11 @@
 class_name IpcProcessSupervisor
 extends Node
 ## Spawns and supervises the backend subprocess (ADR 0003): launches it via [method
-## OS.execute_with_pipe], reads the `{"port": N}` line it prints on startup, and reports if the
-## process exits unexpectedly so the caller can decide whether to restart it.
+## OS.execute_with_pipe], reads the `{"port": N, "token": "...", "pid": P, "protocol": "..."}` line it
+## prints on startup, and reports if the process exits unexpectedly so the caller can decide whether to
+## restart it. The backend creates its own session token (ADR 0010); the token never goes on a command
+## line, into a log line or to disk here: it is read from that line and kept in memory only, behind
+## [method session_token].
 
 signal backend_ready(url: String)
 signal backend_failed(reason: String)
@@ -19,15 +22,15 @@ var _stdio: FileAccess
 var _waiting_for_port := false
 var _wait_deadline_msec: int = 0
 var _confirmed_running := false
+var _token := ""
+var _backend_pid: int = -1  # the backend interpreter's own pid from its startup line (not uv's)
 
 
 ## `executable` + `args` are the process to launch (e.g. `uv`, ["run", "--project", "<backend dir>",
-## "coypu-builder-backend", "serve"]); `--port 0 --token <token>` is appended automatically.
-func start(executable: String, args: PackedStringArray, token: String) -> void:
+## "coypu-builder-backend", "serve"]); `--port 0` is appended automatically.
+func start(executable: String, args: PackedStringArray) -> void:
 	stop()
-	var full_args := args.duplicate()
-	full_args.append_array(["--port", "0", "--token", token])
-	var spawned := OS.execute_with_pipe(executable, full_args)
+	var spawned := OS.execute_with_pipe(executable, build_args(args))
 	if spawned.is_empty():
 		backend_failed.emit("failed to spawn '%s'" % executable)
 		return
@@ -38,9 +41,55 @@ func start(executable: String, args: PackedStringArray, token: String) -> void:
 	_wait_deadline_msec = Time.get_ticks_msec() + int(port_wait_timeout_sec * 1000)
 
 
+## The arguments the backend is spawned with: the caller's, plus `--port 0`. Static so a unit test can
+## assert that no token option is ever among them.
+static func build_args(args: PackedStringArray) -> PackedStringArray:
+	var full_args := args.duplicate()
+	full_args.append_array(["--port", "0"])
+	return full_args
+
+
+## Parses the backend's one startup line. Returns `{"port": int, "token": String, "pid": int}`, or an empty
+## [Dictionary] when [param line] is not a startup line. The token is empty when the backend omitted it.
+static func parse_startup_line(line: String) -> Dictionary:
+	var json := JSON.new()
+	if json.parse(line) != OK:
+		return {}
+	var parsed = json.data
+	if typeof(parsed) != TYPE_DICTIONARY or not parsed.has("port"):
+		return {}
+	return {
+		"port": int(parsed["port"]),
+		"token": String(parsed.get("token", "")),
+		"pid": int(parsed.get("pid", -1)),
+	}
+
+
+## The pid the backend reported in its startup line (the Python process, not the `uv` wrapper [member _pid]
+## holds), or -1. Not a secret.
+func backend_pid() -> int:
+	return _backend_pid
+
+
+## A hard kill (`taskkill /F` here, `SIGKILL` there) never lets the backend remove its own discovery record,
+## and the record holds the session token, so the client that killed it removes the record afterwards. It
+## only ever touches the file named after the pid the backend itself reported.
+func _remove_backend_record() -> void:
+	if _backend_pid > 0:
+		IpcDiscovery.delete_record(IpcDiscovery.runtime_dir(), _backend_pid)
+
+
+## The session token the running backend reported, or "" if none has started. Memory only.
+func session_token() -> String:
+	return _token
+
+
 func stop() -> void:
 	if is_running():
 		_kill_process_tree(_pid)
+	_remove_backend_record()
+	_token = ""
+	_backend_pid = -1
 	_pid = -1
 	_stdio = null
 	_waiting_for_port = false
@@ -146,9 +195,15 @@ func _poll_for_port() -> void:
 	var line := _stdio.get_line()
 	if line.is_empty():
 		return
-	var parsed = JSON.parse_string(line)
-	if typeof(parsed) != TYPE_DICTIONARY or not parsed.has("port"):
+	var startup := parse_startup_line(line)
+	if startup.is_empty():
 		return
 	_waiting_for_port = false
+	_backend_pid = int(startup["pid"])
+	if String(startup["token"]).is_empty():
+		stop()
+		backend_failed.emit("the backend did not report a session token")
+		return
+	_token = startup["token"]
 	_confirmed_running = true
-	backend_ready.emit("ws://%s:%d" % [host, int(parsed["port"])])
+	backend_ready.emit("ws://%s:%d" % [host, int(startup["port"])])

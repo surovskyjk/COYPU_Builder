@@ -2,7 +2,7 @@
 
 # COYPU Builder IPC protocol
 
-Localhost WebSocket IPC, protocol version `1` (ADR 0003). `backend/src/coypu_builder/protocol/messages.py` (the `METHODS` registry) is the single source of truth; regenerate this file with `uv run python ../tools/gen_protocol_docs.py` from `backend/`.
+Localhost WebSocket IPC, protocol version `2` (ADR 0003). `backend/src/coypu_builder/protocol/messages.py` (the `METHODS` registry) is the single source of truth; regenerate this file with `uv run python ../tools/gen_protocol_docs.py` from `backend/`.
 
 ## Envelope and framing
 
@@ -19,9 +19,12 @@ The JSON header is the `Envelope`: `v` (protocol version), `id`, `type` (`req` |
 (little-endian, C-order). Godot decodes a span with `PackedByteArray.slice(...).to_float32_array()` etc.;
 Python with `np.frombuffer`.
 
-The client spawns `coypu-builder-backend serve --port 0 --token <random>`, reads `{"port": N}` from stdout,
-sends `session.hello`, then heartbeats with `session.ping` every 2 s and restarts the backend on connection
-loss. `--backend-url` attaches to an externally started backend for debugging.
+The client spawns `coypu-builder-backend serve --port 0`, reads the one JSON line the backend prints on
+stdout (`{"port", "token", "pid", "protocol"}`; the backend creates its own session token and never takes one
+on its command line), sends `session.hello` with that token, then heartbeats with `session.ping` every 2 s
+and restarts the backend on connection loss. An external client finds a running backend through its
+discovery record instead; see [attach.md](attach.md). A WebSocket handshake that carries an `Origin` header
+is refused with HTTP 403.
 
 ## Blob encoding
 
@@ -30,6 +33,16 @@ A method result may carry zero or more named blobs instead of putting bulk numer
 a `dtype` (numpy dtype string, e.g. `<f4`, `<i4`) and a documentation `shape` such as `(n,)` or `(n, 3)`,
 where `n` is the row count for that method call. Bulk static assets (terrain height tiles, ortho images) are
 written to a session cache directory and referenced by path in the JSON `result` instead of riding a blob.
+
+## Stability tiers
+
+Every method declares how far a caller may rely on it (ADR 0010):
+
+| Tier | Meaning |
+|---|---|
+| `internal` | the Godot client only; may change at any time |
+| `experimental` | usable by external clients; may change with a release note |
+| `stable` | changes only with a `PROTOCOL_VERSION` bump and a deprecation period |
 
 ## Error codes
 
@@ -49,6 +62,8 @@ written to a session cache directory and referenced by path in the JSON `result`
 ## Methods
 
 ### `session.hello`
+
+**Stability**: `stable`
 
 Authenticate the connection and negotiate the protocol version.
 
@@ -72,6 +87,8 @@ Authenticate the connection and negotiate the protocol version.
 
 ### `session.ping`
 
+**Stability**: `stable`
+
 Liveness probe for the client heartbeat (ADR 0003, 2 s interval).
 
 **Params**
@@ -90,6 +107,8 @@ Liveness probe for the client heartbeat (ADR 0003, 2 s interval).
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`
 
 ### `project.new`
+
+**Stability**: `experimental`
 
 Open a new, empty project, optionally pinning its CRS and base point.
 
@@ -113,6 +132,8 @@ Open a new, empty project, optionally pinning its CRS and base point.
 
 ### `project.get`
 
+**Stability**: `experimental`
+
 Return the current project's state.
 
 **Params**
@@ -132,6 +153,8 @@ None.
 
 ### `import.landxml`
 
+**Stability**: `experimental`
+
 Import alignments from a LandXML file into the current project.
 
 **Params**
@@ -150,6 +173,8 @@ Import alignments from a LandXML file into the current project.
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`
 
 ### `import.coypu`
+
+**Stability**: `experimental`
 
 Import a .coypu archive: its embedded LandXML alignment(s), every kinematics run normalised and attached to a trainset where the vehicle name matches a catalogue entry, and its stops.
 
@@ -174,6 +199,8 @@ Import a .coypu archive: its embedded LandXML alignment(s), every kinematics run
 
 ### `import.kinematics`
 
+**Stability**: `experimental`
+
 Import a standalone kinematics CSV (either dialect) attached to an already-imported alignment.
 
 **Params**
@@ -195,6 +222,8 @@ Import a standalone kinematics CSV (either dialect) attached to an already-impor
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
 
 ### `alignment.frame_table`
+
+**Stability**: `experimental`
 
 Bake a dense, render-ready frame table for one alignment.
 
@@ -234,6 +263,8 @@ Bake a dense, render-ready frame table for one alignment.
 
 ### `alignment.track_mesh`
 
+**Stability**: `experimental`
+
 Bake two swept rails plus one default ballast prism for one alignment, chunked and tile-local (ADR 0004): every vertex is relative to its own chunk's tile_origin, never in absolute project coordinates. `metadata_only` returns every chunk's info and no blobs, so a client can learn the chunk count before paging by `chunk_index`.
 
 **Params**
@@ -266,6 +297,8 @@ Bake two swept rails plus one default ballast prism for one alignment, chunked a
 
 ### `alignment.envelope`
 
+**Stability**: `experimental`
+
 Write the corridor envelope -- a buffer polygon of `buffer_m` half-width around the plan centreline of the chosen alignments -- as GeoJSON (.geojson, .json) or Shapefile (.shp), and return its metadata. `path` must be absolute and outside the repository, `buffer_m` at most 5000 m, `epsg` a projected or geographic 2D CRS, and an existing file is only replaced when `overwrite` is true. A station range needs exactly one alignment. Requires the backend's `gis` extra; without it the call fails with an error that names `uv sync --extra gis`.
 
 **Params**
@@ -295,6 +328,8 @@ Write the corridor envelope -- a buffer polygon of `buffer_m` half-width around 
 
 ### `run.list`
 
+**Stability**: `experimental`
+
 List the kinematics runs attached to the current project, without their baked tables.
 
 **Params**
@@ -310,6 +345,8 @@ None.
 **Errors**: `E_NO_SESSION`, `E_NO_PROJECT`
 
 ### `run.get`
+
+**Stability**: `experimental`
 
 Fetch a kinematics run resampled onto a uniform time grid, as float32 blobs. Called once per run (ADR 0007), never per frame. There is no `time` blob: the table is time-uniform, so the client reconstructs t = i*dt from `dt` in the result.
 
@@ -346,6 +383,8 @@ Fetch a kinematics run resampled onto a uniform time grid, as float32 blobs. Cal
 
 ### `catalogue.vehicles`
 
+**Stability**: `experimental`
+
 Return the process-wide vehicle catalogue as a flat JSON projection (cars and dynamics, no blobs).
 
 **Params**
@@ -361,6 +400,8 @@ None.
 **Errors**: `E_NO_SESSION`
 
 ### `trainset.create`
+
+**Stability**: `experimental`
 
 Assemble a consist from a catalogue key and attach it to the current project.
 
@@ -388,6 +429,8 @@ Assemble a consist from a catalogue key and attach it to the current project.
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
 
 ### `trainset.get`
+
+**Stability**: `experimental`
 
 Fetch an assembled consist by id, cars already resolved. No poses (ADR 0007).
 

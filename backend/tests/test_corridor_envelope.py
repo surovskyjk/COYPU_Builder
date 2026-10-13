@@ -417,7 +417,7 @@ async def _call(ws, request_id: str, method: str, params: dict | None = None):
 
 @pytest.fixture
 async def server_url():
-    srv = await serve(host="127.0.0.1", port=0)
+    srv = await serve(host="127.0.0.1", port=0, allow_no_token=True)
     try:
         yield f"ws://127.0.0.1:{srv.sockets[0].getsockname()[1]}"
     finally:

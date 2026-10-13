@@ -5,7 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import secrets
+import signal
 import sys
+from datetime import UTC, datetime
 
 from coypu_builder import PROTOCOL_VERSION, __version__
 
@@ -51,11 +55,87 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_cuzk_parser(sub)
 
-    serve = sub.add_parser("serve", help="run the IPC server for the Godot client")
+    serve = sub.add_parser(
+        "serve",
+        help="run the IPC server (creates its own session token; see docs/protocol/attach.md)",
+    )
     serve.add_argument("--port", type=int, default=0)
-    serve.add_argument("--token", default="")
     serve.add_argument("--project", default=None)
     return parser
+
+
+def _discovery_warning(exc: BaseException) -> str:
+    """One stderr line for a discovery failure; never contains the token."""
+    return f"warning: discovery record skipped, attach mode unavailable ({exc})"
+
+
+def _startup_line(port: int, pid: int, token: str, record_path: str) -> str:
+    """The one line `serve` prints on stdout. The token is only included when stdout is not a terminal (a
+    pipe to a supervising client), so a manual run never shows the secret on screen."""
+    line: dict[str, object] = {"port": port, "pid": pid, "protocol": str(PROTOCOL_VERSION)}
+    if sys.stdout.isatty():
+        line["discovery"] = record_path
+    else:
+        line["token"] = token
+    return json.dumps(line)
+
+
+async def _serve(port: int) -> None:
+    from coypu_builder.server import serve as ws_serve
+    from coypu_builder.server.discovery import DiscoveryRecord, live_records, remove_record, write_record
+
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+
+    def request_stop(*_: object) -> None:
+        loop.call_soon_threadsafe(stop.set)
+
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        number = getattr(signal, name, None)
+        if number is not None:
+            signal.signal(number, request_stop)
+
+    token = secrets.token_urlsafe(32)
+    pid = os.getpid()
+    server = await ws_serve(port=port, token=token)
+    warned = False
+
+    def discovery_failed(exc: BaseException) -> None:
+        # A discovery failure (unwritable or unsafe runtime directory) only costs external attach: the
+        # supervising client gets the token over the pipe, so the server keeps serving. Warn once.
+        nonlocal warned
+        if not warned:
+            warned = True
+            print(_discovery_warning(exc), file=sys.stderr, flush=True)
+
+    try:
+        try:
+            live_records()  # sweeps the records of backends that died without cleaning up
+        except OSError as exc:
+            discovery_failed(exc)
+        bound_port = server.sockets[0].getsockname()[1]
+        record = DiscoveryRecord(
+            port=bound_port,
+            pid=pid,
+            protocol=str(PROTOCOL_VERSION),
+            backend_version=__version__,
+            token=token,
+            started_at=datetime.now(UTC).isoformat(),
+        )
+        try:
+            record_path = str(write_record(record))
+        except OSError as exc:
+            record_path = ""
+            discovery_failed(exc)
+        print(_startup_line(bound_port, pid, token, record_path), flush=True)
+        await stop.wait()
+    finally:
+        try:
+            remove_record(pid)
+        except OSError as exc:
+            discovery_failed(exc)
+        server.close()
+        await server.wait_closed()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,16 +164,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_cuzk(args)
     if args.command == "serve":
-        from coypu_builder.server import serve as ws_serve
-
-        async def _run() -> None:
-            server = await ws_serve(port=args.port, token=args.token)
-            port = server.sockets[0].getsockname()[1]
-            print(json.dumps({"port": port}), flush=True)
-            async with server:
-                await server.serve_forever()
-
-        asyncio.run(_run())
+        asyncio.run(_serve(args.port))
         return 0
     return 1
 

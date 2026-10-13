@@ -67,6 +67,9 @@ private/
 
 # Claude Code machine-local settings (shared agents under .claude/agents stay tracked)
 .claude/settings.local.json
+.claude/worktrees/
+.claude/agent-memory-local/
+CLAUDE.local.md
 
 # OS / editors
 Thumbs.db
