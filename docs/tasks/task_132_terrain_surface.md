@@ -168,6 +168,10 @@ class TerrainStack:
    - tile counts per level and the mean bake time per tile.
 
    The target is under 15 s for the surface and under 50 ms per L0 tile on this machine.
+
+   Also sample the analysis surface **directly under the Kralupy centreline every 100 m** over
+   stations 12.7–17.5 km. Report terrain height minus rail height per station, to separate cuttings from
+   profile error (ROADMAP F32).
 9. Both suites are green on Windows and on Linux CI, with no previously passing test removed, skipped or
    weakened; `gen_protocol_docs.py --check` exits 0.
 
