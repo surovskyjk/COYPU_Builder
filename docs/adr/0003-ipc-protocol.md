@@ -52,3 +52,29 @@ of reusing one: `WebSocketPeer.connect_to_url` refuses to run again until the ex
 `STATE_CLOSED`, and the restart-on-loss path above calls it as soon as a respawned backend is ready, with no
 guarantee the old peer has finished closing. The Windows tree-kill closes the old socket promptly enough that
 this race was never observed there; on Linux it failed every reconnect with `ERR_ALREADY_IN_USE`.
+
+## Addendum (2026-10-14): long calls never block the event loop, and requests stay sequential
+
+**Off the event loop.** Any handler that can spend more than about 100 ms of CPU time runs off the asyncio
+event loop: in a worker thread when the heavy library releases the GIL, which Qhull, numpy, laspy and
+rasterio do, otherwise in a worker process. A test must show `session.ping` still answering during the call.
+
+The client counts a heartbeat miss only when a ping has no reply within its 30 s request timeout, so a blocked
+loop does not disconnect it at once. But a blocked loop delays every reply and the client's view of the
+connection, so the 100 ms rule stands.
+
+The first case was the TIN build in T-132 (ROADMAP F34): about 8.8 s for the Kralupy corridor, with one
+remaining 0.6 s GIL stall at the end of Qhull.
+
+**Sharing and limits.** Concurrent requests for the same result share one computation. A result computed for
+a superseded state is discarded rather than cached. Each connection runs at most 4 off-loop jobs at once and
+holds at most 64 pending requests; beyond that it answers `E_BUSY`.
+
+**Sequential consistency per connection.** Within one connection, every request observes all state changes
+made by requests sent before it on that connection, and none made by requests sent after it.
+`session.ping` is always answered immediately.
+
+Every method declares `mutates`. A mutating request is a barrier: it waits for the previous barrier and then
+becomes the new one. Read-only requests wait for the latest barrier that arrived before them, and may run
+concurrently with each other. The rule keeps pipelining safe for scripts and for the MCP server (T-146),
+which do not wait for each reply before sending the next request.

@@ -82,9 +82,16 @@ class TerrainStack:
   - mosaics several grids into one `GridSurface` when they share CRS and cell size, and otherwise stacks
     them.
 - **No triangle may bridge a gap.** A Delaunay triangulation fills the convex hull, but the corridor clip is
-  concave: S-bends, and the area between two corridor arms. So `tin_from_points` drops every triangle with an
-  edge longer than `max_edge_m`. The default is 5 × the median nearest-neighbour distance, computed with
-  `scipy.spatial.cKDTree`. Outside the remaining triangles, `heights` returns NaN.
+  concave: S-bends, and the area between two corridor arms. Two rules apply, decided 2026-10-14 after the
+  real-data run:
+  - **Clip polygon, primary:** when the source has a clip polygon, every triangle whose centroid lies outside
+    it is dropped. This is exact for concave bends at any point density.
+  - **Edge length, secondary:** for genuine data gaps, a triangle with an edge longer than `max_edge_m` is
+    dropped. The default is **30 m**, and an explicit value overrides it.
+
+  The originally specified default, 5 × the median nearest-neighbour distance, left 25 % of the Kralupy
+  corridor as holes. DMR 5G key points are dense on breaklines and sparse on flat ground. Outside the
+  remaining triangles, `heights` returns NaN.
 - Point location: use `Delaunay.find_simplex` on the kept triangulation (or an equivalent vectorised
   locator). Queries must be vectorised; 1e6 points must not run a Python loop.
 - `TerrainStack` is the single query API for T-135 and T-137. T-133 decides the order and records each
@@ -101,8 +108,9 @@ class TerrainStack:
   - Every tile is 129 × 129 heights on its own lattice, with corners shared with the neighbours; spacing is
     `edge / 128`, so 4 m at L0 and 64 m at L4.
   - Each height is `TerrainStack.heights()` at the lattice point.
-- **Which tiles exist:** those whose square intersects the union of the sources' coverage, i.e. their clip
-  polygons, or their data extent if there was no clip.
+- **Which tiles exist:** those whose square intersects the union of the sources' coverage. A source's
+  coverage is its clip polygon cut to its data's bounding box, or the data extent if there was no clip, so a
+  clip longer than the imported sheets lists no empty tiles past the data (revised 2026-10-14).
 - **Encoding:** a tile carries:
   - `tile_origin`: the SW corner at the tile's minimum valid height, mapped to Godot axes, float64;
   - `heights`: float32 `(129, 129)`, row 0 at the south edge, values relative to `tile_origin`'s height;
