@@ -33,7 +33,13 @@ tools\run_dev.ps1                          # backend + client together
 - **Backend `domain/` is pure**: numpy/scipy/pyproj/networkx only, no I/O, no protocol types. `io/` converts formats ⇄ domain; `server/` is the only layer that knows the wire format. Heavy optional deps (rasterio, OWSLib, ifcopenshell) are imported lazily inside their `io/` modules.
 - **float64 domain, float32 wire.** Every position sent to the client is relative to the Project Base Point (`domain/crs.py: to_local`) and mapped to Godot axes `x = E−E0, y = H−H0, z = −(N−N0)`; meshes are additionally tile-local.
 - **Stations are absolute metres** everywhere in the domain (LandXML `staStart` basis). COYPU's km appear only inside `io/coypu`.
-- **LandXML point tokens** follow `io/landxml/dialects.py`: Křovák CRS → positive tokens are (X south, Y west) ⇒ `E=−t2, N=−t1`; otherwise spec order (N, E) unless overridden. Never special-case a fixture.
+- **Coordinate tokens** follow `io/landxml/dialects.py`, for every format:
+  - *Order* says which token is the east axis and which the north axis.
+    - `auto` is the format's native order: N, E for LandXML; E, N for LAS and GeoTIFF.
+    - An explicit `EN` or `NE` always wins.
+  - *Sign* applies only to Křovák values: positive (Y west, X south) values become `E = −Y`, `N = −X`.
+  - So a LandXML Křovák file with positive tokens still gives `E = −t2`, `N = −t1`.
+  - Never special-case a fixture.
 - **Cant**: |mm|, `roll = −sign(κ)·asin(D/base)`, base 1500 mm default; `RotationPivot.LOW_RAIL` moves the track-plane centre, not the profile. Keep `lrs.frames` the single place this is applied.
 - **Multi-modal**: `Mode` tags semantics; the LRS `(s, y, z)` model is shared by heavy rail, trams, trolleybus and service roads. Do not add rail-only assumptions to `domain/lrs.py` or `domain/model`.
 - Prove geometry changes with the golden tests (`tests/test_lrs_golden.py`) — stations bit-identical to 1e-6, key points to 1e-9, dense polyline within the documented tolerance.

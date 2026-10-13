@@ -103,6 +103,9 @@ one supported file. The SHA-256 recorded is the ZIP's. Each file becomes one `Im
 | `raster.py` | `geotiff` | the declared CRS, bounds, resolution, size, nodata, band count | `TerrainGrid`; a source in another CRS is warped to the project CRS at its own resolution, or at `display_resolution_m` when set, with bilinear resampling |
 | `landxml_surface.py` | `landxml-surface` | the number of surfaces, points and faces; the CRS from `<CoordinateSystem>` | `TerrainTin`, with point tokens resolved by the dialect rules |
 
+- **Native coordinate order:** LAS and GeoTIFF readers pass their tokens as (x, y) = (E, N) and declare the
+  native order `"EN"` to T-130's `resolve_transform` (CLAUDE.md, "Coordinate tokens"). The LandXML-surface
+  reader keeps `"NE"`. Positive Křovák values are negated by the dialect's sign rule whatever the order.
 - **LAS:**
   - Apply the header's scale and offset in float64.
   - **Never round-trip coordinates through float32.** Křovák values sit near −1,025,000, so float32 would
