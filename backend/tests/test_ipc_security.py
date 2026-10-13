@@ -292,17 +292,44 @@ def _acl_principals(target: Path) -> tuple[set[str], bool]:
     return principals, ":(I)" in acl
 
 
+def _icacls_ok(*args: str) -> None:
+    subprocess.run(["icacls", *args], check=True, capture_output=True)
+
+
+def _user_principal() -> str:
+    domain = os.environ.get("USERDOMAIN")
+    return f"{domain}{chr(92)}{os.environ['USERNAME']}" if domain else os.environ["USERNAME"]
+
+
+def _make_inheriting_directory(base: Path) -> None:
+    """A directory that really inherits a broad principal. Whether a directory made under a pytest temp
+    directory inherits anything depends on that parent's ACL (a protected one without inheritable entries
+    passes nothing down), so the parent is given an inheritable grant to the well-known Users group and
+    inheritance is switched on explicitly."""
+    base.parent.mkdir(parents=True, exist_ok=True)
+    _icacls_ok(str(base.parent), "/grant", "*S-1-5-32-545:(OI)(CI)R")
+    base.mkdir()
+    _icacls_ok(str(base), "/inheritance:e")
+
+
+def _make_protected_directory(base: Path) -> None:
+    """A directory with a protected ACL naming only the current user, whatever its parent carries."""
+    base.mkdir(parents=True)
+    _icacls_ok(str(base), "/grant", f"{_user_principal()}:(OI)(CI)F")
+    _icacls_ok(str(base), "/inheritance:r")
+
+
 @pytest.mark.skipif(not ON_WINDOWS, reason="Windows ACLs")
 def test_an_existing_directory_with_an_inherited_acl_is_made_protected(runtime_root):
     base = runtime_root / "COYPU Builder" / "runtime"
-    base.mkdir(parents=True)  # default mode: the ACL is inherited from the parent
+    _make_inheriting_directory(base)
     discovery._acl_verified.discard(base)
-    assert _acl_principals(base)[1], "precondition: the pre-existing directory inherits its ACL"
+    names, inherits = _acl_principals(base)
+    assert inherits and "users" in names, "precondition: the directory inherits a broad principal"
     assert discovery.runtime_dir() == base
     principals, inherits = _acl_principals(base)
     assert not inherits
-    assert os.environ["USERNAME"].lower() in principals
-    assert principals <= {os.environ["USERNAME"].lower(), "system", "administrators", "owner rights"}
+    assert principals == {os.environ["USERNAME"].lower()}
     # Still usable by us.
     discovery.write_record(_record(os.getpid()))
     assert len(discovery.live_records()) == 1
@@ -321,8 +348,8 @@ def test_a_directory_whose_acl_cannot_be_protected_is_refused(runtime_root, monk
 @pytest.mark.skipif(not ON_WINDOWS, reason="Windows ACLs")
 def test_a_protected_directory_with_an_explicit_grant_to_everyone_is_repaired(runtime_root):
     base = runtime_root / "COYPU Builder" / "runtime"
-    base.mkdir(parents=True, mode=0o700)  # protected, like a fresh one
-    subprocess.run(["icacls", str(base), "/grant", "Everyone:(OI)(CI)R"], check=True, capture_output=True)
+    _make_protected_directory(base)
+    _icacls_ok(str(base), "/grant", "Everyone:(OI)(CI)R")
     discovery._acl_verified.discard(base)
     names, inherits = _acl_principals(base)
     assert "everyone" in names and not inherits, "precondition"
