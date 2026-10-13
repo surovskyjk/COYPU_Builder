@@ -109,7 +109,8 @@ A `SourceReader` has `format_id`, `kinds`, `suffixes`, `sniff(path)`, `inspect(p
 `read(path, settings, transform, clip_polygon)`, which yields `ImportedObject(key, content_hash, payload)`.
 `reader_for(path, format_id=None)` picks the named reader, else the first registered whose `sniff` accepts the
 file (suffix matches first), else raises `ValueError`. Built-in readers register directly with
-`register_reader`; there are none yet. A `SourceProvider` (`provider_id`, `kinds`, `licence`, `attribution`,
+`register_reader`; the three terrain readers (`las`, `geotiff`, `landxml-surface`) are described in
+`terrain-payloads.md`. A `SourceProvider` (`provider_id`, `kinds`, `licence`, `attribution`,
 `inspect`, `fetch`) sits behind the same seam; its files go through the readers (ADR 0009 decision 7).
 
 A reader's `ValueError` and `OSError` become `E_BAD_PARAMS`. Everything else is a reader bug and becomes
@@ -152,7 +153,8 @@ If the package metadata itself cannot be enumerated, each plugin group is report
 ## Protocol
 
 All five methods are `experimental` (`docs/protocol/ipc.md`): `import.inspect`, `import.run`, `source.list`,
-`source.get`, `plugins.list`. Paths must be absolute. `ImportSettingsDTO.clip` is a tagged union on `type`:
+`source.get`, `plugins.list`. Paths must be absolute; `import.inspect` and `import.run` take either `path` or `paths` (several files of one
+format are one source, one object per file; see `terrain-payloads.md`). `ImportSettingsDTO.clip` is a tagged union on `type`:
 `{"type": "corridor", ...}` or `{"type": "bbox", ...}`, or `null`. `SourceDatasetDTO.origin` is tagged
 `"file"` or `"provider"`.
 

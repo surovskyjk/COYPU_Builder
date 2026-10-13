@@ -153,8 +153,9 @@ class ImportSettingsDTO(msgspec.Struct, frozen=True):
 
 
 class ImportInspectParams(msgspec.Struct, frozen=True):
-    path: str  # absolute
+    path: str | None = None  # absolute; exactly one of `path` and `paths`
     format_id: str | None = None  # None = sniffed
+    paths: tuple[str, ...] | None = None  # absolute; several files of one format are one source
 
 
 class ImportInspectResult(msgspec.Struct, frozen=True):
@@ -168,8 +169,9 @@ class ImportInspectResult(msgspec.Struct, frozen=True):
     warnings: tuple[str, ...] = ()
 
 
-class ImportRunParams(msgspec.Struct, frozen=True):
-    path: str  # absolute
+class ImportRunParams(msgspec.Struct, frozen=True, kw_only=True):
+    path: str | None = None  # absolute; exactly one of `path` and `paths`
+    paths: tuple[str, ...] | None = None  # absolute; several files of one format are one source
     kind: str  # "terrain" | "imagery" | "buildings" | "vegetation" | "water"
     settings: ImportSettingsDTO
     name: str | None = None
@@ -595,8 +597,11 @@ METHODS: tuple[MethodSpec, ...] = (
         summary=(
             "Read a context-data source cheaply (terrain, imagery, later buildings, vegetation, water) and "
             "report its format, declared CRS (null when it has none, with a warning), extent, counts and "
-            "proposed import settings. Step one of ADR 0009's inspect, confirm, import. `path` must be "
-            "absolute; `format_id` picks a reader instead of sniffing. Needs no project."
+            "proposed import settings. Step one of ADR 0009's inspect, confirm, import. Give exactly one "
+            "of `path` and `paths` (several files of one format, e.g. the sheets of one survey, are one "
+            "source: counts are summed, extents united, and differing declared CRSs are warned about and "
+            "reported as null); every path must be absolute. `format_id` picks a reader instead of "
+            "sniffing; a ZIP holding a single supported file reads like the bare file. Needs no project."
         ),
         stability=Stability.EXPERIMENTAL,
         params=ImportInspectParams,
@@ -617,7 +622,9 @@ METHODS: tuple[MethodSpec, ...] = (
             "project must have a CRS. Every object gets a GUID. `reimport_of` names an earlier source of "
             "the same kind and format: objects are matched on their own source key, matched ones keep "
             "their GUID, and the source keeps its id. Without it the import is a new source with all-new "
-            "GUIDs. Counts report added, changed, unchanged and removed objects. `path` must be absolute."
+            "GUIDs. Counts report added, changed, unchanged and removed objects. Give exactly one of "
+            "`path` and `paths`; every path must be absolute. With `paths` all files must resolve to the "
+            "same reader (mixed formats are `E_BAD_PARAMS`) and each file yields its own objects."
         ),
         stability=Stability.EXPERIMENTAL,
         params=ImportRunParams,

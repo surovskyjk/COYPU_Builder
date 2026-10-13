@@ -50,6 +50,7 @@ from coypu_builder.io.sources.runner import (
     inspect_source,
     run_import,
 )
+from coypu_builder.io.terrain import register_builtin_readers
 from coypu_builder.protocol.messages import (
     AlignmentEnvelopeParams,
     AlignmentEnvelopeResult,
@@ -105,6 +106,8 @@ from coypu_builder.protocol.messages import (
     VehicleSpecDTO,
 )
 from coypu_builder.server.session import AlignmentEntry, ProjectState, RunEntry, Session, SourceEntry
+
+register_builtin_readers()
 
 HandlerResult = tuple[dict[str, Any], dict[str, np.ndarray]]
 Handler = Callable[[Session, "dict[str, Any] | None"], HandlerResult]
@@ -559,6 +562,18 @@ def _source_path(raw: str) -> Path:
     return path
 
 
+def _source_paths(path: str | None, paths: tuple[str, ...] | None) -> list[Path]:
+    """The one `path`, or every entry of `paths`; exactly one of the two must be given."""
+    if (path is None) == (paths is None):
+        raise ProtocolError(ErrorCode.BAD_PARAMS, "give exactly one of 'path' and 'paths'")
+    raw = [path] if path is not None else list(paths or ())
+    if not raw:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, "'paths' must not be empty")
+    if len(set(raw)) != len(raw):
+        raise ProtocolError(ErrorCode.BAD_PARAMS, "'paths' lists a path twice")
+    return [_source_path(item) for item in raw]
+
+
 def _source_kind(raw: str) -> SourceKind:
     try:
         return SourceKind(raw)
@@ -583,10 +598,10 @@ def _inspect_result(report: InspectReport) -> ImportInspectResult:
 def handle_import_inspect(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     _require_hello(session)
     req = _convert(params, ImportInspectParams)
-    path = _source_path(req.path)
+    paths = _source_paths(req.path, req.paths)
     plugin_report()  # allow-listed plugin readers must be registered before one is looked up
     try:
-        _reader, report = inspect_source(path, req.format_id)
+        _reader, report = inspect_source(paths, req.format_id)
         result = _inspect_result(report)
     except (GisExtraMissing, ReaderFailure) as exc:
         raise ProtocolError(ErrorCode.INTERNAL, str(exc)) from exc
@@ -600,7 +615,7 @@ def handle_import_inspect(session: Session, params: dict[str, Any] | None) -> Ha
 def handle_import_run(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     req = _convert(params, ImportRunParams)
-    path = _source_path(req.path)
+    paths = _source_paths(req.path, req.paths)
     plugin_report()
     kind = _source_kind(req.kind)
     settings = _settings_from_dto(req.settings)
@@ -617,7 +632,7 @@ def handle_import_run(session: Session, params: dict[str, Any] | None) -> Handle
 
     try:
         outcome = run_import(
-            path,
+            paths,
             kind,
             settings,
             project.crs,

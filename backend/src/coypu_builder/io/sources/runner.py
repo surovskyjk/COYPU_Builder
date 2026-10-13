@@ -9,8 +9,9 @@ with the payloads. Nothing here touches the project or the wire format.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -37,13 +38,16 @@ from coypu_builder.domain.sources import (
 from coypu_builder.io.gis.envelope import EnvelopeOptions, GisExtraMissing, corridor_envelope
 from coypu_builder.io.sources.registry import (
     CrsTransform,
+    ImportedObject,
     InspectReport,
     ReaderFailure,
     SourceReader,
     reader_for,
 )
+from coypu_builder.io.terrain.archive import extraction_scope, release
 
 _HASH_CHUNK = 1 << 20
+_NOTES: ContextVar[list[str] | None] = ContextVar("import_notes", default=None)
 # The Krovak variants whose positive-valued X/Y axes `resolve_coordinates` turns into East-North values; the
 # resolved coordinates are then in the East-North twin of the declared CRS, which is what gets reprojected.
 _KROVAK_EAST_NORTH = {5513: 5514, 2065: 5221, 8352: 8353}
@@ -70,6 +74,14 @@ class ImportOutcome:
     warnings: tuple[str, ...]
 
 
+def note(message: str) -> None:
+    """Called by a reader while it reads: a warning for the import in progress, for example why a file
+    contributed no object. Ignored outside an import."""
+    notes = _NOTES.get()
+    if notes is not None and message not in notes:
+        notes.append(message)
+
+
 def _call_reader[T](label: str, call: Callable[[], T]) -> T:
     try:
         return call()
@@ -79,11 +91,39 @@ def _call_reader[T](label: str, call: Callable[[], T]) -> T:
         raise ReaderFailure(f"{label} failed: {type(exc).__name__}: {exc}") from exc
 
 
-def inspect_source(path: Path, format_id: str | None = None) -> tuple[SourceReader, InspectReport]:
+def as_paths(path: Path | str | Sequence[Path | str]) -> tuple[Path, ...]:
+    """One path or a list of them as a tuple of distinct `Path`s. Raises `ValueError` for none or a repeat."""
+    items = [Path(path)] if isinstance(path, (str, Path)) else [Path(p) for p in path]
+    if not items:
+        raise ValueError("no path given")
+    seen: set[Path] = set()
+    for item in items:
+        if item in seen:
+            raise ValueError(f"path '{item}' is given twice")
+        seen.add(item)
+    return tuple(items)
+
+
+def reader_for_all(paths: Sequence[Path], format_id: str | None = None) -> SourceReader:
+    """The one reader that fits every file; files that need different readers are refused."""
+    readers = {id(r): r for r in (reader_for(p, format_id) for p in paths)}
+    if len(readers) > 1:
+        names = ", ".join(sorted(r.format_id for r in readers.values()))
+        raise ValueError(f"the files are of different formats ({names}); import one format at a time")
+    return next(iter(readers.values()))
+
+
+def inspect_source(
+    path: Path | str | Sequence[Path | str], format_id: str | None = None
+) -> tuple[SourceReader, InspectReport]:
     """Pick the reader and ask it what the source holds. A source with no declared CRS gets a warning here,
-    whatever the reader says, because import will refuse it unless the settings supply one."""
-    reader = reader_for(path, format_id)
-    report = _inspect(reader, path)
+    whatever the reader says, because import will refuse it unless the settings supply one. Several paths
+    are one source: their counts are summed, their extents united, and files declaring different CRSs are
+    reported with no declared CRS and a warning."""
+    paths = as_paths(path)
+    reader = reader_for_all(paths, format_id)
+    with extraction_scope():
+        report = _merge_reports(paths, [_inspect(reader, p) for p in paths])
     if report.declared_crs is None:
         warning = (
             "the source declares no coordinate reference system; set horizontal_crs in the import settings, "
@@ -92,6 +132,60 @@ def inspect_source(path: Path, format_id: str | None = None) -> tuple[SourceRead
         if warning not in report.warnings:
             report = _replace_warnings(report, (*report.warnings, warning))
     return reader, report
+
+
+def _merge_reports(paths: Sequence[Path], reports: Sequence[InspectReport]) -> InspectReport:
+    if len(reports) == 1:
+        return reports[0]
+    first = reports[0]
+    declared = {r.declared_crs for r in reports}
+    warnings: dict[str, list[str]] = {}
+    for path, report in zip(paths, reports, strict=True):
+        for warning in report.warnings:
+            warnings.setdefault(warning, []).append(path.name)
+    merged: list[str] = []
+    for warning, names in warnings.items():
+        if len(names) == len(reports):
+            merged.append(warning)
+        else:
+            shown = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+            merged.append(f"{warning} [{shown}]")
+    declared_crs = first.declared_crs
+    if len(declared) > 1:
+        declared_crs = None
+        listing = ", ".join(sorted(d if d is not None else "none" for d in declared))
+        merged.append(
+            f"the files declare different coordinate reference systems ({listing}); none is assumed"
+        )
+    counts: dict[str, int] = {}
+    for report in reports:
+        for key, value in report.counts.items():
+            counts[key] = counts.get(key, 0) + int(value)
+    extents = [r.extent for r in reports if r.extent is not None]
+    extent = (
+        (
+            min(e[0] for e in extents),
+            min(e[1] for e in extents),
+            max(e[2] for e in extents),
+            max(e[3] for e in extents),
+        )
+        if extents
+        else None
+    )
+    licences = {r.licence_hint for r in reports}
+    suggested = first.suggested
+    if suggested.horizontal_crs != declared_crs:
+        suggested = replace(suggested, horizontal_crs=declared_crs)
+    return InspectReport(
+        first.format_id,
+        first.kind,
+        declared_crs,
+        extent,
+        counts,
+        suggested,
+        first.licence_hint if len(licences) == 1 else None,
+        tuple(merged),
+    )
 
 
 def _inspect(reader: SourceReader, path: Path) -> InspectReport:
@@ -299,7 +393,7 @@ def sha256_file(path: Path) -> str:
 
 
 def run_import(
-    path: Path,
+    path: Path | str | Sequence[Path | str],
     kind: SourceKind,
     settings: ImportSettings,
     project_crs: ProjectCRS,
@@ -310,7 +404,7 @@ def run_import(
     previous: SourceDataset | None = None,
     make_id: Callable[[], EntityId] = new_id,
 ) -> ImportOutcome:
-    """Import one source file with the confirmed `settings`.
+    """Import one source, a file or a list of files read by the same reader, with the confirmed `settings`.
 
     With `previous`, objects are matched to that import on their own keys, so matched objects keep their GUID
     and the dataset keeps its id; without it every GUID is new. `previous` must have the same kind and
@@ -318,10 +412,11 @@ def run_import(
     Raises `ValueError` for bad input, `CrsRequired`, `UnknownAlignment`, `NoAlignments`, `GisExtraMissing`,
     `OSError` and `ReaderFailure`.
     """
-    path = Path(path)
-    if not path.is_absolute():
-        raise ValueError(f"path must be absolute, got '{path}'")
-    reader = reader_for(path, format_id)
+    paths = as_paths(path)
+    for item in paths:
+        if not item.is_absolute():
+            raise ValueError(f"path must be absolute, got '{item}'")
+    reader = reader_for_all(paths, format_id)
     if kind not in reader.kinds:
         raise ValueError(f"reader '{reader.format_id}' does not read {kind.value} sources")
     if previous is not None and (previous.kind != kind or previous.format_id != reader.format_id):
@@ -330,20 +425,31 @@ def run_import(
             f"not {kind.value} as '{reader.format_id}'"
         )
 
-    report = _inspect(reader, path)
-    polygon = clip_polygon(settings.clip, alignments)
-    transform = resolve_transform(
-        settings,
-        report.declared_crs,
-        project_crs,
-        _probe(polygon, alignments),
-        native_order=getattr(reader, "native_order", "NE"),
-    )
-    digest = sha256_file(path)
+    notes: list[str] = []
+    with extraction_scope():
+        report = _merge_reports(paths, [_inspect(reader, p) for p in paths])
+        polygon = clip_polygon(settings.clip, alignments)
+        transform = resolve_transform(
+            settings,
+            report.declared_crs,
+            project_crs,
+            _probe(polygon, alignments),
+            native_order=getattr(reader, "native_order", "NE"),
+        )
+        digests = tuple(sha256_file(p) for p in paths)
 
-    objects = _call_reader(
-        f"reader '{reader.format_id}'", lambda: list(reader.read(path, settings, transform, polygon))
-    )
+        def read_all() -> list[ImportedObject]:
+            found: list[ImportedObject] = []
+            for p in paths:
+                found.extend(reader.read(p, settings, transform, polygon))
+                release(p)
+            return found
+
+        token = _NOTES.set(notes)
+        try:
+            objects = _call_reader(f"reader '{reader.format_id}'", read_all)
+        finally:
+            _NOTES.reset(token)
     hashes: dict[str, str] = {}
     payloads_by_key: dict[str, object] = {}
     for item in objects:
@@ -366,9 +472,9 @@ def run_import(
     dataset = SourceDataset(
         id=previous.id if previous is not None else make_id(),
         kind=kind,
-        name=name or (previous.name if previous is not None else path.stem),
+        name=name or (previous.name if previous is not None else _default_name(paths)),
         format_id=reader.format_id,
-        origin=FileOrigin(paths=(str(path),), sha256=(digest,)),
+        origin=FileOrigin(paths=tuple(str(p) for p in paths), sha256=digests),
         settings=settings,
         declared_crs=report.declared_crs,
         effective_crs=transform.effective_crs,
@@ -380,5 +486,17 @@ def run_import(
         tool_version=f"coypu-builder {__version__}",
         objects=reconciliation.objects,
     )
-    warnings = (*transform.warnings, *report.warnings)
-    return ImportOutcome(dataset, payloads, reconciliation, warnings)
+    warnings = [*transform.warnings, *report.warnings, *notes]
+    if not objects:
+        warnings.append(
+            "the import produced no objects: every file was empty after the class filter, nodata handling "
+            "and clip (see the warnings above)"
+        )
+    return ImportOutcome(dataset, payloads, reconciliation, tuple(warnings))
+
+
+def _default_name(paths: Sequence[Path]) -> str:
+    """The file's stem; for several files, the folder they share, else the first file's stem."""
+    if len(paths) > 1 and len({p.parent for p in paths}) == 1 and paths[0].parent.name:
+        return paths[0].parent.name
+    return paths[0].stem
