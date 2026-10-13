@@ -26,6 +26,7 @@ from coypu_builder.domain.kinematics import Stop, bake_run_table
 from coypu_builder.domain.model.trainset import Trainset
 from coypu_builder.domain.model.vehicle import CarSpec, TractionBand, VehicleDynamics, VehicleSpec
 from coypu_builder.domain.sampling import bake_frame_table
+from coypu_builder.domain.sources import BBoxClip, CorridorClip, FileOrigin, ImportSettings, SourceKind
 from coypu_builder.io.catalogue.vehicles import Catalogue, load_catalogue, resolve
 from coypu_builder.io.coypu.archive import CoypuProject, read_coypu
 from coypu_builder.io.coypu.kinematics_csv import read_kinematics_csv, read_stops_csv
@@ -40,6 +41,15 @@ from coypu_builder.io.gis.envelope import (
 )
 from coypu_builder.io.landxml import LandXmlAlignment, read_landxml, to_alignment
 from coypu_builder.io.mesh.track import bake_track_mesh
+from coypu_builder.io.sources.registry import InspectReport, plugin_report
+from coypu_builder.io.sources.runner import (
+    CrsRequired,
+    NoAlignments,
+    ReaderFailure,
+    UnknownAlignment,
+    inspect_source,
+    run_import,
+)
 from coypu_builder.protocol.messages import (
     AlignmentEnvelopeParams,
     AlignmentEnvelopeResult,
@@ -49,17 +59,29 @@ from coypu_builder.protocol.messages import (
     AlignmentTrackMeshParams,
     AlignmentTrackMeshResult,
     BasePointDTO,
+    BBoxClipDTO,
     CarSpecDTO,
     CatalogueVehiclesResult,
+    CorridorClipDTO,
     ErrorCode,
+    FileOriginDTO,
     ImportCoypuParams,
     ImportCoypuResult,
+    ImportInspectParams,
+    ImportInspectResult,
     ImportKinematicsParams,
     ImportKinematicsResult,
     ImportLandxmlParams,
     ImportLandxmlResult,
+    ImportRunParams,
+    ImportRunResult,
+    ImportSettingsDTO,
+    ObjectRecordDTO,
+    PluginInfoDTO,
+    PluginsListResult,
     ProjectInfoResult,
     ProjectNewParams,
+    ProviderOriginDTO,
     RunGetParams,
     RunGetResult,
     RunListResult,
@@ -68,6 +90,10 @@ from coypu_builder.protocol.messages import (
     SessionHelloResult,
     SessionPingParams,
     SessionPingResult,
+    SourceDatasetDTO,
+    SourceGetParams,
+    SourceListResult,
+    SourceSummary,
     StopDTO,
     TrackMeshChunkInfo,
     TractionBandDTO,
@@ -78,7 +104,7 @@ from coypu_builder.protocol.messages import (
     VehicleDynamicsDTO,
     VehicleSpecDTO,
 )
-from coypu_builder.server.session import AlignmentEntry, ProjectState, RunEntry, Session
+from coypu_builder.server.session import AlignmentEntry, ProjectState, RunEntry, Session, SourceEntry
 
 HandlerResult = tuple[dict[str, Any], dict[str, np.ndarray]]
 Handler = Callable[[Session, "dict[str, Any] | None"], HandlerResult]
@@ -451,6 +477,224 @@ def handle_import_kinematics(session: Session, params: dict[str, Any] | None) ->
     return msgspec.to_builtins(result), {}
 
 
+def _clip_from_dto(dto: CorridorClipDTO | BBoxClipDTO | None) -> CorridorClip | BBoxClip | None:
+    if dto is None:
+        return None
+    if isinstance(dto, BBoxClipDTO):
+        return BBoxClip(dto.min_e, dto.min_n, dto.max_e, dto.max_n)
+    return CorridorClip(dto.buffer_m, tuple(dto.alignment_ids), dto.station_from, dto.station_to)
+
+
+def _clip_to_dto(clip: CorridorClip | BBoxClip | None) -> CorridorClipDTO | BBoxClipDTO | None:
+    if clip is None:
+        return None
+    if isinstance(clip, BBoxClip):
+        return BBoxClipDTO(clip.min_e, clip.min_n, clip.max_e, clip.max_n)
+    return CorridorClipDTO(clip.buffer_m, tuple(clip.alignment_ids), clip.station_from, clip.station_to)
+
+
+def _settings_from_dto(dto: ImportSettingsDTO) -> ImportSettings:
+    try:
+        return ImportSettings(
+            horizontal_crs=dto.horizontal_crs,
+            vertical_crs=dto.vertical_crs,
+            coordinate_order=dto.coordinate_order,
+            linear_unit_m=dto.linear_unit_m,
+            clip=_clip_from_dto(dto.clip),
+            point_classes=None if dto.point_classes is None else tuple(dto.point_classes),
+            display_resolution_m=dto.display_resolution_m,
+            nodata=dto.nodata,
+        )
+    except ValueError as exc:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
+
+
+def _settings_to_dto(settings: ImportSettings) -> ImportSettingsDTO:
+    return ImportSettingsDTO(
+        horizontal_crs=settings.horizontal_crs,
+        vertical_crs=settings.vertical_crs,
+        coordinate_order=settings.coordinate_order,
+        linear_unit_m=settings.linear_unit_m,
+        clip=_clip_to_dto(settings.clip),
+        point_classes=settings.point_classes,
+        display_resolution_m=settings.display_resolution_m,
+        nodata=settings.nodata,
+    )
+
+
+def _dataset_dto(entry: SourceEntry) -> SourceDatasetDTO:
+    dataset = entry.dataset
+    origin = dataset.origin
+    origin_dto: FileOriginDTO | ProviderOriginDTO = (
+        FileOriginDTO(origin.paths, origin.sha256)
+        if isinstance(origin, FileOrigin)
+        else ProviderOriginDTO(origin.provider_id, origin.query)
+    )
+    return SourceDatasetDTO(
+        id=dataset.id,
+        kind=dataset.kind.value,
+        name=dataset.name,
+        format_id=dataset.format_id,
+        origin=origin_dto,
+        settings=_settings_to_dto(dataset.settings),
+        declared_crs=dataset.declared_crs,
+        effective_crs=dataset.effective_crs,
+        transformation=dataset.transformation,
+        transformation_accuracy_m=dataset.transformation_accuracy_m,
+        licence=dataset.licence,
+        attribution=dataset.attribution,
+        imported_at=dataset.imported_at,
+        tool_version=dataset.tool_version,
+        objects=tuple(ObjectRecordDTO(o.key, o.id, o.content_hash) for o in dataset.objects),
+        warnings=entry.warnings,
+    )
+
+
+def _source_path(raw: str) -> Path:
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ProtocolError(ErrorCode.BAD_PARAMS, f"path must be absolute, got '{raw}'")
+    if not path.is_file():
+        raise ProtocolError(ErrorCode.NOT_FOUND, f"no such file: {path}")
+    return path
+
+
+def _source_kind(raw: str) -> SourceKind:
+    try:
+        return SourceKind(raw)
+    except ValueError as exc:
+        known = ", ".join(k.value for k in SourceKind)
+        raise ProtocolError(ErrorCode.BAD_PARAMS, f"unknown kind '{raw}' (one of: {known})") from exc
+
+
+def _inspect_result(report: InspectReport) -> ImportInspectResult:
+    return ImportInspectResult(
+        format_id=report.format_id,
+        kind=report.kind.value,
+        declared_crs=report.declared_crs,
+        extent=None if report.extent is None else tuple(float(v) for v in report.extent),
+        counts={str(k): int(v) for k, v in report.counts.items()},
+        suggested_settings=_settings_to_dto(report.suggested),
+        licence_hint=report.licence_hint,
+        warnings=tuple(report.warnings),
+    )
+
+
+def handle_import_inspect(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    _require_hello(session)
+    req = _convert(params, ImportInspectParams)
+    path = _source_path(req.path)
+    plugin_report()  # allow-listed plugin readers must be registered before one is looked up
+    try:
+        _reader, report = inspect_source(path, req.format_id)
+        result = _inspect_result(report)
+    except (GisExtraMissing, ReaderFailure) as exc:
+        raise ProtocolError(ErrorCode.INTERNAL, str(exc)) from exc
+    except (ValueError, OSError, ProjError) as exc:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
+    except Exception as exc:  # a plugin's malformed answer must not drop the connection
+        raise ProtocolError(ErrorCode.INTERNAL, f"import failed: {type(exc).__name__}: {exc}") from exc
+    return msgspec.to_builtins(result), {}
+
+
+def handle_import_run(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    project = _require_project(session)
+    req = _convert(params, ImportRunParams)
+    path = _source_path(req.path)
+    plugin_report()
+    kind = _source_kind(req.kind)
+    settings = _settings_from_dto(req.settings)
+    previous: SourceEntry | None = None
+    if req.reimport_of is not None:
+        previous = project.sources.get(req.reimport_of)
+        if previous is None:
+            raise ProtocolError(ErrorCode.NOT_FOUND, f"unknown source_id '{req.reimport_of}'")
+    if project.crs is None:
+        raise ProtocolError(
+            ErrorCode.CRS_REQUIRED,
+            "project has no CRS; import an alignment or open the project with a crs first",
+        )
+
+    try:
+        outcome = run_import(
+            path,
+            kind,
+            settings,
+            project.crs,
+            {alignment_id: entry.alignment for alignment_id, entry in project.alignments.items()},
+            name=req.name,
+            format_id=req.format_id,
+            previous=previous.dataset if previous is not None else None,
+        )
+    except CrsRequired as exc:
+        raise ProtocolError(ErrorCode.CRS_REQUIRED, str(exc)) from exc
+    except UnknownAlignment as exc:
+        raise ProtocolError(ErrorCode.NOT_FOUND, str(exc)) from exc
+    except NoAlignments as exc:
+        raise ProtocolError(ErrorCode.EMPTY, str(exc)) from exc
+    except (GisExtraMissing, ReaderFailure) as exc:
+        raise ProtocolError(ErrorCode.INTERNAL, str(exc)) from exc
+    except (ValueError, OSError, ProjError) as exc:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
+    except Exception as exc:  # a plugin's malformed answer must not drop the connection
+        raise ProtocolError(ErrorCode.INTERNAL, f"import failed: {type(exc).__name__}: {exc}") from exc
+
+    dataset = outcome.dataset
+    project.sources[dataset.id] = SourceEntry(dataset, outcome.payloads, outcome.warnings)
+    recon = outcome.reconciliation
+    result = ImportRunResult(
+        source_id=dataset.id,
+        name=dataset.name,
+        effective_crs=dataset.effective_crs,
+        transformation=dataset.transformation,
+        transformation_accuracy_m=dataset.transformation_accuracy_m,
+        added=len(recon.added),
+        changed=len(recon.changed),
+        unchanged=len(recon.unchanged),
+        removed=len(recon.removed),
+        warnings=outcome.warnings,
+    )
+    return msgspec.to_builtins(result), {}
+
+
+def handle_source_list(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    project = _require_project(session)
+    summaries = tuple(
+        SourceSummary(
+            id=entry.dataset.id,
+            kind=entry.dataset.kind.value,
+            name=entry.dataset.name,
+            format_id=entry.dataset.format_id,
+            object_count=len(entry.dataset.objects),
+            imported_at=entry.dataset.imported_at,
+            attribution=entry.dataset.attribution,
+        )
+        for entry in project.sources.values()
+    )
+    return msgspec.to_builtins(SourceListResult(sources=summaries)), {}
+
+
+def handle_source_get(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    project = _require_project(session)
+    req = _convert(params, SourceGetParams)
+    entry = project.sources.get(req.source_id)
+    if entry is None:
+        raise ProtocolError(ErrorCode.NOT_FOUND, f"unknown source_id '{req.source_id}'")
+    return msgspec.to_builtins(_dataset_dto(entry)), {}
+
+
+def handle_plugins_list(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    _require_hello(session)
+    infos, warnings = plugin_report()
+    result = PluginsListResult(
+        plugins=tuple(
+            PluginInfoDTO(i.name, i.group, i.distribution, i.version, i.state, i.error) for i in infos
+        ),
+        warnings=warnings,
+    )
+    return msgspec.to_builtins(result), {}
+
+
 def handle_alignment_frame_table(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     req = _convert(params, AlignmentFrameTableParams)
@@ -682,6 +926,11 @@ DISPATCH: dict[str, Handler] = {
     "import.landxml": handle_import_landxml,
     "import.coypu": handle_import_coypu,
     "import.kinematics": handle_import_kinematics,
+    "import.inspect": handle_import_inspect,
+    "import.run": handle_import_run,
+    "source.list": handle_source_list,
+    "source.get": handle_source_get,
+    "plugins.list": handle_plugins_list,
     "alignment.frame_table": handle_alignment_frame_table,
     "alignment.track_mesh": handle_alignment_track_mesh,
     "alignment.envelope": handle_alignment_envelope,

@@ -221,6 +221,140 @@ Import a standalone kinematics CSV (either dialect) attached to an already-impor
 
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
 
+### `import.inspect`
+
+**Stability**: `experimental`
+
+Read a context-data source cheaply (terrain, imagery, later buildings, vegetation, water) and report its format, declared CRS (null when it has none, with a warning), extent, counts and proposed import settings. Step one of ADR 0009's inspect, confirm, import. `path` must be absolute; `format_id` picks a reader instead of sniffing. Needs no project.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `path` | `str` | required |
+| `format_id` | `str | None` | `None` |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `format_id` | `str` | required |
+| `kind` | `str` | required |
+| `declared_crs` | `str | None` | required |
+| `extent` | `tuple[float, float, float, float] | None` | required |
+| `counts` | `dict[str, int]` | required |
+| `suggested_settings` | `ImportSettingsDTO` | required |
+| `licence_hint` | `str | None` | required |
+| `warnings` | `tuple[str, ...]` | `()` |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NOT_FOUND`, `E_INTERNAL`
+
+### `import.run`
+
+**Stability**: `experimental`
+
+Import a context-data source with the confirmed `settings`, exactly as given, and record it as a `SourceDataset` with licence, attribution and provenance. A source with no declared CRS and no `settings.horizontal_crs` is refused with `E_CRS_REQUIRED`, never guessed; the project must have a CRS. Every object gets a GUID. `reimport_of` names an earlier source of the same kind and format: objects are matched on their own source key, matched ones keep their GUID, and the source keeps its id. Without it the import is a new source with all-new GUIDs. Counts report added, changed, unchanged and removed objects. `path` must be absolute.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `path` | `str` | required |
+| `kind` | `str` | required |
+| `settings` | `ImportSettingsDTO` | required |
+| `name` | `str | None` | `None` |
+| `format_id` | `str | None` | `None` |
+| `reimport_of` | `str | None` | `None` |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `source_id` | `str` | required |
+| `name` | `str` | required |
+| `effective_crs` | `str` | required |
+| `transformation` | `str` | required |
+| `transformation_accuracy_m` | `float | None` | required |
+| `added` | `int` | required |
+| `changed` | `int` | required |
+| `unchanged` | `int` | required |
+| `removed` | `int` | required |
+| `warnings` | `tuple[str, ...]` | `()` |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`, `E_INTERNAL`
+
+### `source.list`
+
+**Stability**: `experimental`
+
+List the context-data sources imported into the current project, one summary each.
+
+**Params**
+
+None.
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `sources` | `tuple[SourceSummary, ...]` | required |
+
+**Errors**: `E_NO_SESSION`, `E_NO_PROJECT`
+
+### `source.get`
+
+**Stability**: `experimental`
+
+Fetch one source's full provenance record: origin with file hashes, the settings as confirmed, declared and effective CRS, the transformation used, licence, attribution, import time, tool version and every object's key and GUID.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `source_id` | `str` | required |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `id` | `str` | required |
+| `kind` | `str` | required |
+| `name` | `str` | required |
+| `format_id` | `str` | required |
+| `origin` | `FileOriginDTO | ProviderOriginDTO` | required |
+| `settings` | `ImportSettingsDTO` | required |
+| `declared_crs` | `str | None` | required |
+| `effective_crs` | `str` | required |
+| `transformation` | `str` | required |
+| `transformation_accuracy_m` | `float | None` | required |
+| `licence` | `str` | required |
+| `attribution` | `str` | required |
+| `imported_at` | `str` | required |
+| `tool_version` | `str` | required |
+| `objects` | `tuple[ObjectRecordDTO, ...]` | required |
+| `warnings` | `tuple[str, ...]` | `()` |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`
+
+### `plugins.list`
+
+**Stability**: `experimental`
+
+List the reader and provider plugins found as entry points, with their state: `loaded` (allow-listed and imported), `available` (found but not in the user's allow-list, never imported) or `failed` (allow-listed but raised on load, with the error). Also reports problems with the per-user `config.toml`.
+
+**Params**
+
+None.
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `plugins` | `tuple[PluginInfoDTO, ...]` | required |
+| `warnings` | `tuple[str, ...]` | `()` |
+
+**Errors**: `E_NO_SESSION`
+
 ### `alignment.frame_table`
 
 **Stability**: `experimental`

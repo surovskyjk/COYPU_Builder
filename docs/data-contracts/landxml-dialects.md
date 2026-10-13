@@ -25,6 +25,16 @@ few detected parameters.
   `E = −t2, N = −t1` unconditionally.)
 - Other CRSs: spec order `(N, E)` by default, overridable with `coordinate_order="EN"`. COYPU itself reads
   non-Křovák files as `(E, N)`, so files that round-trip through COYPU in UTM may need the override.
+- **Order and sign are separate** (`resolve_coordinates(tokens, crs, coordinate_order, native_order)`):
+  - The *order* says which token holds the easting-axis value and which the northing-axis value: `"NE"` =
+    `(north-axis, east-axis)`, `"EN"` = `(east-axis, north-axis)`. `"auto"` means the format's native order,
+    `"NE"` for LandXML. For Křovák the east-axis value is Y (westing, positive) or E (negative), the north-axis
+    value is X (southing, positive) or N (negative).
+  - The Křovák *sign* rule then looks at the values only: when every value is positive they are negated into
+    `(E, N)`; otherwise they already are East-North. An explicit order therefore also applies to Křovák, so
+    `coordinate_order="EN"` with EPSG:5514 `(E, N)` tokens is read as written.
+  - For LandXML, `auto` is `"NE"`, so the behaviour above (positive tokens ⇒ `E = −t2, N = −t1`) is unchanged.
+    Readers of point clouds and rasters (`io/sources`) declare a native order of `"EN"`.
 
 ## Conversion rules (Builder)
 

@@ -122,6 +122,141 @@ class ImportLandxmlResult(msgspec.Struct, frozen=True):
     alignments: tuple[AlignmentSummary, ...]
 
 
+# --- import.inspect / import.run / source.* / plugins.list ----------------------------------------------
+# Context-data import (ADR 0009): inspect a source, confirm the settings, import. The domain types of
+# `domain/sources.py` flattened into wire Structs.
+
+
+class CorridorClipDTO(msgspec.Struct, frozen=True, tag_field="type", tag="corridor"):
+    buffer_m: float
+    alignment_ids: tuple[str, ...] = ()  # empty = every alignment in the project
+    station_from: float | None = None  # only with exactly one alignment
+    station_to: float | None = None
+
+
+class BBoxClipDTO(msgspec.Struct, frozen=True, tag_field="type", tag="bbox"):
+    min_e: float  # project CRS
+    min_n: float
+    max_e: float
+    max_n: float
+
+
+class ImportSettingsDTO(msgspec.Struct, frozen=True):
+    horizontal_crs: str | None = None  # EPSG code, WKT or PROJ; None = the source's declared CRS
+    vertical_crs: str | None = None  # recorded only; heights are not transformed in Phase 1
+    coordinate_order: str = "auto"  # "auto" | "EN" | "NE"
+    linear_unit_m: float = 1.0
+    clip: CorridorClipDTO | BBoxClipDTO | None = None
+    point_classes: tuple[int, ...] | None = None
+    display_resolution_m: float | None = None
+    nodata: float | None = None
+
+
+class ImportInspectParams(msgspec.Struct, frozen=True):
+    path: str  # absolute
+    format_id: str | None = None  # None = sniffed
+
+
+class ImportInspectResult(msgspec.Struct, frozen=True):
+    format_id: str
+    kind: str
+    declared_crs: str | None
+    extent: tuple[float, float, float, float] | None
+    counts: dict[str, int]
+    suggested_settings: ImportSettingsDTO
+    licence_hint: str | None
+    warnings: tuple[str, ...] = ()
+
+
+class ImportRunParams(msgspec.Struct, frozen=True):
+    path: str  # absolute
+    kind: str  # "terrain" | "imagery" | "buildings" | "vegetation" | "water"
+    settings: ImportSettingsDTO
+    name: str | None = None
+    format_id: str | None = None
+    reimport_of: str | None = None  # a source_id of the same kind and format; keeps its GUIDs
+
+
+class ImportRunResult(msgspec.Struct, frozen=True):
+    source_id: str
+    name: str
+    effective_crs: str
+    transformation: str
+    transformation_accuracy_m: float | None
+    added: int
+    changed: int
+    unchanged: int
+    removed: int
+    warnings: tuple[str, ...] = ()
+
+
+class SourceSummary(msgspec.Struct, frozen=True):
+    id: str
+    kind: str
+    name: str
+    format_id: str
+    object_count: int
+    imported_at: str
+    attribution: str
+
+
+class SourceListResult(msgspec.Struct, frozen=True):
+    sources: tuple[SourceSummary, ...]
+
+
+class SourceGetParams(msgspec.Struct, frozen=True):
+    source_id: str
+
+
+class FileOriginDTO(msgspec.Struct, frozen=True, tag_field="type", tag="file"):
+    paths: tuple[str, ...]
+    sha256: tuple[str, ...]
+
+
+class ProviderOriginDTO(msgspec.Struct, frozen=True, tag_field="type", tag="provider"):
+    provider_id: str
+    query: str
+
+
+class ObjectRecordDTO(msgspec.Struct, frozen=True):
+    key: str
+    id: str
+    content_hash: str
+
+
+class SourceDatasetDTO(msgspec.Struct, frozen=True):
+    id: str
+    kind: str
+    name: str
+    format_id: str
+    origin: FileOriginDTO | ProviderOriginDTO
+    settings: ImportSettingsDTO
+    declared_crs: str | None
+    effective_crs: str
+    transformation: str
+    transformation_accuracy_m: float | None
+    licence: str
+    attribution: str
+    imported_at: str
+    tool_version: str
+    objects: tuple[ObjectRecordDTO, ...]
+    warnings: tuple[str, ...] = ()
+
+
+class PluginInfoDTO(msgspec.Struct, frozen=True):
+    name: str
+    group: str
+    distribution: str
+    version: str
+    state: str  # "loaded" | "available" | "failed"
+    error: str | None = None
+
+
+class PluginsListResult(msgspec.Struct, frozen=True):
+    plugins: tuple[PluginInfoDTO, ...]
+    warnings: tuple[str, ...] = ()  # problems with the per-user config.toml
+
+
 # --- alignment.frame_table ------------------------------------------------------------------------------
 # Result carries only metadata; the frame table itself rides the blobs (station, position, rotation, roll,
 # pitch, cant_mm, curvature, gradient, elevation, segment_index) so the client streams it as typed arrays.
@@ -454,6 +589,81 @@ METHODS: tuple[MethodSpec, ...] = (
         params=ImportKinematicsParams,
         result=ImportKinematicsResult,
         errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
+    ),
+    MethodSpec(
+        name="import.inspect",
+        summary=(
+            "Read a context-data source cheaply (terrain, imagery, later buildings, vegetation, water) and "
+            "report its format, declared CRS (null when it has none, with a warning), extent, counts and "
+            "proposed import settings. Step one of ADR 0009's inspect, confirm, import. `path` must be "
+            "absolute; `format_id` picks a reader instead of sniffing. Needs no project."
+        ),
+        stability=Stability.EXPERIMENTAL,
+        params=ImportInspectParams,
+        result=ImportInspectResult,
+        errors=(
+            ErrorCode.BAD_PARAMS,
+            ErrorCode.NO_SESSION,
+            ErrorCode.NOT_FOUND,
+            ErrorCode.INTERNAL,
+        ),
+    ),
+    MethodSpec(
+        name="import.run",
+        summary=(
+            "Import a context-data source with the confirmed `settings`, exactly as given, and record it as "
+            "a `SourceDataset` with licence, attribution and provenance. A source with no declared CRS "
+            "and no `settings.horizontal_crs` is refused with `E_CRS_REQUIRED`, never guessed; the "
+            "project must have a CRS. Every object gets a GUID. `reimport_of` names an earlier source of "
+            "the same kind and format: objects are matched on their own source key, matched ones keep "
+            "their GUID, and the source keeps its id. Without it the import is a new source with all-new "
+            "GUIDs. Counts report added, changed, unchanged and removed objects. `path` must be absolute."
+        ),
+        stability=Stability.EXPERIMENTAL,
+        params=ImportRunParams,
+        result=ImportRunResult,
+        errors=(
+            ErrorCode.BAD_PARAMS,
+            ErrorCode.NO_SESSION,
+            ErrorCode.NO_PROJECT,
+            ErrorCode.NOT_FOUND,
+            ErrorCode.EMPTY,
+            ErrorCode.CRS_REQUIRED,
+            ErrorCode.INTERNAL,
+        ),
+    ),
+    MethodSpec(
+        name="source.list",
+        summary="List the context-data sources imported into the current project, one summary each.",
+        stability=Stability.EXPERIMENTAL,
+        params=None,
+        result=SourceListResult,
+        errors=(ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT),
+    ),
+    MethodSpec(
+        name="source.get",
+        summary=(
+            "Fetch one source's full provenance record: origin with file hashes, the settings as confirmed, "
+            "declared and effective CRS, the transformation used, licence, attribution, import time, tool "
+            "version and every object's key and GUID."
+        ),
+        stability=Stability.EXPERIMENTAL,
+        params=SourceGetParams,
+        result=SourceDatasetDTO,
+        errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.NOT_FOUND),
+    ),
+    MethodSpec(
+        name="plugins.list",
+        summary=(
+            "List the reader and provider plugins found as entry points, with their state: `loaded` "
+            "(allow-listed and imported), `available` (found but not in the user's allow-list, never "
+            "imported) or `failed` (allow-listed but raised on load, with the error). Also reports problems "
+            "with the per-user `config.toml`."
+        ),
+        stability=Stability.EXPERIMENTAL,
+        params=None,
+        result=PluginsListResult,
+        errors=(ErrorCode.NO_SESSION,),
     ),
     MethodSpec(
         name="alignment.frame_table",

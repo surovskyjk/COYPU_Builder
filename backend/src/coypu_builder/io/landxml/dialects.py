@@ -4,7 +4,8 @@ Point text in LandXML is "northing easting" per the specification. The Czech Kř
 rail CAD exports, COYPU Feeder with sign stripping, COYPU) writes the positive engineering values
 X (southing) and Y (westing): with a Křovák project CRS the tokens (t1, t2) map to E = −t2, N = −t1 when
 positive and to E = t2, N = t1 when the file carries true negative EPSG:5514 values. For every other CRS
-the default is the specification order (N, E), overridable per file.
+the default is the specification order (N, E), overridable per file. Token order and Křovák sign are
+independent: see `resolve_coordinates`.
 """
 
 from __future__ import annotations
@@ -41,20 +42,26 @@ def detect_dialect(application_name: str | None, application_version: str | None
     return GENERIC
 
 
-def resolve_coordinates(tokens: np.ndarray, crs: ProjectCRS, coordinate_order: str = "auto") -> np.ndarray:
-    """(n, 2) raw token pairs (t1, t2) → (n, 2) (E, N) in the project CRS."""
+def resolve_coordinates(
+    tokens: np.ndarray, crs: ProjectCRS, coordinate_order: str = "auto", native_order: str = "NE"
+) -> np.ndarray:
+    """(n, 2) raw token pairs (t1, t2) → (n, 2) (E, N) in the project CRS.
+
+    Order and sign are separate. `coordinate_order` says which token holds the easting-axis value and which
+    the northing-axis value: "EN" = (east-axis, north-axis), "NE" = (north-axis, east-axis); "auto" means the
+    format's `native_order` (LandXML: "NE"). For a Křovák CRS the east-axis value is Y (positive, westing) or
+    E (negative) and the north-axis value is X (positive, southing) or N (negative); the sign rule then
+    applies to those values only: when every value is positive they are negated into (E, N), otherwise they
+    already are East-North.
+    """
     t = np.asarray(tokens, dtype=np.float64).reshape(-1, 2)
-    if crs.is_krovak:
-        positive = np.all(t > 0)
-        if positive:
-            return np.column_stack([-t[:, 1], -t[:, 0]])
-        return np.column_stack([t[:, 1], t[:, 0]])
-    order = coordinate_order
-    if order == "auto":
-        order = "NE"
-    if order == "NE":
-        return np.column_stack([t[:, 1], t[:, 0]])
-    return t.copy()
+    order = native_order if coordinate_order == "auto" else coordinate_order
+    if order not in ("NE", "EN"):
+        raise ValueError(f"coordinate order must resolve to 'NE' or 'EN', got '{order}'")
+    east, north = (t[:, 1], t[:, 0]) if order == "NE" else (t[:, 0], t[:, 1])
+    if crs.is_krovak and np.all(t > 0):
+        east, north = -east, -north
+    return np.column_stack([east, north])
 
 
 def gauge_to_mm(value: float, unit: str) -> float:

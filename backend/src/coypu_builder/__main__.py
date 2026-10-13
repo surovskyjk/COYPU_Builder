@@ -80,6 +80,19 @@ def _startup_line(port: int, pid: int, token: str, record_path: str) -> str:
     return json.dumps(line)
 
 
+def _load_plugins() -> None:
+    """Import the allow-listed reader and provider plugins at startup (ADR 0010). Problems go to stderr,
+    never stdout, which carries the startup line; a bad plugin never stops the backend."""
+    from coypu_builder.io.sources.registry import plugin_report
+
+    infos, warnings = plugin_report()
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr, flush=True)
+    for info in infos:
+        if info.state == "failed":
+            print(f"warning: plugin '{info.name}' failed to load ({info.error})", file=sys.stderr, flush=True)
+
+
 async def _serve(port: int) -> None:
     from coypu_builder.server import serve as ws_serve
     from coypu_builder.server.discovery import DiscoveryRecord, live_records, remove_record, write_record
@@ -95,6 +108,7 @@ async def _serve(port: int) -> None:
         if number is not None:
             signal.signal(number, request_stop)
 
+    _load_plugins()
     token = secrets.token_urlsafe(32)
     pid = os.getpid()
     server = await ws_serve(port=port, token=token)

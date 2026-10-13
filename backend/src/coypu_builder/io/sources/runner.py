@@ -1,0 +1,384 @@
+"""Inspect and import orchestration: CRS resolution, clip geometry, hashing, reconciliation (ADR 0009).
+
+The flow is the one the ADR fixes: `inspect_source` reports what a source declares and proposes settings; the
+caller confirms or overrides them; `run_import` resolves the coordinate transform from exactly those settings,
+clips, reads, reconciles GUIDs against an earlier import when asked, and returns the `SourceDataset` record
+with the payloads. Nothing here touches the project or the wire format.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from importlib import import_module
+from pathlib import Path
+
+import numpy as np
+from pyproj import CRS, Transformer
+from pyproj.exceptions import CRSError, ProjError
+from pyproj.transformer import TransformerGroup
+
+from coypu_builder import __version__
+from coypu_builder.domain.crs import ProjectCRS
+from coypu_builder.domain.geometry.alignment import Alignment
+from coypu_builder.domain.model.ids import EntityId, new_id
+from coypu_builder.domain.sources import (
+    BBoxClip,
+    ClipRegion,
+    FileOrigin,
+    ImportSettings,
+    Reconciliation,
+    SourceDataset,
+    SourceKind,
+    reconcile,
+)
+from coypu_builder.io.gis.envelope import EnvelopeOptions, GisExtraMissing, corridor_envelope
+from coypu_builder.io.sources.registry import (
+    CrsTransform,
+    InspectReport,
+    ReaderFailure,
+    SourceReader,
+    reader_for,
+)
+
+_HASH_CHUNK = 1 << 20
+# The Krovak variants whose positive-valued X/Y axes `resolve_coordinates` turns into East-North values; the
+# resolved coordinates are then in the East-North twin of the declared CRS, which is what gets reprojected.
+_KROVAK_EAST_NORTH = {5513: 5514, 2065: 5221, 8352: 8353}
+UNKNOWN_LICENCE = "unknown"
+
+
+class CrsRequired(Exception):
+    """The source declares no CRS and the settings give none; the handler maps this to `E_CRS_REQUIRED`."""
+
+
+class UnknownAlignment(LookupError):
+    """A corridor clip names an alignment the project does not have."""
+
+
+class NoAlignments(ValueError):
+    """A corridor clip needs at least one alignment and the project has none."""
+
+
+@dataclass(frozen=True)
+class ImportOutcome:
+    dataset: SourceDataset
+    payloads: dict[EntityId, object]  # keyed by the object's GUID
+    reconciliation: Reconciliation
+    warnings: tuple[str, ...]
+
+
+def _call_reader[T](label: str, call: Callable[[], T]) -> T:
+    try:
+        return call()
+    except (ValueError, OSError, ProjError, GisExtraMissing, CrsRequired):
+        raise
+    except Exception as exc:
+        raise ReaderFailure(f"{label} failed: {type(exc).__name__}: {exc}") from exc
+
+
+def inspect_source(path: Path, format_id: str | None = None) -> tuple[SourceReader, InspectReport]:
+    """Pick the reader and ask it what the source holds. A source with no declared CRS gets a warning here,
+    whatever the reader says, because import will refuse it unless the settings supply one."""
+    reader = reader_for(path, format_id)
+    report = _inspect(reader, path)
+    if report.declared_crs is None:
+        warning = (
+            "the source declares no coordinate reference system; set horizontal_crs in the import settings, "
+            "it will not be guessed"
+        )
+        if warning not in report.warnings:
+            report = _replace_warnings(report, (*report.warnings, warning))
+    return reader, report
+
+
+def _inspect(reader: SourceReader, path: Path) -> InspectReport:
+    report = _call_reader(f"reader '{reader.format_id}'", lambda: reader.inspect(path))
+    if not isinstance(report, InspectReport) or not isinstance(report.kind, SourceKind):
+        raise ReaderFailure(f"reader '{reader.format_id}' returned a malformed inspect report")
+    return report
+
+
+def _replace_warnings(report: InspectReport, warnings: tuple[str, ...]) -> InspectReport:
+    return InspectReport(
+        report.format_id,
+        report.kind,
+        report.declared_crs,
+        report.extent,
+        report.counts,
+        report.suggested,
+        report.licence_hint,
+        warnings,
+    )
+
+
+# --- coordinates -------------------------------------------------------------------------------------------
+
+
+def _parse_crs(text: str, what: str) -> CRS:
+    try:
+        return CRS.from_user_input(text)
+    except CRSError as exc:
+        raise ValueError(f"{what} '{text}' is not a coordinate reference system pyproj understands") from exc
+
+
+def _horizontal(crs: CRS, what: str, warnings: list[str]) -> CRS:
+    if crs.is_compound:
+        warnings.append(
+            f"{what} is a compound CRS; its vertical part is recorded but heights are not transformed"
+        )
+        crs = crs.sub_crs_list[0]
+    if not (crs.is_projected or crs.is_geographic) or len(crs.axis_info) != 2 or crs.is_vertical:
+        raise ValueError(f"{what} must be a horizontal 2D CRS (projected or geographic)")
+    return crs
+
+
+def _crs_string(crs: CRS) -> str:
+    epsg = crs.to_epsg()
+    return f"EPSG:{epsg}" if epsg is not None else crs.to_wkt()
+
+
+def _operation(
+    source: CRS, target: CRS, probe: tuple[float, float] | None = None
+) -> tuple[str, float | None]:
+    """Description and stated accuracy [m] of the operation pyproj applies between two CRSs.
+
+    pyproj's `Transformer.description` stays "unavailable until proj_trans is called" whenever several
+    operations compete, so the applied one is identified instead: the candidate in `TransformerGroup` that
+    reproduces the result of `Transformer.from_crs` at `probe` (a point in the target CRS, normally where the
+    project lies), or failing that at the centre of the target CRS's area of use.
+    """
+    chosen = Transformer.from_crs(source, target, always_xy=True)
+    candidates = TransformerGroup(source, target, always_xy=True).transformers
+    point = None
+    if probe is not None:
+        point = Transformer.from_crs(target, source, always_xy=True).transform(*probe)
+    elif target.area_of_use is not None:
+        area = target.area_of_use
+        lon, lat = (area.west + area.east) / 2.0, (area.south + area.north) / 2.0
+        point = Transformer.from_crs("EPSG:4326", source, always_xy=True).transform(lon, lat)
+    if point is not None and np.all(np.isfinite(point)):
+        reference = chosen.transform(*point)
+        for candidate in candidates:
+            if np.allclose(candidate.transform(*point), reference, rtol=0.0, atol=1e-6):
+                return _described(candidate)
+    return _described(candidates[0] if candidates else chosen)
+
+
+def _described(operation: Transformer) -> tuple[str, float | None]:
+    description = operation.description or "unnamed operation"
+    accuracy = operation.accuracy
+    return description, (float(accuracy) if accuracy is not None and accuracy >= 0.0 else None)
+
+
+def resolve_transform(
+    settings: ImportSettings,
+    declared_crs: str | None,
+    project_crs: ProjectCRS,
+    probe: tuple[float, float] | None = None,
+    native_order: str = "NE",
+) -> CrsTransform:
+    """The coordinate transform for these settings.
+
+    The source CRS is `settings.horizontal_crs`, or failing that `declared_crs`; with neither, `CrsRequired`.
+    `probe` is a project-CRS point where the project lies; the recorded operation is the one pyproj applies
+    there. `native_order` ("NE" or "EN") is what `coordinate_order="auto"` means for the reader: LandXML
+    is "NE", point-cloud and raster readers declare "EN" (a `native_order` attribute on the reader).
+    `coordinate_order` is applied through `io/landxml/dialects.py`, the unit through `linear_unit_m`. The
+    pyproj operation description and accuracy are recorded, and overriding a declared CRS is warned about.
+    """
+    chosen = settings.horizontal_crs or declared_crs
+    if chosen is None:
+        raise CrsRequired(
+            "the source declares no coordinate reference system and the import settings give none; "
+            "set horizontal_crs"
+        )
+    warnings: list[str] = []
+    source = _horizontal(
+        _parse_crs(chosen, "horizontal_crs" if settings.horizontal_crs else "declared CRS"),
+        "the source CRS",
+        warnings,
+    )
+    if settings.horizontal_crs is not None and declared_crs is not None:
+        try:
+            same = _parse_crs(declared_crs, "declared CRS") == _parse_crs(
+                settings.horizontal_crs, "horizontal_crs"
+            )
+        except ValueError:
+            same = False
+            warnings.append(f"the declared CRS '{declared_crs}' could not be parsed")
+        if not same:
+            warnings.append(
+                f"horizontal_crs '{settings.horizontal_crs}' overrides the CRS the source declares "
+                f"('{declared_crs}')"
+            )
+    if settings.vertical_crs is not None:
+        _parse_crs(settings.vertical_crs, "vertical_crs")
+
+    twin = _KROVAK_EAST_NORTH.get(source.to_epsg() or 0)
+    source_crs = ProjectCRS(CRS.from_epsg(twin) if twin is not None else source)
+    if source_crs == project_crs:
+        description, accuracy = "none", 0.0
+    else:
+        try:
+            description, accuracy = _operation(source_crs.crs, project_crs.crs, probe)
+        except ProjError as exc:
+            raise ValueError(
+                f"cannot transform from {_crs_string(source)} to the project CRS: {exc}"
+            ) from exc
+    return CrsTransform(
+        source_crs=source_crs,
+        project_crs=project_crs,
+        coordinate_order=settings.coordinate_order,
+        linear_unit_m=settings.linear_unit_m,
+        effective_crs=_crs_string(source),
+        declared_crs=declared_crs,
+        description=description,
+        accuracy_m=None if accuracy is None else float(accuracy),
+        warnings=tuple(warnings),
+        native_order=native_order,
+    )
+
+
+# --- clip --------------------------------------------------------------------------------------------------
+
+
+def _shapely():
+    try:
+        return import_module("shapely")
+    except ImportError as exc:
+        raise GisExtraMissing(
+            "the 'shapely' package is not installed; install the optional GIS dependencies with "
+            "`uv sync --extra gis`"
+        ) from exc
+
+
+def clip_polygon(clip: ClipRegion | None, alignments: Mapping[str, Alignment]):
+    """The clip as a shapely Polygon or MultiPolygon in the project CRS, or `None` for no clip. A corridor
+    goes through the corridor envelope of T-138, so its geometry is the one the portal export shows."""
+    if clip is None:
+        return None
+    if isinstance(clip, BBoxClip):
+        return _shapely().box(clip.min_e, clip.min_n, clip.max_e, clip.max_n)
+    if clip.alignment_ids:
+        missing = [i for i in clip.alignment_ids if i not in alignments]
+        if missing:
+            raise UnknownAlignment(f"unknown alignment_id '{missing[0]}'")
+        chosen = [alignments[i] for i in clip.alignment_ids]
+    else:
+        chosen = list(alignments.values())
+    if not chosen:
+        raise NoAlignments("a corridor clip needs at least one alignment, and the project has none")
+    options = EnvelopeOptions(clip.buffer_m, station_from=clip.station_from, station_to=clip.station_to)
+    return corridor_envelope(chosen, options)
+
+
+# --- import ------------------------------------------------------------------------------------------------
+
+
+def _probe(polygon, alignments: Mapping[str, Alignment]) -> tuple[float, float] | None:
+    """A project-CRS point inside the area the import concerns: the clip's centroid, else the start of the
+    first alignment, else nothing."""
+    if polygon is not None:
+        centre = polygon.representative_point()
+        return float(centre.x), float(centre.y)
+    for alignment in alignments.values():
+        e, n = alignment.horizontal.point(np.array([alignment.station_start]))[0]
+        return float(e), float(n)
+    return None
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        while chunk := handle.read(_HASH_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def run_import(
+    path: Path,
+    kind: SourceKind,
+    settings: ImportSettings,
+    project_crs: ProjectCRS,
+    alignments: Mapping[str, Alignment],
+    *,
+    name: str | None = None,
+    format_id: str | None = None,
+    previous: SourceDataset | None = None,
+    make_id: Callable[[], EntityId] = new_id,
+) -> ImportOutcome:
+    """Import one source file with the confirmed `settings`.
+
+    With `previous`, objects are matched to that import on their own keys, so matched objects keep their GUID
+    and the dataset keeps its id; without it every GUID is new. `previous` must have the same kind and
+    format.
+    Raises `ValueError` for bad input, `CrsRequired`, `UnknownAlignment`, `NoAlignments`, `GisExtraMissing`,
+    `OSError` and `ReaderFailure`.
+    """
+    path = Path(path)
+    if not path.is_absolute():
+        raise ValueError(f"path must be absolute, got '{path}'")
+    reader = reader_for(path, format_id)
+    if kind not in reader.kinds:
+        raise ValueError(f"reader '{reader.format_id}' does not read {kind.value} sources")
+    if previous is not None and (previous.kind != kind or previous.format_id != reader.format_id):
+        raise ValueError(
+            f"reimport_of is a {previous.kind.value} source read as '{previous.format_id}', "
+            f"not {kind.value} as '{reader.format_id}'"
+        )
+
+    report = _inspect(reader, path)
+    polygon = clip_polygon(settings.clip, alignments)
+    transform = resolve_transform(
+        settings,
+        report.declared_crs,
+        project_crs,
+        _probe(polygon, alignments),
+        native_order=getattr(reader, "native_order", "NE"),
+    )
+    digest = sha256_file(path)
+
+    objects = _call_reader(
+        f"reader '{reader.format_id}'", lambda: list(reader.read(path, settings, transform, polygon))
+    )
+    hashes: dict[str, str] = {}
+    payloads_by_key: dict[str, object] = {}
+    for item in objects:
+        if not (
+            isinstance(getattr(item, "key", None), str)
+            and isinstance(getattr(item, "content_hash", None), str)
+            and hasattr(item, "payload")
+        ):
+            raise ReaderFailure(
+                f"reader '{reader.format_id}' yielded {type(item).__name__}, not an ImportedObject "
+                "with a string key and content_hash"
+            )
+        if item.key in hashes:
+            raise ValueError(f"reader '{reader.format_id}' produced the object key '{item.key}' twice")
+        hashes[item.key] = item.content_hash
+        payloads_by_key[item.key] = item.payload
+
+    reconciliation = reconcile(previous.objects if previous is not None else (), hashes, make_id)
+    payloads = {record.id: payloads_by_key[record.key] for record in reconciliation.objects}
+    dataset = SourceDataset(
+        id=previous.id if previous is not None else make_id(),
+        kind=kind,
+        name=name or (previous.name if previous is not None else path.stem),
+        format_id=reader.format_id,
+        origin=FileOrigin(paths=(str(path),), sha256=(digest,)),
+        settings=settings,
+        declared_crs=report.declared_crs,
+        effective_crs=transform.effective_crs,
+        transformation=transform.description,
+        transformation_accuracy_m=transform.accuracy_m,
+        licence=report.licence_hint or UNKNOWN_LICENCE,
+        attribution="",
+        imported_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        tool_version=f"coypu-builder {__version__}",
+        objects=reconciliation.objects,
+    )
+    warnings = (*transform.warnings, *report.warnings)
+    return ImportOutcome(dataset, payloads, reconciliation, warnings)
