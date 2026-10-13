@@ -16,3 +16,9 @@ Status: accepted (2026-09-06)
 ## Consequences
 
 Latency on the IPC path affects only command round-trips, never playback smoothness.
+
+Terrain display tiles (T-132, 2026-10-08) are heightfields: the backend sends float32 heights on a regular
+lattice, relative to a tile origin. The client builds the triangles and derives normals. This is
+connectivity over heights the backend owns, in the same way that sleeper placement is an evaluation of
+backend tables. It costs about a tenth of the traffic of shipping vertex buffers. Every ground *query* still
+goes to the backend's analysis surface, never to the tiles.
