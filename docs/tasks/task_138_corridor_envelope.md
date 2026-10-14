@@ -195,11 +195,11 @@ uv sync --extra gis
 uv run ruff check . ../tools && uv run ruff format --check . ../tools
 uv run pytest -q
 uv run python ../tools/gen_protocol_docs.py --check
-uv run coypu-builder-backend envelope tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 -o D:/COYPU_Builder/Data/Envelopes/kralupy_250m.geojson
-uv run coypu-builder-backend envelope tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 -o D:/COYPU_Builder/Data/Envelopes/kralupy_250m.shp
+uv run coypu-builder-backend envelope tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 -o ${COYPU_DATA}/Envelopes/kralupy_250m.geojson
+uv run coypu-builder-backend envelope tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 -o ${COYPU_DATA}/Envelopes/kralupy_250m.shp
 ```
 
-The last two commands write outside the repository on purpose; create `D:\COYPU_Builder\Data\Envelopes\` if it
+The last two commands write outside the repository on purpose; create `${COYPU_DATA}/Envelopes/` (your data folder) if it
 does not exist.
 
 ```bash

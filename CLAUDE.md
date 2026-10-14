@@ -14,7 +14,7 @@ uv run pytest tests/test_lrs_golden.py -k dense
 uv run ruff check . ../tools ; uv run ruff format --check . ../tools   # CI's lint gate; drop --check to apply
 uv run coypu-builder-backend inspect tests/fixtures/kralupy/kralupy_neratovice_092.xml
 uv run coypu-builder-backend cuzk sheets tests/fixtures/kralupy/kralupy_neratovice_092.xml --dataset DMR5G   # ČÚZK sheets a corridor touches; `download --out <dir outside the repo>` fetches them
-uv run coypu-builder-backend envelope tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 -o D:/COYPU_Builder/Data/Envelopes/kralupy_250m.geojson   # or .shp
+uv run coypu-builder-backend envelope tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 -o $env:COYPU_DATA/Envelopes/kralupy_250m.geojson   # or .shp; COYPU_DATA = your data folder, outside the repo
 uv run python ../tools/make_golden.py      # regenerate shared/golden/*.json (both test suites consume them)
 
 # client (Godot 4.7.x, standard build)
@@ -50,6 +50,8 @@ tools\run_dev.ps1                          # backend + client together
 - GDScript: typed, tabs, one autoload per concern (`Backend`, `Session`, `Origin`, `EventBus`), scenes under `client/scene`, no logic in `.tscn`.
 - Cross-language behaviour (frame interpolation, trainset chain, origin mapping) is validated against `shared/golden/*.json` on both sides.
 - ADRs in `docs/adr/` (numbered); update the relevant ADR when an invariant changes.
+- No local absolute paths (a user profile folder, a personal data drive) in any committed file. Refer to the
+  user's data folder as `${COYPU_DATA}` (an environment variable), and make tests skip when it is unset.
 
 ## Working from a task specification
 

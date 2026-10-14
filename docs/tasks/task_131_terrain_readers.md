@@ -34,8 +34,10 @@ analysis surface and the display tiles from those payloads is T-132.
   - `tests/fixtures/synthetic/terrain.py`: `surface`, `sample_irregular`, `sample_grid`, `split_sheets`.
 - The `gis` extra has `rasterio` and `shapely` (both installed in CI); `laspy` is **not** installed yet.
 - Real data for manual checks, outside the repository:
-  - `D:\COYPU_Builder\Data\Terrain_Samples\cuzk\DMR5G\` — 15 sheets, with `cuzk_manifest.json`;
-  - `D:\COYPU_Builder\Data\Terrain_Samples\KRAV82.zip`.
+  - `${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/` — 15 sheets, with `cuzk_manifest.json`;
+  - `${COYPU_DATA}/Terrain_Samples/KRAV82.zip`.
+
+  `COYPU_DATA` is the user's data folder, outside the repository.
 - The DMR 5G LAS header declares **no CRS**: its only VLR is LASzip's (ROADMAP F25). Values are S-JTSK /
   Krovak East North (EPSG:5514), and heights are Baltic (Bpv).
 
@@ -138,7 +140,7 @@ one supported file. The SHA-256 recorded is the ZIP's. Each file becomes one `Im
 - float64 throughout the domain; nothing is converted to float32 before T-132 builds display tiles.
 - Fixtures are generated at test time from T-130's synthetic surface; no binary terrain file is committed
   (`.las`, `.laz` and `.tif` are git-ignored anyway).
-- CI never reads `D:\COYPU_Builder\Data`. The real-data checks are part of Verification only.
+- CI never reads the user's data folder. The real-data checks are part of Verification only.
 
 ## Acceptance criteria
 

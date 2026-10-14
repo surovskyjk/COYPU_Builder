@@ -40,7 +40,8 @@ from coypu_builder.io.gis.envelope import EnvelopeOptions, corridor_envelope, ex
 
 KROVAK = ProjectCRS("EPSG:5514")
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SAMPLES = Path(os.environ.get("COYPU_TERRAIN_SAMPLES", r"D:\COYPU_Builder\Data\Terrain_Samples"))
+_DATA = os.environ.get("COYPU_DATA")  # the user's data folder, outside the repository; optional
+SAMPLES = Path(_DATA) / "Terrain_Samples" if _DATA else None
 
 # 2 x 2 synthetic sheets near Kralupy; each is 0.04 deg wide and 0.02 deg high.
 LON0, LAT0, DLON, DLAT = 14.30, 50.20, 0.04, 0.02
@@ -955,8 +956,8 @@ def test_live_kralupy_dmr5g_selection_and_krav82_download(kralupy, tmp_path):
     krav82 = resolve_files([s for s in sheets if s.code == "KRAV82"], cache)
     (record,) = download(krav82, tmp_path / "out")
     assert record.length == (tmp_path / "out" / record.file).stat().st_size
-    sample = SAMPLES / "KRAV82.zip"
-    if sample.is_file():
+    sample = SAMPLES / "KRAV82.zip" if SAMPLES is not None else None
+    if sample is not None and sample.is_file():
         assert sample.stat().st_size == record.length
         assert hashlib.sha256(sample.read_bytes()).hexdigest() == record.sha256
 

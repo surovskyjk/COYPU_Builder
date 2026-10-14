@@ -18,7 +18,8 @@ session that launched you names the task file, or a section of one, in its promp
    file after a failure.
 3. Do not commit, push, or edit `ROADMAP.md`, and do not launch other agents. Never write a secret (API
    key, token, password, private key) into a file, a log line, a command line or your report. Never copy
-   in vendor or proprietary data, or anything marked classified or confidential.
+   in vendor or proprietary data, or anything marked classified or confidential. Never put a local absolute
+   path (a user profile folder, a personal data drive) into a committed file; use `${COYPU_DATA}`.
 4. Nobody can answer questions while you work. When the spec is ambiguous, choose the reading that satisfies
    its acceptance criteria and record the choice. When something is genuinely blocked, finish everything
    else and say exactly what is blocked and why.

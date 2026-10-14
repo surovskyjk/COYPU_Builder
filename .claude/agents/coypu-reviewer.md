@@ -28,7 +28,8 @@ Review in this order:
 5. **Privacy and secrets.** No changed or new file may contain:
    - vendor names, proprietary data or references (`.gitignore` lists the patterns);
    - credentials: API keys, tokens, passwords, private keys, connection strings;
-   - anything marked classified, confidential or internal.
+   - anything marked classified, confidential or internal;
+   - local absolute paths (a user profile folder, a personal data drive) — the data folder is `${COYPU_DATA}`.
 
    Check that no secret is logged, printed or passed on a command line, and that new network listeners bind
    to loopback only.

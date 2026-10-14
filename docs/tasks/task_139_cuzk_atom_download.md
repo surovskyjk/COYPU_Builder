@@ -171,8 +171,8 @@ repository.
    backoff; a 404 fails without retry.
 8. **Live check (`-m network`, run in Verification, not in CI):**
    - Kralupy at a 250 m buffer selects between 12 and 16 DMR 5G sheets, including `KRAV82`.
-   - Downloading them into `D:\COYPU_Builder\Data\Terrain_Samples\cuzk\` succeeds.
-   - The downloaded `KRAV82` ZIP has the same size as `D:\COYPU_Builder\Data\Terrain_Samples\KRAV82.zip`, or
+   - Downloading them into `${COYPU_DATA}/Terrain_Samples/cuzk/` succeeds.
+   - The downloaded `KRAV82` ZIP has the same size as `${COYPU_DATA}/Terrain_Samples/KRAV82.zip`, or
      the report explains the difference.
 9. Both suites are green on Windows and on Linux CI, with no previously passing test removed, skipped or
    weakened.
@@ -194,7 +194,7 @@ uv run pytest -q
 uv run pytest -q -m network tests/test_cuzk_atom.py
 uv run coypu-builder-backend cuzk sheets tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 --dataset DMR5G
 uv run coypu-builder-backend cuzk sheets tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 --dataset ORTOFOTO
-uv run coypu-builder-backend cuzk download tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 --dataset DMR5G --out D:/COYPU_Builder/Data/Terrain_Samples/cuzk
+uv run coypu-builder-backend cuzk download tests/fixtures/kralupy/kralupy_neratovice_092.xml --buffer 250 --dataset DMR5G --out ${COYPU_DATA}/Terrain_Samples/cuzk
 ```
 
 Do not download the orthophoto; list it only, to report its total size.
