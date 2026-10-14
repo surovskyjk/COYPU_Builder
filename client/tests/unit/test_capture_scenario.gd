@@ -360,3 +360,60 @@ func test_cli_args_carry_the_capture_flags() -> void:
 	assert_str(result.get("capture", "")).is_equal("s.json")
 	assert_str(result.get("capture_out", "")).is_equal("D:/out")
 	assert_str(result.get("project", "")).is_equal("p.coypu")
+
+
+func test_shots_default_to_hidden_ui_and_the_engineering_preset() -> void:
+	var scenario := _shot('{"name": "a", "camera": "orbit"}')
+	assert_array(scenario.errors()).is_empty()
+	assert_str(scenario.shots[0]["ui"]).is_equal("hidden")
+	assert_str(scenario.shots[0]["preset"]).is_equal("engineering")
+	assert_bool(scenario.shots[0].has("panel_opacity")).is_false()
+	assert_bool(scenario.shots[0].has("dialog")).is_false()
+
+
+func test_visible_shots_read_preset_opacity_and_dialog() -> void:
+	var scenario := _shot(
+		'{"name": "a", "camera": "orbit", "ui": "visible", "preset": "sandbox", "panel_opacity": 0.4, "dialog": "envelope_export"}'
+	)
+	assert_array(scenario.errors()).is_empty()
+	assert_str(scenario.shots[0]["ui"]).is_equal("visible")
+	assert_str(scenario.shots[0]["preset"]).is_equal("sandbox")
+	assert_float(scenario.shots[0]["panel_opacity"]).is_equal(0.4)
+	assert_str(scenario.shots[0]["dialog"]).is_equal("envelope_export")
+
+
+func test_ui_keys_are_validated() -> void:
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "ui": "sometimes"}'), "ui must be one of")
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "ui": "visible", "preset": "neon"}'), "preset must be one of")
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "ui": "visible", "panel_opacity": 0.1}'), "panel_opacity must be within")
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "ui": "visible", "dialog": "nope"}'), "dialog must be one of")
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "preset": "sandbox"}'), "needs")
+
+
+func test_perf_block_can_pose_the_ui_and_ask_for_a_baseline() -> void:
+	var scenario := Scenario.parse(
+		'{"project": "p", "shots": [{"name": "a", "camera": "orbit"}], "perf": {"camera": "cab", "duration_s": 3, "ui": "visible", "preset": "sandbox", "panel_opacity": 0.4, "baseline": true}}'
+	)
+	assert_array(scenario.errors()).is_empty()
+	assert_str(scenario.perf["ui"]).is_equal("visible")
+	assert_str(scenario.perf["preset"]).is_equal("sandbox")
+	assert_float(scenario.perf["panel_opacity"]).is_equal(0.4)
+	assert_bool(scenario.perf["baseline"]).is_true()
+	assert_bool(Scenario.parse(_VALID).perf["baseline"]).is_false()
+
+
+func test_overlay_text_and_dialog_offset_are_read() -> void:
+	var scenario := _shot(
+		'{"name": "a", "camera": "orbit", "ui": "visible", "dialog": "settings", "dialog_offset_px": [-40, 12.5], "overlay_text": "\u010c\u00da"}'
+	)
+	assert_array(scenario.errors()).is_empty()
+	assert_that(scenario.shots[0]["dialog_offset_px"]).is_equal(Vector2(-40.0, 12.5))
+	assert_str(scenario.shots[0]["overlay_text"]).is_equal("\u010c\u00da")
+
+
+func test_overlay_text_and_dialog_offset_are_validated() -> void:
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "ui": "visible", "overlay_text": ""}'), "overlay_text")
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "ui": "visible", "dialog_offset_px": [1, 2]}'), "needs a dialog")
+	_assert_error_mentions(
+		_shot('{"name": "a", "camera": "orbit", "ui": "visible", "dialog": "settings", "dialog_offset_px": [1]}'), "dialog_offset_px"
+	)

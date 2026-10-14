@@ -1,0 +1,77 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://ui/shell/ui_shell.gd" id="1_shell"]
+
+[node name="UiShell" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("1_shell")
+
+[node name="ViewContainer" type="SubViewportContainer" parent="."]
+unique_name_in_owner = true
+layout_mode = 0
+stretch = true
+
+[node name="SubViewport" type="SubViewport" parent="ViewContainer"]
+unique_name_in_owner = true
+own_world_3d = true
+
+[node name="Chrome" type="Control" parent="."]
+unique_name_in_owner = true
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="RibbonSlot" type="Control" parent="Chrome"]
+unique_name_in_owner = true
+layout_mode = 3
+anchors_preset = 0
+mouse_filter = 2
+
+[node name="LeftSlot" type="Control" parent="Chrome"]
+unique_name_in_owner = true
+layout_mode = 3
+anchors_preset = 0
+mouse_filter = 2
+
+[node name="RightSlot" type="Control" parent="Chrome"]
+unique_name_in_owner = true
+layout_mode = 3
+anchors_preset = 0
+mouse_filter = 2
+
+[node name="BottomSlot" type="Control" parent="Chrome"]
+unique_name_in_owner = true
+layout_mode = 3
+anchors_preset = 0
+mouse_filter = 2
+
+[node name="StatusBar" type="PanelContainer" parent="Chrome"]
+unique_name_in_owner = true
+layout_mode = 3
+anchors_preset = 0
+mouse_filter = 0
+theme_type_variation = &"StatusBar"
+
+[node name="Segments" type="HBoxContainer" parent="Chrome/StatusBar"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="FloatingLayer" type="Control" parent="."]
+unique_name_in_owner = true
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2

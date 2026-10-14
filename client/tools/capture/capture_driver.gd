@@ -17,6 +17,13 @@ extends Node
 ## position, apply the optional orbit adjustments as the mouse input a user would give, and render
 ## `settle_frames` frames. The orbit rig keeps its distance and pitch between shots, so a shot's
 ## `orbit_zoom_notches` and `orbit_drag_px` are relative to the previous orbit shot.
+##
+## T-140: before every shot (and the perf run) the driver poses the UI shell through [UiShell]'s public API:
+## `"ui": "hidden"` (the default) hides all chrome so the PNG shows only the 3D render, exactly as T-125 captured
+## it; `"ui": "visible"` applies the shot's `preset` and `panel_opacity` (neither is saved to the user's
+## settings) and optionally opens a `dialog`. For a visible shot the frame statistics are taken over the 3D view
+## area only, so "the scene is not empty" keeps its meaning with panels around it. A `perf` block with
+## `"baseline": true` is recorded twice in one run, hidden first, and the manifest holds both.
 
 const _OVER_60HZ_MS := 16.7
 const _OVER_30HZ_MS := 33.3
@@ -25,11 +32,12 @@ var _main: Node
 var _scenario: Scenario
 var _out_dir := ""
 var _scene_is_ready := false
-var _overlay: CanvasItem
+var _shell: UiShell
 var _background := Color.BLACK
 
 var _manifest_shots: Array[Dictionary] = []
 var _manifest_perf: Variant = null
+var _manifest_perf_baseline: Variant = null
 var _errors: Array[String] = []
 
 var _recording_frames := false
@@ -106,13 +114,13 @@ func _capture_all() -> void:
 	if not _errors.is_empty():
 		return
 
-	var environment_node := _main.find_children("*", "WorldEnvironment", false, false)
+	var environment_node := _main.find_children("*", "WorldEnvironment", true, false)
 	if environment_node.is_empty() or (environment_node[0] as WorldEnvironment).environment == null:
 		_errors.append("no WorldEnvironment with an environment on the main scene, so no background colour")
 		return
 	_background = (environment_node[0] as WorldEnvironment).environment.background_color
-	_overlay = _main.status_overlay()
-	_overlay.visible = false
+	_shell = _main.shell()
+	_shell.set_chrome_visible(false)
 	await _frames(2)
 
 	for shot in _scenario.shots:
@@ -137,6 +145,7 @@ func _wait_for_scene() -> bool:
 
 func _capture_shot(shot: Dictionary, timeline: TimelineState, playback: PlaybackController) -> void:
 	var camera_manager: CameraManager = _main.camera_manager()
+	await _pose_ui(shot)
 	if shot.has("time_s"):
 		timeline.pause()
 		timeline.seek(shot["time_s"])
@@ -155,6 +164,7 @@ func _capture_shot(shot: Dictionary, timeline: TimelineState, playback: Playback
 		"camera": shot["camera"],
 		"time_s": timeline.time() if timeline != null else null,
 		"lead_station_m": playback.lead_station() if playback != null else null,
+		"ui": shot["ui"],
 	}
 	var image := get_viewport().get_texture().get_image()
 	var saved: int = ERR_CANT_CREATE if image == null else image.save_png(_out_dir.path_join(entry["file"]))
@@ -163,8 +173,21 @@ func _capture_shot(shot: Dictionary, timeline: TimelineState, playback: Playback
 		_manifest_shots.append(entry)
 		return
 
-	var stats := luma_stats(image)
-	var fraction := scene_fraction(image, _background, Scenario.BACKGROUND_TOLERANCE)
+	var measured := image
+	if shot["ui"] == "visible":
+		var view := _view_region(image)
+		measured = _without_chrome(image, view)
+		entry["preset"] = shot["preset"]
+		entry["panel_opacity"] = _shell.panel_opacity()
+		entry["view_rect"] = [view.position.x, view.position.y, view.size.x, view.size.y]
+		if shot.has("dialog"):
+			entry["dialog"] = shot["dialog"]
+		if shot.has("overlay_text"):
+			entry["overlay_text"] = shot["overlay_text"]
+		if shot["preset"] == "sandbox":
+			entry["card_luma"] = _card_luma(image)
+	var stats := luma_stats(measured)
+	var fraction := scene_fraction(measured, _background, Scenario.BACKGROUND_TOLERANCE)
 	entry["luma_mean"] = stats.x
 	entry["luma_std"] = stats.y
 	entry["scene_fraction"] = fraction
@@ -186,6 +209,19 @@ func _capture_shot(shot: Dictionary, timeline: TimelineState, playback: Playback
 
 
 func _record_perf(block: Dictionary, timeline: TimelineState) -> void:
+	if block["baseline"]:
+		await _pose_ui({"ui": "hidden"})
+		_manifest_perf_baseline = await _measure_perf(block, timeline, "perf baseline (ui hidden)")
+	await _pose_ui(block)
+	_manifest_perf = await _measure_perf(block, timeline, "perf")
+	if block["ui"] == "visible":
+		_manifest_perf["ui"] = "visible"
+		_manifest_perf["preset"] = block["preset"]
+		_manifest_perf["panel_opacity"] = _shell.panel_opacity()
+
+
+## Plays the perf block once and returns its frame-time statistics.
+func _measure_perf(block: Dictionary, timeline: TimelineState, label: String) -> Dictionary:
 	var camera_manager: CameraManager = _main.camera_manager()
 	camera_manager.set_mode(_mode_of(block["camera"]))
 	timeline.pause()
@@ -208,14 +244,60 @@ func _record_perf(block: Dictionary, timeline: TimelineState) -> void:
 	timeline.pause()
 	DisplayServer.window_set_vsync_mode(vsync_before)
 
-	_manifest_perf = frame_stats(_frame_ms)
-	var stats: Dictionary = _manifest_perf
+	var stats := frame_stats(_frame_ms)
 	print(
-		"capture: perf %d frames  p50=%.2f p95=%.2f p99=%.2f max=%.2f ms"
-		% [stats["frames"], stats["p50_ms"], stats["p95_ms"], stats["p99_ms"], stats["max_ms"]]
+		"capture: %s %d frames  p50=%.2f p95=%.2f p99=%.2f max=%.2f ms"
+		% [label, stats["frames"], stats["p50_ms"], stats["p95_ms"], stats["p99_ms"], stats["max_ms"]]
 	)
 	if int(stats["frames"]) == 0:
-		_errors.append("perf recorded no frames")
+		_errors.append("%s recorded no frames" % label)
+	return stats
+
+
+## Poses the shell for a shot or perf block: `ui` "hidden" hides the chrome; "visible" applies `preset` and
+## `panel_opacity` (the preset's own default when absent) and opens or closes the named `dialog`.
+func _pose_ui(block: Dictionary) -> void:
+	_shell.close_dialogs()
+	_shell.show_capture_text("")
+	if block["ui"] != "visible":
+		_shell.set_chrome_visible(false)
+		await _frames(2)
+		return
+	var preset_id := StringName(block["preset"])
+	_shell.apply_preset(preset_id, block.get("panel_opacity", UiPreset.builtin(preset_id).panel_opacity))
+	_shell.set_chrome_visible(true)
+	if block.has("dialog"):
+		var offset := Vector2i(block.get("dialog_offset_px", Vector2.ZERO))
+		if not _shell.show_dialog(StringName(block["dialog"]), offset):
+			_errors.append("unknown dialog '%s'" % block["dialog"])
+	_shell.show_capture_text(block.get("overlay_text", ""))
+	await _frames(3)
+
+
+## The 3D view area of `image` with every chrome rectangle (cards, bars, open dialogs, overlay text) painted in
+## the background colour, so the statistics see only the 3D render: an empty scene cannot pass because panels
+## happen to differ from the background.
+func _without_chrome(image: Image, view: Rect2i) -> Image:
+	var region := image.get_region(view)
+	var clear := Color(_background.r, _background.g, _background.b, 1.0)
+	for rect in _shell.chrome_rects():
+		var local := Rect2i(Vector2i(rect.position) - view.position, Vector2i(rect.size.ceil()) + Vector2i(1, 1))
+		region.fill_rect(local.intersection(Rect2i(Vector2i.ZERO, region.get_size())), clear)
+	return region
+
+
+## Mean luma (0..1) of a strip of the Layers card (where the track passes behind it) as captured, i.e. the scene seen through the card. A
+## lower opacity must make it brighter, which the manifest of the opacity shots shows.
+func _card_luma(image: Image) -> float:
+	var card := _shell.panel(UiShell.PANEL_LAYERS).get_global_rect()
+	var region := image.get_region(Rect2i(Vector2i(card.position) + Vector2i(40, 540), Vector2i(220, 200)).intersection(Rect2i(Vector2i.ZERO, image.get_size())))
+	return luma_stats(region).x
+
+
+## The shell's 3D view area in image pixels, clipped to the image.
+func _view_region(image: Image) -> Rect2i:
+	var region := Rect2i(_shell.view_rect().position, _shell.view_rect().size)
+	return region.intersection(Rect2i(Vector2i.ZERO, image.get_size()))
 
 
 ## Makes `mode` the active camera and runs its `activated()` snap even when it was already active.
@@ -228,7 +310,7 @@ func _activate_afresh(camera_manager: CameraManager, mode: CameraManager.Mode) -
 ## Wheel notches (positive zooms out) and one left-button drag, sent through `Input` so they take the same
 ## route as a user's mouse: `CameraManager._unhandled_input` -> the orbit rig's `handle_input`.
 func _drive_orbit(zoom_notches: int, drag_px: Vector2) -> void:
-	var centre := get_viewport().get_visible_rect().size * 0.5
+	var centre := _shell.view_rect().get_center()
 	var wheel := MOUSE_BUTTON_WHEEL_DOWN if zoom_notches > 0 else MOUSE_BUTTON_WHEEL_UP
 	for i in absi(zoom_notches):
 		_send_button(wheel, true, centre)
@@ -261,8 +343,9 @@ func _frames(count: int) -> void:
 
 
 func _finish() -> void:
-	if _overlay != null and is_instance_valid(_overlay):
-		_overlay.visible = true
+	if _shell != null and is_instance_valid(_shell):
+		_shell.close_dialogs()
+		_shell.set_chrome_visible(true)
 	for problem in _errors:
 		printerr("capture: ERROR %s" % problem)
 	var manifest := {
@@ -273,6 +356,7 @@ func _finish() -> void:
 		"git_commit": OS.get_environment("COYPU_CAPTURE_COMMIT"),
 		"shots": _manifest_shots,
 		"perf": _manifest_perf,
+		"perf_baseline": _manifest_perf_baseline,
 		"errors": _errors,
 	}
 	var path := _out_dir.path_join("manifest.json")

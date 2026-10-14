@@ -152,6 +152,10 @@ if (Test-Path -LiteralPath $manifestPath) {
             Write-Host ("  {0,-24} {1,-8} NOT SAVED" -f $shot.file, $shot.camera)
         }
     }
+    if ($manifest.perf_baseline) {
+        $base = $manifest.perf_baseline
+        Write-Host ("  perf baseline (ui hidden): {0} frames  p50 {1:N2}  p95 {2:N2}  p99 {3:N2}  max {4:N2} ms" -f $base.frames, $base.p50_ms, $base.p95_ms, $base.p99_ms, $base.max_ms)
+    }
     if ($manifest.perf) {
         $perf = $manifest.perf
         Write-Host ("  perf: {0} frames  p50 {1:N2}  p95 {2:N2}  p99 {3:N2}  max {4:N2} ms  >16.7 ms: {5}  >33.3 ms: {6}" -f $perf.frames, $perf.p50_ms, $perf.p95_ms, $perf.p99_ms, $perf.max_ms, $perf.over_16_7_ms, $perf.over_33_3_ms)

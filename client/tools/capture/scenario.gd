@@ -9,6 +9,13 @@ extends RefCounted
 ## the run is known.
 
 const CAMERAS: Array[String] = ["orbit", "wayside", "cab"]
+## T-140: a shot (or the perf block) can show the UI shell. `ui` is "hidden" (the default: the bare 3D render, as
+## T-125 captured it) or "visible"; `preset` and `panel_opacity` pose the visible shell; `dialog` opens one.
+const UI_MODES: Array[String] = ["hidden", "visible"]
+const PRESETS: Array[String] = ["engineering", "sandbox"]
+const DIALOGS: Array[String] = ["envelope_export", "settings"]
+const DEFAULT_UI := "hidden"
+const DEFAULT_PRESET := "engineering"
 
 const DEFAULT_RESOLUTION := Vector2i(1600, 900)
 const DEFAULT_READY_TIMEOUT_S := 90.0
@@ -32,19 +39,24 @@ const LUMA_MEAN_MAX := 0.95
 
 const _TOP_KEYS: Array[String] = ["project", "resolution", "ready_timeout_s", "shots", "perf"]
 const _SHOT_KEYS: Array[String] = [
-	"name", "camera", "time_s", "focus_station_m", "settle_frames", "orbit_zoom_notches", "orbit_drag_px"
+	"name", "camera", "time_s", "focus_station_m", "settle_frames", "orbit_zoom_notches", "orbit_drag_px",
+	"ui", "preset", "panel_opacity", "dialog", "dialog_offset_px", "overlay_text",
 ]
-const _PERF_KEYS: Array[String] = ["camera", "time_s", "rate", "duration_s"]
+## `baseline: true` makes the driver record the same run once with the UI hidden first (manifest `perf_baseline`),
+## so the cost of the visible shell is a difference within one run.
+const _PERF_KEYS: Array[String] = ["camera", "time_s", "rate", "duration_s", "ui", "preset", "panel_opacity", "baseline"]
 
 ## Basename of the scenario file; set by the caller (the text itself carries no name).
 var scenario_name := ""
 var project := ""
 var resolution := DEFAULT_RESOLUTION
 var ready_timeout_s := DEFAULT_READY_TIMEOUT_S
-## Normalised shot dictionaries: `name`, `camera`, `settle_frames` always present; `time_s`,
-## `focus_station_m`, `orbit_zoom_notches` (int) and `orbit_drag_px` ([Vector2]) only when the file gave them.
+## Normalised shot dictionaries: `name`, `camera`, `settle_frames`, `ui`, `preset` always present; `time_s`,
+## `focus_station_m`, `orbit_zoom_notches` (int), `orbit_drag_px` ([Vector2]), `panel_opacity` and `dialog`
+## only when the file gave them.
 var shots: Array[Dictionary] = []
-## Empty when the file has no `perf` block; otherwise `camera`, `time_s`, `rate`, `duration_s`.
+## Empty when the file has no `perf` block; otherwise `camera`, `time_s`, `rate`, `duration_s`, `ui`, `preset`,
+## `baseline` and, when given, `panel_opacity`.
 var perf: Dictionary = {}
 
 var _errors := PackedStringArray()
@@ -200,7 +212,8 @@ func _read_shots(raw_shots: Array) -> void:
 				_errors.append("%s: duplicate name" % label)
 			seen[shot_name] = true
 
-		var shot := {"name": shot_name, "settle_frames": DEFAULT_SETTLE_FRAMES}
+		var shot := {"name": shot_name, "settle_frames": DEFAULT_SETTLE_FRAMES, "ui": DEFAULT_UI, "preset": DEFAULT_PRESET}
+		_read_ui(label, raw, shot, true)
 		var camera := _read_camera(label, raw)
 		if camera != "":
 			shot["camera"] = camera
@@ -232,13 +245,58 @@ func _read_shots(raw_shots: Array) -> void:
 		shots.append(shot)
 
 
+## Reads the T-140 keys `ui`, `preset`, `panel_opacity` (and `dialog` when `allow_dialog`) of `raw` into `target`.
+## They describe the visible shell, so any of the last three without `"ui": "visible"` is an error.
+func _read_ui(label: String, raw: Dictionary, target: Dictionary, allow_dialog: bool) -> void:
+	if raw.has("ui"):
+		if raw["ui"] is String and UI_MODES.has(raw["ui"]):
+			target["ui"] = raw["ui"]
+		else:
+			_errors.append("%s: ui must be one of %s, got %s" % [label, ", ".join(UI_MODES), JSON.stringify(raw["ui"])])
+	if raw.has("preset"):
+		if raw["preset"] is String and PRESETS.has(raw["preset"]):
+			target["preset"] = raw["preset"]
+		else:
+			_errors.append("%s: preset must be one of %s, got %s" % [label, ", ".join(PRESETS), JSON.stringify(raw["preset"])])
+	if raw.has("panel_opacity"):
+		var opacity: Variant = _number(label + ": panel_opacity", raw["panel_opacity"])
+		if opacity != null:
+			if opacity < UiPreset.OPACITY_MIN or opacity > UiPreset.OPACITY_MAX:
+				_errors.append(
+					"%s: panel_opacity must be within %s..%s, got %s"
+					% [label, UiPreset.OPACITY_MIN, UiPreset.OPACITY_MAX, str(raw["panel_opacity"])]
+				)
+			else:
+				target["panel_opacity"] = opacity
+	if allow_dialog and raw.has("dialog"):
+		if raw["dialog"] is String and DIALOGS.has(raw["dialog"]):
+			target["dialog"] = raw["dialog"]
+		else:
+			_errors.append("%s: dialog must be one of %s, got %s" % [label, ", ".join(DIALOGS), JSON.stringify(raw["dialog"])])
+	if allow_dialog and raw.has("dialog_offset_px"):
+		var offset: Variant = _read_drag(label, raw["dialog_offset_px"], "dialog_offset_px")
+		if offset != null:
+			target["dialog_offset_px"] = offset
+		if not raw.has("dialog"):
+			_errors.append("%s: dialog_offset_px needs a dialog" % label)
+	if allow_dialog and raw.has("overlay_text"):
+		if raw["overlay_text"] is String and not (raw["overlay_text"] as String).is_empty():
+			target["overlay_text"] = raw["overlay_text"]
+		else:
+			_errors.append("%s: overlay_text must be a non-empty string" % label)
+	if target.get("ui", DEFAULT_UI) == "hidden":
+		for key in ["preset", "panel_opacity", "dialog"]:
+			if raw.has(key):
+				_errors.append("%s: %s needs \"ui\": \"visible\"" % [label, key])
+
+
 ## `[dx, dy]` in pixels as a [Vector2], or null after recording why it is not one.
-func _read_drag(label: String, value: Variant) -> Variant:
+func _read_drag(label: String, value: Variant, key: String = "orbit_drag_px") -> Variant:
 	if not (value is Array) or (value as Array).size() != 2:
-		_errors.append("%s: orbit_drag_px must be [dx, dy]" % label)
+		_errors.append("%s: %s must be [dx, dy]" % [label, key])
 		return null
-	var dx: Variant = _number(label + ": orbit_drag_px[0]", value[0])
-	var dy: Variant = _number(label + ": orbit_drag_px[1]", value[1])
+	var dx: Variant = _number("%s: %s[0]" % [label, key], value[0])
+	var dy: Variant = _number("%s: %s[1]" % [label, key], value[1])
 	if dx == null or dy == null:
 		return null
 	return Vector2(dx, dy)
@@ -246,7 +304,13 @@ func _read_drag(label: String, value: Variant) -> Variant:
 
 func _read_perf(raw: Dictionary) -> void:
 	_reject_unknown_keys("perf", raw, _PERF_KEYS)
-	var block := {"time_s": 0.0, "rate": DEFAULT_PERF_RATE}
+	var block := {"time_s": 0.0, "rate": DEFAULT_PERF_RATE, "ui": DEFAULT_UI, "preset": DEFAULT_PRESET, "baseline": false}
+	_read_ui("perf", raw, block, false)
+	if raw.has("baseline"):
+		if raw["baseline"] is bool:
+			block["baseline"] = raw["baseline"]
+		else:
+			_errors.append("perf: baseline must be true or false, got %s" % JSON.stringify(raw["baseline"]))
 	var camera := _read_camera("perf", raw)
 	if camera != "":
 		block["camera"] = camera

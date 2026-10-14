@@ -4,17 +4,19 @@ Typed-GDScript Godot project: UI, 2D/3D viewports, cameras, playback and tools. 
 backend as baked tables (ADR 0007); the client never computes alignments itself.
 
 ```
-core/           autoloads: Backend (IPC), Session (document mirror), Origin (base point + axis mapping), EventBus
+core/           autoloads: Backend (IPC), Session (document mirror), Origin (base point + axis mapping), EventBus;
+                user_settings.gd (per-user preferences, not an autoload)
 ipc/            websocket_client, envelope codec, rpc ids/timeouts, process_supervisor
 domain_mirror/  alignment_table (frame table + interpolation), run_table (t→s), entity_registry, layer_state
 scene/          main.tscn; world/, track/, vehicles/ (Car = CarBody + BogieFront + BogieRear), terrain/, context/, gizmos/
 playback/       playback_controller, trainset_kinematics, timeline_state
 cameras/        camera_manager, orbit_camera, wayside_camera, cab_camera (XR-ready rig)
-ui/             theme, top_bar, bottom_dock, layers_panel, inspector_panel, timeline_bar, dialogs, widgets
+ui/             shell (UiShell, DockPanel, UiPreset), theme, top_bar (Ribbon), dialogs, layers_panel, inspector_panel,
+                timeline_bar, widgets
 view_modes/     view_mode_controller + materials (realistic, wireframe, xray, diagnostics)
 tools/          capture/ (T-125 scripted screenshots); (Phase 2) placement_tool, snapping, ghost_preview, plan_view (SubViewport + ortho Camera3D)
 tests/          gdUnit4 — unit/, integration/, helpers/ (see below)
-assets/         placeholder materials/icons; vehicle glTF later
+assets/         icons/ (SVG, with a LICENSE); vehicle glTF later
 ```
 
 Open with `tools\godot\Godot_v4.7.2-stable_win64.exe --path client --editor` after `tools\install_godot.ps1`.
@@ -218,6 +220,45 @@ a live `SceneTree` -- `CameraRig`/`CameraManager` both build their node structur
   `XROrigin3D` and replaces the child with the headset's own pose, with no change to the line that copies
   the body transform. No OpenXR dependency, XR interface, or `xr_` setting is added now (ADR 0002).
 
+## UI shell (`ui/`)
+
+T-140: the product frame around the 3D view. `scene/main.tscn` instances `ui/shell/ui_shell.tscn`; the 3D world
+(environment, light, corridor, trainset, cameras) is a child of the shell's `SubViewport`
+(`UiShell.world_root()`), so the view has a real area to live in.
+
+- **`UiShell`** (`ui/shell/ui_shell.gd`) owns the ribbon, three `DockPanel`s (layers left, inspector right,
+  timeline at the bottom), the status bar, a floating layer and the view area. One function, `_relayout()`, sets
+  every rectangle. No `.tscn` holds logic; presets and themes are resources.
+- **Two styles, one set of panels.** `UiPreset.builtin(id)` gives `engineering` (default: light theme, ribbon,
+  docked panels, 18 px icons) or `sandbox` (the view fills the window, panels float over it as rounded translucent
+  cards, one compact top bar, the timeline as a pill, 20 px icons). `UiShell.apply_preset(id, opacity)` switches
+  at runtime with `Node.reparent`: the very same `DockPanel` and `Ribbon` instances move between the dock slots
+  and the floating layer, so scroll position, a selected row or a typed value survive and nothing is rebuilt. Each
+  panel exists once; a later task puts content into `DockPanel.body()` without caring where the panel sits.
+  Translucency is the card's own fill alpha only (text and icons stay opaque), 0.4 to 1.0, adjustable live.
+- **`Ribbon`** (`ui/top_bar/ribbon.gd`) is built from one command list (`Ribbon.default_commands()`); a group
+  appears only when a task has put a command in it (Project and Import are absent for now, there are no disabled
+  placeholders). Every command has a tooltip and a shortcut taken from an input action in `project.godot`
+  (`shell_export_envelope` Ctrl+E, `shell_open_settings` Ctrl+,, and the existing `camera_mode_*` keys 1/2/3). The
+  camera buttons are a toggle group that follows `EventBus.camera_changed`, so a key press shows up there.
+- **Input.** The ribbon and panels stop the mouse; the 3D view receives wheel, drag and the camera keys everywhere
+  it is not covered. Typing in a field never reaches the camera.
+- **Status bar** shows the backend state, the project, the CRS and the alignment summary the T-103 overlay showed,
+  and the latest message (the result of an export). `Main.status_overlay()` returns it.
+- **Export corridor envelope...** (`ui/dialogs/envelope_export_dialog.gd`): buffer (1 to 5000 m, default 250), format
+  (GeoJSON or Shapefile), an optional station range (one alignment), an optional EPSG code, and a save path through
+  Godot's native `FileDialog`. It sends `alignment.envelope` from its own coroutine, asks before sending
+  `overwrite: true`, and shows every backend error as one plain sentence (`EnvelopeExportDialog.plain_error`,
+  including `E_BUSY` and `E_INTERNAL`). A path inside the repository is refused by the backend (ADR 0010) and shown
+  as "save outside the project folder".
+- **User settings** (`core/user_settings.gd`): the style and the opacity, in a `ConfigFile` at
+  `user://settings.cfg` (on Windows `%APPDATA%\Godot\app_userdata\COYPU Builder\`). A missing or damaged file
+  gives the defaults and no error. An instance with an empty path is memory-only; the capture run uses one, so it
+  never reads or writes the user's file.
+- **Fonts and icons.** Godot's built-in font (Open Sans) already covers Czech diacritics, so no font is bundled.
+  The icons in `assets/icons/` are original line artwork drawn for this project (MIT, see the `LICENSE` beside
+  them); no third-party asset is bundled.
+
 ## Capturing screenshots
 
 `tools\capture.ps1` runs the real app (real backend, real window, desktop GPU) through a scenario file and
@@ -261,8 +302,17 @@ A scenario is JSON (`tools/capture/scenario.gd` is the parser, and lists every e
   between shots, so both are *relative to the previous orbit shot*.
 - `perf` plays from `time_s` at `rate` for `duration_s` with vsync off and records every frame time
   (`p50`/`p95`/`p99`/`max` and counts over 16.7 ms and 33.3 ms). The run must be long enough for it.
-- The status overlay is hidden while capturing (and restored afterwards), so each PNG and its statistics show
-  only the 3D render. Each manifest shot carries `scene_fraction` (the share of pixels that differ from the
+- By default the UI is hidden while capturing (and restored afterwards), so each PNG and its statistics show
+  only the 3D render. T-140 adds, per shot, `"ui": "visible"` (default `"hidden"`), `"preset"` (`engineering` or
+  `sandbox`), `"panel_opacity"` (0.4 to 1.0) and `"dialog"` (`envelope_export` or `settings`, with an optional
+  `dialog_offset_px` `[dx, dy]` to move it) and `"overlay_text"` (a themed box of text at the centre of the 3D view, to
+  prove glyphs); none of them is saved to the user's settings. For a visible shot the frame statistics are taken over
+  the 3D view area with every chrome rectangle (cards, bars, open dialogs, the overlay text) painted in the background
+  colour, so only the render decides whether a shot is empty; the manifest records `view_rect` and, for Sandbox shots,
+  `card_luma` (the scene seen through the Layers card). The `perf` block takes `ui`, `preset` and `panel_opacity` too, and
+  `"baseline": true` records the same run once with the UI hidden first (`perf_baseline` in the manifest, one line
+  in `capture.ps1`'s output), so the cost of the shell is a difference inside one run. `scenarios/ui_shell.json`
+  captures the Engineering shell, the Sandbox style at its default and at 0.4 opacity, and the export dialog. Each manifest shot carries `scene_fraction` (the share of pixels that differ from the
   environment's background colour by more than 0.02), `luma_mean` and `luma_std`. A shot fails the run when
   `scene_fraction` is below 0.0005 (an empty scene), `luma_mean` is outside 0.05..0.95, or `luma_std` is at
   most 0.005 (a flat fill). The limits are derived from the default scenario's sparsest shot; see

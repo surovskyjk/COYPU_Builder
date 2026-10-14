@@ -1,7 +1,8 @@
-extends Node3D
-## Deliberately temporary bootstrap scene (T-103): a status overlay showing backend/session state. M4
-## replaces the overlay (T-140). Do not extend this file's scope -- see "Out of scope" in
-## docs/tasks/task_103_client_app_shell.md.
+extends Node
+## The application root. Started as T-103's deliberately temporary bootstrap scene (a status overlay showing
+## backend/session state); T-140 replaced the overlay with the UI shell ([UiShell]: ribbon, dock slots, status
+## bar), which hosts the 3D world in its view area. The 3D content below is added to [method UiShell.world_root]
+## instead of to this node; everything else this file does is unchanged. Do not grow its scope.
 ##
 ## T-121 adds exactly one thing on top of that: building [TrackCorridor] for the first alignment Session
 ## knows about, once one exists.
@@ -21,13 +22,18 @@ extends Node3D
 ## T-125 adds the seam scripted screenshots need and nothing more: read-only accessors for the camera
 ## manager, timeline, playback controller, corridor and status overlay; [signal scene_ready]; and, only when `--capture` is
 ## on the command line, a [CaptureDriver] child. A launch without `--capture` behaves exactly as before.
+##
+## T-140: [method status_overlay] now returns the shell's status bar (the overlay's content moved there), and
+## [method shell] gives the capture driver the style and chrome switches. A capture run uses memory-only
+## [UserSettings], so it neither reads nor changes the user's preferences.
 
 ## Emitted once, when the corridor is built and -- if the project has a run -- playback is wired.
 signal scene_ready()
 
-@onready var _status_label: Label = %StatusLabel
+@onready var _shell: UiShell = $UiShell
 
 var _project_path := ""
+var _world: Node
 
 var _corridor: TrackCorridor
 var _corridor_alignment_id := ""
@@ -48,23 +54,24 @@ func _ready() -> void:
 	var args := CliArgs.from_cmdline()
 	_project_path = args.get("project", "")
 
+	var capture_scenario: String = args.get("capture", "")
+	_shell.use_settings(UserSettings.new() if not capture_scenario.is_empty() else UserSettings.for_user())
+	_world = _shell.world_root()
+
 	Backend.state_changed.connect(_on_backend_state_changed)
-	EventBus.project_changed.connect(_refresh_status)
-	EventBus.alignments_changed.connect(_refresh_status)
 	EventBus.alignments_changed.connect(_on_alignments_changed)
 	EventBus.runs_changed.connect(_on_runs_changed)
 
 	_corridor = TrackCorridor.new()
-	add_child(_corridor)
+	_world.add_child(_corridor)
 	Session.layers().define(TrackCorridor.LAYER_ID, "Track")
 
 	_camera_manager = CameraManager.new()
-	add_child(_camera_manager)
+	_world.add_child(_camera_manager)
+	_shell.bind_camera_manager(_camera_manager)
 
 	Backend.start()
-	_refresh_status()
 
-	var capture_scenario: String = args.get("capture", "")
 	if not capture_scenario.is_empty():
 		var driver := CaptureDriver.new()
 		add_child(driver)
@@ -89,10 +96,14 @@ func corridor() -> TrackCorridor:
 	return _corridor
 
 
-## The status text overlay (T-103). [CaptureDriver] hides it while capturing so a screenshot and its
-## statistics show only the 3D render.
+## The shell's status bar, which took over the T-103 overlay's content (T-140).
 func status_overlay() -> CanvasItem:
-	return _status_label
+	return _shell.status_bar()
+
+
+## The UI shell (T-140): the capture driver switches its style and chrome through it.
+func shell() -> UiShell:
+	return _shell
 
 
 func _notification(what: int) -> void:
@@ -102,13 +113,12 @@ func _notification(what: int) -> void:
 
 
 func _on_backend_state_changed(state: Backend.State) -> void:
-	_refresh_status()
 	if state == Backend.State.READY:
 		_bootstrap_session()
 
 
 ## Only feature work this bootstrap scene is allowed: when `--project` names a `.xml` file, open a new
-## project and import it so the overlay has real alignment summaries to show; a `.coypu` archive additionally
+## project and import it so the status bar has real alignment summaries to show; a `.coypu` archive additionally
 ## carries kinematics runs (T-123 needs one to wire playback), so it goes through `Session.import_coypu`
 ## instead. Otherwise just mirror whatever project the backend already has open (there may be none yet).
 func _bootstrap_session() -> void:
@@ -126,7 +136,6 @@ func _bootstrap_session() -> void:
 	var got := await Backend.request("project.get", {})
 	if got.type == "res":
 		Session.set_project_info(got.result)
-	_refresh_status()
 
 
 ## Builds [TrackCorridor] for the first alignment Session knows about, once (T-121). A later
@@ -192,11 +201,11 @@ func _wire_playback(run_summary: Dictionary) -> void:
 		return
 
 	_trainset_node = TrainsetNode.build(trainset_dto as Dictionary)
-	add_child(_trainset_node)
+	_world.add_child(_trainset_node)
 
 	_timeline = TimelineState.new()
 	_playback = PlaybackController.new()
-	add_child(_playback)
+	_world.add_child(_playback)
 	_playback.bind(table, run, _trainset_node, _timeline)
 	_timeline.pause()
 
@@ -220,28 +229,6 @@ func _handle_playback_key(keycode: Key) -> void:
 			_timeline.set_rate(_timeline.rate() * 0.5)
 		KEY_BRACKETRIGHT:
 			_timeline.set_rate(_timeline.rate() * 2.0)
-
-
-func _refresh_status() -> void:
-	var lines := PackedStringArray()
-	lines.append("backend: %s" % Backend.State.keys()[Backend.state()])
-	lines.append("server: %s (protocol %d)" % [Backend.server_version(), Backend.protocol_version()])
-
-	var project_id := Session.project_id()
-	lines.append("project: %s" % (project_id if not project_id.is_empty() else "(none)"))
-	var crs := Session.crs()
-	lines.append("crs: %s" % (crs if not crs.is_empty() else "(none)"))
-
-	var alignments := Session.alignments()
-	lines.append("alignments: %d" % alignments.size())
-	for alignment: Dictionary in alignments:
-		lines.append(
-			" - %s [%s] %.1f m" % [
-				alignment.get("name", "?"), alignment.get("mode", "?"), alignment.get("length", 0.0)
-			]
-		)
-
-	_status_label.text = "\n".join(lines)
 
 
 func _unhandled_input(event: InputEvent) -> void:

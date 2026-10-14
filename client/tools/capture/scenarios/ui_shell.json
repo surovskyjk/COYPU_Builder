@@ -1,0 +1,90 @@
+{
+  "project": "backend/tests/fixtures/kralupy/kralupy_neratovice_092.coypu",
+  "resolution": [
+    1600,
+    900
+  ],
+  "ready_timeout_s": 120,
+  "shots": [
+    {
+      "name": "engineering_shell",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "orbit_zoom_notches": 5,
+      "orbit_drag_px": [
+        0,
+        -60
+      ],
+      "settle_frames": 90,
+      "ui": "visible",
+      "preset": "engineering"
+    },
+    {
+      "name": "sandbox_shell",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 90,
+      "ui": "visible",
+      "preset": "sandbox"
+    },
+    {
+      "name": "sandbox_opacity_040",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 90,
+      "ui": "visible",
+      "preset": "sandbox",
+      "panel_opacity": 0.4
+    },
+    {
+      "name": "envelope_dialog",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "engineering",
+      "dialog": "envelope_export"
+    },
+    {
+      "name": "envelope_dialog_over_ribbon",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "engineering",
+      "dialog": "envelope_export",
+      "dialog_offset_px": [
+        -400,
+        -230
+      ]
+    },
+    {
+      "name": "czech_glyphs_engineering",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "engineering",
+      "overlay_text": "\u010c \u00da \u017d \u0159 \u016f \u011b \u0161 \u0165 \u010f \u0148 \u011a \u0160 \u0147 \u0164 \u010e \u016e \u2013 \u2014"
+    },
+    {
+      "name": "czech_glyphs_sandbox",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "sandbox",
+      "overlay_text": "\u010c \u00da \u017d \u0159 \u016f \u011b \u0161 \u0165 \u010f \u0148 \u011a \u0160 \u0147 \u0164 \u010e \u016e \u2013 \u2014"
+    }
+  ],
+  "perf": {
+    "camera": "cab",
+    "time_s": 570.0,
+    "rate": 4.0,
+    "duration_s": 10.0,
+    "ui": "visible",
+    "preset": "sandbox",
+    "panel_opacity": 0.4,
+    "baseline": true
+  }
+}
