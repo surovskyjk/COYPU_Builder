@@ -52,6 +52,7 @@ tools\run_dev.ps1                          # backend + client together
 - ADRs in `docs/adr/` (numbered); update the relevant ADR when an invariant changes.
 - No local absolute paths (a user profile folder, a personal data drive) in any committed file. Refer to the
   user's data folder as `${COYPU_DATA}` (an environment variable), and make tests skip when it is unset.
+- LF line endings everywhere (`.gitattributes`); never rely on platform newlines in string literals.
 
 ## Working from a task specification
 

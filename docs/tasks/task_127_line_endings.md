@@ -67,7 +67,7 @@ as `-text`.
 ## Acceptance criteria
 
 1. `git ls-files --eol`: every text file is `i/lf w/lf`, except `*.cmd` / `*.bat`, which are
-   `i/crlf w/crlf`. No `w/mixed`.
+   `i/lf w/crlf`: git keeps the index LF and writes CRLF to the working tree, corrected 2026-10-15. No `w/mixed`.
 2. The goldens are byte-identical in the index; `tools/make_golden.py` is not run.
 3. Both suites are green on Windows and on Linux CI, with no previously passing test removed, skipped or
    weakened.

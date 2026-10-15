@@ -220,3 +220,78 @@ def test_machine_local_claude_state_must_not_be_tracked(tmp_path, name):
     root = _copy_agents(tmp_path)
     assert any(name in p for p in claude_config_violations(root, [name]))
     assert claude_config_violations(root, [".claude/agents/coypu-worker.md"]) == []
+
+
+# T-127: the repository is LF everywhere (`.gitattributes`), checked on the index so the result does not
+# depend on the platform's autocrlf setting.
+_EOL_FIELD = re.compile(r"^i/(?P<index>\S+)\s+w/(?P<tree>\S*)\s+attr/(?P<attr>.*?)\t(?P<path>.+)$")
+_CRLF_TEXT_ATTRIBUTES = {"*.cmd": "text eol=crlf", "*.bat": "text eol=crlf"}
+
+
+def index_eol_violations(root: Path) -> list[str]:
+    """Every tracked text file whose index content is not LF; empty when the policy holds."""
+    out = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--eol"], check=True, capture_output=True, text=True
+    ).stdout
+    problems: list[str] = []
+    for line in out.splitlines():
+        match = _EOL_FIELD.match(line)
+        if match is None:
+            problems.append(f"unparsable `git ls-files --eol` line: {line!r}")
+        elif match["index"] in {"crlf", "mixed"}:
+            problems.append(f"{match['path']} is {match['index']} in the index")
+    return problems
+
+
+def gitattributes_violations(root: Path) -> list[str]:
+    path = root / ".gitattributes"
+    if not path.is_file():
+        return [".gitattributes is missing"]
+    lines = [
+        " ".join(line.split())
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    problems: list[str] = []
+    if "* text=auto eol=lf" not in lines:
+        problems.append(".gitattributes lacks '* text=auto eol=lf'")
+    for pattern, attributes in _CRLF_TEXT_ATTRIBUTES.items():
+        if f"{pattern} {attributes}" not in lines:
+            problems.append(f".gitattributes lacks '{pattern} {attributes}'")
+    return problems
+
+
+def test_every_tracked_text_file_is_lf_in_the_index():
+    assert index_eol_violations(REPO_ROOT) == []
+
+
+def test_gitattributes_declares_the_lf_policy():
+    assert gitattributes_violations(REPO_ROOT) == []
+
+
+def test_a_gitattributes_without_the_policy_fails(tmp_path):
+    assert gitattributes_violations(tmp_path) == [".gitattributes is missing"]
+    (tmp_path / ".gitattributes").write_text("* text=auto\n", encoding="utf-8")
+    assert len(gitattributes_violations(tmp_path)) == 3
+
+
+def _git(root: Path, *args: str, stdin: bytes | None = None) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), "-c", "core.autocrlf=false", *args],
+        check=True,
+        capture_output=True,
+        input=stdin,
+    ).stdout.decode()
+
+
+def test_a_crlf_text_file_in_the_index_is_reported(tmp_path):
+    _git(tmp_path, "init", "-q")
+    shutil.copy(REPO_ROOT / ".gitattributes", tmp_path / ".gitattributes")
+    (tmp_path / "ok.py").write_bytes(b"x = 1\n")
+    _git(tmp_path, "add", ".gitattributes", "ok.py")
+    assert index_eol_violations(tmp_path) == []
+
+    blob = _git(tmp_path, "hash-object", "-w", "--no-filters", "--stdin", stdin=b"x = 1\r\ny = 2\r\n").strip()
+    _git(tmp_path, "update-index", "--add", "--cacheinfo", f"100644,{blob},bad.py")
+    problems = index_eol_violations(tmp_path)
+    assert len(problems) == 1 and problems[0].startswith("bad.py"), problems
