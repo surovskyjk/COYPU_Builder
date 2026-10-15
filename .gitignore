@@ -71,6 +71,24 @@ private/
 .claude/agent-memory-local/
 CLAUDE.local.md
 
+# Environment and credential files: never commit. Keep a template as .env.example.
+.env
+.env.*
+!.env.example
+!.env.sample
+*.env
+.envrc
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+.netrc
+.pypirc
+
 # OS / editors
 Thumbs.db
 .DS_Store
