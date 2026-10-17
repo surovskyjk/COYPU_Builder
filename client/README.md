@@ -269,7 +269,7 @@ It never runs on CI: the headless dummy renderer produces no pixels.
 ```powershell
 tools\capture.ps1                          # client/tools/capture/scenarios/kralupy_m2.json
 tools\capture.ps1 -Scenario my_scenario    # a name, or a path to a scenario file
-tools\capture.ps1 -Out D:\somewhere -TimeoutS 120
+tools\capture.ps1 -Out <folder outside the repo> -TimeoutS 120
 ```
 
 Output goes to `captures\<yyyyMMdd-HHmmss>-<scenario>\` at the repository root (git-ignored). The script

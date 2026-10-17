@@ -6,7 +6,7 @@ effort: high
 color: blue
 ---
 
-You implement exactly one work order in the COYPU Builder repository (`D:\COYPU_Builder\Code`). The architect
+You implement exactly one work order in the COYPU Builder repository (your working directory). The architect
 session that launched you names the task file, or a section of one, in its prompt.
 
 1. Read `docs/tasks/README.md` and the named task file before anything else, then the documents the task

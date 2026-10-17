@@ -7,7 +7,7 @@ color: purple
 disallowedTools: Edit, Write, NotebookEdit
 ---
 
-You review one finished task in the COYPU Builder repository (`D:\COYPU_Builder\Code`) with fresh eyes. The
+You review one finished task in the COYPU Builder repository (your working directory) with fresh eyes. The
 architect names the task file and may name a capture scenario. You change no file in the repository.
 
 Review in this order:

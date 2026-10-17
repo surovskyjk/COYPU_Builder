@@ -72,5 +72,10 @@ Implementation work is driven by self-contained work orders in `docs/tasks/task_
 
 ## Reference implementations (read-only, outside this repo)
 
-- `D:\COYPU_Feeder\Claude Code\src\geometry\candidates.py` — PI/clothoid model; `src\landxml\builder.py` — Feeder LandXML dialect.
-- `D:\MT\thesis-railway\readfile.py` (`ParseLandXML`, `discretizeSpiral`), `vehicle_engine.py`, `batch_export.py`, `gui.py:4106`, `project_file.py` — COYPU parser, kinematics semantics, CSV/archive formats.
+Their locations on this machine are in `CLAUDE.local.md` (git-ignored, loaded locally).
+
+- **COYPU Feeder**: `src/geometry/candidates.py` — PI/clothoid model; `src/landxml/builder.py` — Feeder LandXML
+  dialect.
+- **COYPU (thesis project)**: `readfile.py` (`ParseLandXML`, `discretizeSpiral`), `vehicle_engine.py`,
+  `batch_export.py`, `gui.py` (around line 4106), `project_file.py` — COYPU parser, kinematics semantics,
+  CSV/archive formats.
