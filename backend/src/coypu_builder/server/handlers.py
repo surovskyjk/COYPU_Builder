@@ -27,9 +27,22 @@ from coypu_builder.domain.kinematics import Stop, bake_run_table
 from coypu_builder.domain.model.trainset import Trainset
 from coypu_builder.domain.model.vehicle import CarSpec, TractionBand, VehicleDynamics, VehicleSpec
 from coypu_builder.domain.sampling import bake_frame_table
-from coypu_builder.domain.sources import BBoxClip, CorridorClip, FileOrigin, ImportSettings, SourceKind
+from coypu_builder.domain.sources import (
+    BBoxClip,
+    CorridorClip,
+    FileOrigin,
+    ImportSettings,
+    ProviderOrigin,
+    SourceKind,
+)
 from coypu_builder.domain.terrain import TerrainGrid, TerrainPoints, TerrainTin
-from coypu_builder.domain.terrain_surface import TerrainStack, surface_for_source
+from coypu_builder.domain.terrain_surface import (
+    StackSource,
+    TerrainStack,
+    source_resolution_m,
+    stack_from_sources,
+    surface_for_source,
+)
 from coypu_builder.io.catalogue.vehicles import Catalogue, load_catalogue, resolve
 from coypu_builder.io.coypu.archive import CoypuProject, read_coypu
 from coypu_builder.io.coypu.kinematics_csv import read_kinematics_csv, read_stops_csv
@@ -51,6 +64,8 @@ from coypu_builder.io.mesh.terrain_tiles import (
     tiles_for_coverage,
 )
 from coypu_builder.io.mesh.track import bake_track_mesh
+from coypu_builder.io.providers import cache as provider_cache
+from coypu_builder.io.providers import register_builtin_providers
 from coypu_builder.io.sources.registry import InspectReport, plugin_report
 from coypu_builder.io.sources.runner import (
     CrsRequired,
@@ -58,8 +73,11 @@ from coypu_builder.io.sources.runner import (
     ReaderFailure,
     UnknownAlignment,
     clip_polygon,
+    inspect_provider,
     inspect_source,
+    pin_provider_source,
     run_import,
+    run_provider_import,
 )
 from coypu_builder.io.terrain import register_builtin_readers
 from coypu_builder.protocol.messages import (
@@ -131,6 +149,7 @@ from coypu_builder.server.session import (
 )
 
 register_builtin_readers()
+register_builtin_providers()
 
 HandlerResult = tuple[dict[str, Any], dict[str, np.ndarray]]
 # A handler is a plain function, or a coroutine function for work that must not block the event loop: the
@@ -228,6 +247,18 @@ def handle_session_ping(session: Session, params: dict[str, Any] | None) -> Hand
     return msgspec.to_builtins(result), {}
 
 
+def release_provider_pins(project: ProjectState | None) -> None:
+    """Unpin, in the provider caches, the files of every provider source of `project` (T-133). A replaced or
+    closed project keeps none of them: the cache may then evict those files again."""
+    if project is None:
+        return
+    for source_id, entry in project.sources.items():
+        origin = entry.dataset.origin
+        if isinstance(origin, ProviderOrigin):
+            cache = provider_cache.ProviderCache(provider_cache.provider_cache_dir(origin.provider_id))
+            cache.unpin(source_id)
+
+
 def handle_project_new(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     _require_hello(session)
     req = _convert(params, ProjectNewParams)
@@ -237,6 +268,7 @@ def handle_project_new(session: Session, params: dict[str, Any] | None) -> Handl
         if req.base_point is not None
         else None
     )
+    release_provider_pins(session.project)
     session.project = ProjectState(project_id=str(uuid4()), crs=crs, base_point=base)
     return msgspec.to_builtins(_project_info(session.project)), {}
 
@@ -574,7 +606,7 @@ def _dataset_dto(entry: SourceEntry) -> SourceDatasetDTO:
     origin_dto: FileOriginDTO | ProviderOriginDTO = (
         FileOriginDTO(origin.paths, origin.sha256)
         if isinstance(origin, FileOrigin)
-        else ProviderOriginDTO(origin.provider_id, origin.query)
+        else ProviderOriginDTO(origin.provider_id, origin.query, origin.sha256)
     )
     return SourceDatasetDTO(
         id=dataset.id,
@@ -593,6 +625,7 @@ def _dataset_dto(entry: SourceEntry) -> SourceDatasetDTO:
         tool_version=dataset.tool_version,
         objects=tuple(ObjectRecordDTO(o.key, o.id, o.content_hash) for o in dataset.objects),
         warnings=entry.warnings,
+        resolution_m=entry.resolution_m,
     )
 
 
@@ -608,7 +641,7 @@ def _source_path(raw: str) -> Path:
 def _source_paths(path: str | None, paths: tuple[str, ...] | None) -> list[Path]:
     """The one `path`, or every entry of `paths`; exactly one of the two must be given."""
     if (path is None) == (paths is None):
-        raise ProtocolError(ErrorCode.BAD_PARAMS, "give exactly one of 'path' and 'paths'")
+        raise ProtocolError(ErrorCode.BAD_PARAMS, "give exactly one of 'path', 'paths' and 'provider'")
     raw = [path] if path is not None else list(paths or ())
     if not raw:
         raise ProtocolError(ErrorCode.BAD_PARAMS, "'paths' must not be empty")
@@ -638,9 +671,67 @@ def _inspect_result(report: InspectReport) -> ImportInspectResult:
     )
 
 
+def _check_source_choice(
+    path: str | None, paths: tuple[str, ...] | None, provider: str | None, query: dict[str, Any] | None
+) -> None:
+    if provider is not None and (path is not None or paths is not None):
+        raise ProtocolError(ErrorCode.BAD_PARAMS, "give exactly one of 'path', 'paths' and 'provider'")
+    if provider is None and query is not None:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, "'query' belongs to a 'provider' request")
+
+
+def _provider_query(query: dict[str, Any] | None) -> dict[str, Any]:
+    return dict(query or {})
+
+
+def _provider_error(exc: Exception) -> ProtocolError:
+    """The error code for what a provider inspect or import raised: the same mapping as for files, plus the
+    corridor-clip cases."""
+    if isinstance(exc, ProtocolError):
+        return exc
+    if isinstance(exc, CrsRequired):
+        return ProtocolError(ErrorCode.CRS_REQUIRED, str(exc))
+    if isinstance(exc, UnknownAlignment):
+        return ProtocolError(ErrorCode.NOT_FOUND, str(exc))
+    if isinstance(exc, NoAlignments):
+        return ProtocolError(ErrorCode.EMPTY, str(exc))
+    if isinstance(exc, (GisExtraMissing, ReaderFailure)):
+        return ProtocolError(ErrorCode.INTERNAL, str(exc))
+    if isinstance(exc, (ValueError, OSError, ProjError)):
+        return ProtocolError(ErrorCode.BAD_PARAMS, str(exc))
+    return ProtocolError(ErrorCode.INTERNAL, f"import failed: {type(exc).__name__}: {exc}")
+
+
+def _project_with_crs(session: Session) -> ProjectState:
+    project = _require_project(session)
+    if project.crs is None:
+        raise ProtocolError(
+            ErrorCode.CRS_REQUIRED,
+            "project has no CRS; import an alignment or open the project with a crs first",
+        )
+    return project
+
+
+async def _inspect_provider(session: Session, req: ImportInspectParams) -> HandlerResult:
+    project = _project_with_crs(session)
+    plugin_report()
+    alignments = {alignment_id: entry.alignment for alignment_id, entry in project.alignments.items()}
+    try:
+        _provider, report = await _offload(
+            session, inspect_provider, req.provider, _provider_query(req.query), project.crs, alignments
+        )
+        result = _inspect_result(report)
+    except Exception as exc:  # mapped to a wire error, never a dropped connection
+        raise _provider_error(exc) from exc
+    return msgspec.to_builtins(result), {}
+
+
 async def handle_import_inspect(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     _require_hello(session)
     req = _convert(params, ImportInspectParams)
+    _check_source_choice(req.path, req.paths, req.provider, req.query)
+    if req.provider is not None:
+        return await _inspect_provider(session, req)
     paths = _source_paths(req.path, req.paths)
     plugin_report()  # allow-listed plugin readers must be registered before one is looked up
     try:
@@ -664,10 +755,29 @@ def _run_import_with_coverage(paths, kind, settings, project_crs, alignments, na
     return outcome, clip_polygon(settings.clip, alignments)
 
 
+def _run_provider_with_coverage(
+    provider_id, query, kind, settings, project_crs, alignments, name, format_id, previous
+):
+    """Blocking: a provider import (fetch, read, reconcile) and the clip polygon the readers used."""
+    outcome = run_provider_import(
+        provider_id,
+        query,
+        kind,
+        settings,
+        project_crs,
+        alignments,
+        name=name,
+        format_id=format_id,
+        previous=previous,
+    )
+    return outcome, clip_polygon(outcome.dataset.settings.clip, alignments)
+
+
 async def handle_import_run(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     req = _convert(params, ImportRunParams)
-    paths = _source_paths(req.path, req.paths)
+    _check_source_choice(req.path, req.paths, req.provider, req.query)
+    paths = [] if req.provider is not None else _source_paths(req.path, req.paths)
     plugin_report()
     kind = _source_kind(req.kind)
     settings = _settings_from_dto(req.settings)
@@ -682,6 +792,24 @@ async def handle_import_run(session: Session, params: dict[str, Any] | None) -> 
             "project has no CRS; import an alignment or open the project with a crs first",
         )
     alignments = {alignment_id: entry.alignment for alignment_id, entry in project.alignments.items()}
+    if req.provider is not None:
+        try:
+            outcome, coverage = await _offload(
+                session,
+                _run_provider_with_coverage,
+                req.provider,
+                _provider_query(req.query),
+                kind,
+                settings,
+                project.crs,
+                alignments,
+                req.name,
+                req.format_id,
+                previous.dataset if previous is not None else None,
+            )
+        except Exception as exc:  # mapped to a wire error, never a dropped connection
+            raise _provider_error(exc) from exc
+        return _store_import(project, outcome, coverage)
     try:
         outcome, coverage = await _offload(
             session,
@@ -707,14 +835,21 @@ async def handle_import_run(session: Session, params: dict[str, Any] | None) -> 
         raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
     except Exception as exc:  # a plugin's malformed answer must not drop the connection
         raise ProtocolError(ErrorCode.INTERNAL, f"import failed: {type(exc).__name__}: {exc}") from exc
+    return _store_import(project, outcome, coverage)
 
+
+def _store_import(project: ProjectState, outcome, coverage) -> HandlerResult:
+    """On the event loop: put an import into the project and answer."""
     if coverage is not None:
         import shapely
 
         shapely.prepare(coverage)  # here on the loop, so worker threads never prepare it concurrently
     dataset = outcome.dataset
-    project.sources[dataset.id] = SourceEntry(dataset, outcome.payloads, outcome.warnings, coverage)
+    project.sources[dataset.id] = SourceEntry(
+        dataset, outcome.payloads, outcome.warnings, coverage, outcome.resolution_m
+    )
     project.invalidate_terrain()
+    pin_provider_source(outcome)  # on the loop: a connection that closed mid-import pins nothing
 
     recon = outcome.reconciliation
     result = ImportRunResult(
@@ -891,12 +1026,13 @@ def _clip_test(coverage):
     return inside
 
 
-def _terrain_snapshot(project: ProjectState) -> tuple[tuple[str, list, object | None], ...]:
-    """(name, payloads, clip polygon) of each terrain source, newest first: what a worker thread builds from,
-    taken on the event loop so an import cannot change the dicts under it. Newer sources take precedence
-    over older ones until T-133 sets a policy."""
+def _terrain_snapshot(project: ProjectState) -> tuple[tuple, ...]:
+    """`(source_id, name, payloads, clip polygon, resolution_m, recency, from_provider)` of each terrain
+    source, oldest first: what a worker thread builds from, taken on the event loop so an import cannot change
+    the dicts under it. `recency` is the import order; precedence is decided from it, the resolution and
+    `from_provider` in `_build_terrain` (T-133, ADR 0009 decision 6)."""
     snapshot = []
-    for entry in reversed(list(project.sources.values())):
+    for recency, (source_id, entry) in enumerate(project.sources.items()):
         if entry.dataset.kind != SourceKind.TERRAIN:
             continue
         payloads = [
@@ -905,29 +1041,106 @@ def _terrain_snapshot(project: ProjectState) -> tuple[tuple[str, list, object | 
             if isinstance(entry.payloads.get(o.id), (TerrainPoints, TerrainGrid, TerrainTin))
         ]
         if payloads:
-            snapshot.append((entry.dataset.name, payloads, entry.coverage))
+            from_provider = isinstance(entry.dataset.origin, ProviderOrigin)
+            snapshot.append(
+                (
+                    source_id,
+                    entry.dataset.name,
+                    payloads,
+                    entry.coverage,
+                    entry.resolution_m,
+                    recency,
+                    from_provider,
+                )
+            )
     return tuple(snapshot)
+
+
+SEAM_SPACING_M = 10.0  # distance between the points that sample a seam
+MAX_SEAM_POINTS = 4000  # per source: a long boundary is sampled more sparsely, not more often
+
+
+def _seam_points(area, resolution_m: float | None) -> np.ndarray | None:
+    """Points along the boundary of a source's coverage, a little inside it (twice its resolution, so the
+    source has data there): where it meets the sources below it. None when the coverage is too thin."""
+    import shapely
+
+    geometry = shapely.box(*area) if isinstance(area, tuple) else area
+    inset = max(2.0 * (resolution_m or 1.0), 1.0)
+    inner = geometry.buffer(-inset)
+    if inner.is_empty:
+        return None
+    parts = [part for part in shapely.get_parts(inner.boundary) if part.length > 0.0]
+    total = sum(part.length for part in parts)
+    if total <= 0.0:
+        return None
+    spacing = max(SEAM_SPACING_M, total / MAX_SEAM_POINTS)
+    found = []
+    for part in parts:
+        count = max(2, int(part.length / spacing))
+        distances = np.linspace(0.0, part.length, count, endpoint=False)
+        found.append(shapely.get_coordinates(shapely.line_interpolate_point(part, distances)))
+    return np.vstack(found)
+
+
+def _seam_warnings(
+    stack: TerrainStack, names: dict[str, str], resolutions: dict[str, float | None], areas
+) -> list[str]:
+    """For each source and each source below it: the height step along the boundary of the upper one's
+    coverage, where both have data (mean and 95th percentile of the absolute difference). The tiles are not
+    blended (Phase 1); this tells a user how large the step they will see is."""
+    out: list[str] = []
+    ids = stack.source_ids
+    for upper, upper_id in enumerate(ids):
+        area = areas.get(upper_id)
+        points = None if area is None else _seam_points(area, resolutions.get(upper_id))
+        if points is None:
+            continue
+        upper_h = stack.surfaces[upper].heights(points[:, 0], points[:, 1])
+        for lower in range(upper + 1, len(ids)):
+            lower_h = stack.surfaces[lower].heights(points[:, 0], points[:, 1])
+            both = np.isfinite(upper_h) & np.isfinite(lower_h)
+            if not both.any():
+                continue
+            step = np.abs(upper_h[both] - lower_h[both])
+            out.append(
+                f"seam between '{names[upper_id]}' and '{names[ids[lower]]}' (heights are not blended): "
+                f"|dH| mean {step.mean():.2f} m, 95th percentile {np.percentile(step, 95):.2f} m "
+                f"over {int(both.sum())} points along the boundary of '{names[upper_id]}'"
+            )
+    return out
 
 
 def _build_terrain(snapshot) -> tuple[TerrainStack, tuple, tuple[str, ...]]:
     """Blocking: the stack, per-source coverage and warnings. A source that cannot be triangulated is skipped
     with a warning. A source's point triangles are cut to its import clip (centroid test) and to edges of at
-    most 30 m. Runs in a worker thread (the triangulation releases the GIL)."""
-    surfaces = []
+    most 30 m. The surfaces are ordered by declared resolution, finest first; within a resolution band a
+    user's own file comes before a provider, then the newest import (`stack_from_sources`). The height step
+    at each seam between two sources is reported. Runs in a worker thread (the triangulation releases the
+    GIL)."""
+    sources: list[StackSource] = []
     coverage = []
     warnings = []
-    for name, payloads, clip in snapshot:
+    names: dict[str, str] = {}
+    resolutions: dict[str, float | None] = {}
+    areas: dict[str, object | None] = {}
+    for source_id, name, payloads, clip, resolution, recency, from_provider in snapshot:
         try:
             surface = surface_for_source(payloads, inside=_clip_test(clip))
         except ValueError as exc:
             warnings.append(f"terrain source '{name}' skipped: {exc}")
             continue
-        surfaces.append(surface)
+        if resolution is None:
+            resolution = source_resolution_m(payloads)  # a source that was set without an import
+        sources.append(StackSource(source_id, surface, resolution, recency, from_provider))
+        names[source_id], resolutions[source_id] = name, resolution
         area = _source_coverage(clip, surface.bounds())
+        areas[source_id] = area
         if area is not None:
             coverage.append(area)
-    stack = TerrainStack(tuple(surfaces))
+    stack = stack_from_sources(sources)
     stack.warm_up()  # the locators are built here, once, not by several baking threads at their first query
+    warnings.extend(_seam_warnings(stack, names, resolutions, areas))
     return stack, tuple(coverage), tuple(warnings)
 
 
@@ -942,6 +1155,7 @@ async def _build_into(session: Session, project: ProjectState, cache: TerrainCac
     # `cache` is this revision's own object: if the sources changed meanwhile it is no longer the project's
     # current cache, so filling it cannot make stale data current.
     cache.stack, cache.coverage, cache.warnings = stack, coverage, warnings
+    cache.source_ids = stack.source_ids
 
 
 async def _ensure_terrain(session: Session, project: ProjectState) -> TerrainCache:
@@ -1050,7 +1264,11 @@ async def handle_terrain_tiles(session: Session, params: dict[str, Any] | None) 
             )
         )
     result = TerrainTilesResult(
-        level=level, revision=cache.revision, tiles=tuple(infos), warnings=cache.warnings
+        level=level,
+        revision=cache.revision,
+        tiles=tuple(infos),
+        warnings=cache.warnings,
+        source_ids=cache.source_ids,
     )
     return msgspec.to_builtins(result), {}
 
@@ -1079,8 +1297,9 @@ async def handle_terrain_tile(session: Session, params: dict[str, Any] | None) -
         tile_origin=_tile_origin_godot(base, tile.origin),
         valid_fraction=tile.valid_fraction,
         revision=cache.revision,
+        source_ids=cache.source_ids,
     )
-    return msgspec.to_builtins(result), {"heights": tile.heights}
+    return msgspec.to_builtins(result), {"heights": tile.heights, "source_index": tile.source_index}
 
 
 def _repository_root() -> Path | None:

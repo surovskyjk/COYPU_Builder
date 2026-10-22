@@ -111,7 +111,9 @@ A `SourceReader` has `format_id`, `kinds`, `suffixes`, `sniff(path)`, `inspect(p
 file (suffix matches first), else raises `ValueError`. Built-in readers register directly with
 `register_reader`; the three terrain readers (`las`, `geotiff`, `landxml-surface`) are described in
 `terrain-payloads.md`. A `SourceProvider` (`provider_id`, `kinds`, `licence`, `attribution`,
-`inspect`, `fetch`) sits behind the same seam; its files go through the readers (ADR 0009 decision 7).
+`inspect`, `fetch`) sits behind the same seam; its files go through the readers (ADR 0009 decision 7). The
+built-in providers (ČÚZK DMR 5G and DMR 4G, Copernicus GLO-30), the `provider` / `query` form of `import.inspect`
+and `import.run`, and the provider cache are in `terrain-providers.md`.
 
 A reader's `ValueError` and `OSError` become `E_BAD_PARAMS`. Everything else is a reader bug and becomes
 `E_INTERNAL`, never a dropped connection: any other exception from `sniff`, `inspect` or `read`, a malformed

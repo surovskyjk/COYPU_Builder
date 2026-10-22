@@ -94,3 +94,29 @@ func test_int32_blob_decodes_to_source_array() -> void:
 	var segment_index: PackedInt32Array = response.blobs.get("segment_index")
 
 	assert_that(segment_index).is_equal(PackedInt32Array([0, 0, 1]))
+
+
+func test_uint8_blob_decodes_to_its_raw_bytes_without_a_warning() -> void:
+	var raw := PackedByteArray([0, 1, 2, 255, 4, 5])
+	var header := {
+		"v": 1,
+		"id": "8",
+		"type": "res",
+		"method": "terrain.tile",
+		"result": {},
+		"blobs": [{"name": "source_index", "dtype": "<u1", "shape": [2, 3], "offset": 0, "length": raw.size()}],
+	}
+	var header_bytes := JSON.stringify(header).to_utf8_buffer()
+	var frame := PackedByteArray()
+	frame.resize(4)
+	frame.encode_u32(0, header_bytes.size())
+	frame.append_array(header_bytes)
+	frame.append_array(raw)
+	var box := []
+	await assert_error(func() -> void: box.append(IpcEnvelope.decode(frame))).is_success()
+	var response: IpcEnvelope = box[0]
+
+	assert_that(response).is_not_null()
+	var index: PackedByteArray = response.blobs.get("source_index")
+	assert_that(index).is_equal(raw)
+	assert_int(index.size()).is_equal(6)

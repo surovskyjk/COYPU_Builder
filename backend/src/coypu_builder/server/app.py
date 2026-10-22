@@ -15,7 +15,7 @@ from websockets.exceptions import ConnectionClosed
 from coypu_builder import PROTOCOL_VERSION
 from coypu_builder.protocol.messages import METHODS, Envelope, ErrorCode, ErrorInfo
 from coypu_builder.server.codec import decode_frame, encode_frame, pack_blobs
-from coypu_builder.server.handlers import DISPATCH, ProtocolError
+from coypu_builder.server.handlers import DISPATCH, ProtocolError, release_provider_pins
 from coypu_builder.server.session import MAX_EXECUTING, Session
 
 log = logging.getLogger(__name__)
@@ -143,6 +143,7 @@ async def _handle_connection(ws: ServerConnection, token: str | None) -> None:
     finally:
         for task in list(running):
             task.cancel()
+        release_provider_pins(session.project)  # a closed connection's project keeps no provider pins (T-133)
 
 
 async def serve(

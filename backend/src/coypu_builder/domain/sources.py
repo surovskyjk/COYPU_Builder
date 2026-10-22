@@ -109,6 +109,7 @@ class FileOrigin:
 class ProviderOrigin:
     provider_id: str
     query: str  # canonical JSON of the request
+    sha256: tuple[str, ...] = ()  # of every file the provider fetched, in the order they were read
 
 
 @dataclass(frozen=True)

@@ -23,6 +23,8 @@ MAX_LEVEL = 4
 BASE_EDGE_M = 512.0
 SAMPLES = 129  # per side; the lattice has SAMPLES - 1 intervals
 HEIGHT_QUANTUM_M = 2.0**-12  # heights are rounded to this before encoding; see `bake_tile`
+NO_SOURCE_BYTE = 255  # in a tile's `source_index`: no source has data at this sample
+MAX_SOURCES = 255  # source indices 0..254 fit a byte
 
 
 @dataclass(frozen=True, eq=False)
@@ -34,6 +36,7 @@ class TerrainTile:
     origin: tuple[float, float, float]  # (E, N, H), project CRS: the SW corner at the minimum valid height
     heights: np.ndarray  # (129, 129) float32, row 0 = south edge, relative to origin H; NaN = no data
     valid_fraction: float
+    source_index: np.ndarray | None = None  # (129, 129) uint8, same layout as heights; 255 = no source
 
     def absolute_heights(self) -> np.ndarray:
         """float64 heights as decoded by a client: the float32 values plus the origin height."""
@@ -94,6 +97,9 @@ def tiles_for_coverage(level: int, coverage: Sequence[Any]) -> list[tuple[int, i
 def bake_tile(surface: TerrainSurface, level: int, ix: int, iy: int) -> TerrainTile:
     """Sample `surface` on the tile's lattice and encode it.
 
+    The tile also records which source answered at every sample (`source_index`, an index into the stack's
+    ordered sources, 255 where none did): a `TerrainStack` says so itself, any other surface is source 0.
+
     Heights are rounded to `HEIGHT_QUANTUM_M` (0.24 mm) first, then stored relative to the tile's minimum
     valid height. While a tile's relief is under 4096 m every stored value is an exact multiple of the
     quantum below 2**24 quanta, so float32 holds it without further rounding and a client decodes
@@ -102,7 +108,16 @@ def bake_tile(surface: TerrainSurface, level: int, ix: int, iy: int) -> TerrainT
     """
     check_level(level)
     e, n = lattice(level, ix, iy)
-    heights = surface.heights(e.ravel(), n.ravel()).reshape(SAMPLES, SAMPLES)
+    locate = getattr(surface, "heights_and_source", None)
+    if locate is not None:
+        found, owner = locate(e.ravel(), n.ravel())
+        heights = found.reshape(SAMPLES, SAMPLES)
+        if len(surface.surfaces) > MAX_SOURCES:
+            raise ValueError(f"a tile can name at most {MAX_SOURCES} sources, got {len(surface.surfaces)}")
+        source_index = np.where(owner >= 0, owner, NO_SOURCE_BYTE).astype(np.uint8).reshape(SAMPLES, SAMPLES)
+    else:
+        heights = surface.heights(e.ravel(), n.ravel()).reshape(SAMPLES, SAMPLES)
+        source_index = np.where(np.isfinite(heights), 0, NO_SOURCE_BYTE).astype(np.uint8)
     valid = np.isfinite(heights)
     quantised = np.round(heights / HEIGHT_QUANTUM_M) * HEIGHT_QUANTUM_M
     base = float(quantised[valid].min()) if valid.any() else 0.0
@@ -115,4 +130,5 @@ def bake_tile(surface: TerrainSurface, level: int, ix: int, iy: int) -> TerrainT
         origin=(ix * edge, iy * edge, base),
         heights=(quantised - base).astype(np.float32),
         valid_fraction=float(valid.mean()),
+        source_index=source_index,
     )

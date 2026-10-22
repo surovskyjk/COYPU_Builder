@@ -154,9 +154,11 @@ class ImportSettingsDTO(msgspec.Struct, frozen=True):
 
 
 class ImportInspectParams(msgspec.Struct, frozen=True):
-    path: str | None = None  # absolute; exactly one of `path` and `paths`
+    path: str | None = None  # absolute; exactly one of `path`, `paths` and `provider`
     format_id: str | None = None  # None = sniffed
     paths: tuple[str, ...] | None = None  # absolute; several files of one format are one source
+    provider: str | None = None  # an online provider id, e.g. "cuzk-dmr5g"; needs a project with a CRS
+    query: dict[str, Any] | None = None  # the provider's request: `clip`, limits (see terrain-providers.md)
 
 
 class ImportInspectResult(msgspec.Struct, frozen=True):
@@ -171,8 +173,10 @@ class ImportInspectResult(msgspec.Struct, frozen=True):
 
 
 class ImportRunParams(msgspec.Struct, frozen=True, kw_only=True):
-    path: str | None = None  # absolute; exactly one of `path` and `paths`
+    path: str | None = None  # absolute; exactly one of `path`, `paths` and `provider`
     paths: tuple[str, ...] | None = None  # absolute; several files of one format are one source
+    provider: str | None = None  # an online provider id; its files are fetched into the provider cache
+    query: dict[str, Any] | None = None  # the provider's request: `clip`, limits
     kind: str  # "terrain" | "imagery" | "buildings" | "vegetation" | "water"
     settings: ImportSettingsDTO
     name: str | None = None
@@ -218,7 +222,8 @@ class FileOriginDTO(msgspec.Struct, frozen=True, tag_field="type", tag="file"):
 
 class ProviderOriginDTO(msgspec.Struct, frozen=True, tag_field="type", tag="provider"):
     provider_id: str
-    query: str
+    query: str  # canonical JSON of the request, defaults written out
+    sha256: tuple[str, ...] = ()  # of every file the provider fetched
 
 
 class ObjectRecordDTO(msgspec.Struct, frozen=True):
@@ -244,6 +249,7 @@ class SourceDatasetDTO(msgspec.Struct, frozen=True):
     tool_version: str
     objects: tuple[ObjectRecordDTO, ...]
     warnings: tuple[str, ...] = ()
+    resolution_m: float | None = None  # terrain: the declared resolution that orders the sources
 
 
 class PluginInfoDTO(msgspec.Struct, frozen=True):
@@ -330,7 +336,10 @@ class TerrainTilesResult(msgspec.Struct, frozen=True):
     level: int
     revision: int
     tiles: tuple[TerrainTileInfo, ...]
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()  # sources skipped, and the height step at each seam between sources
+    source_ids: tuple[
+        str, ...
+    ] = ()  # the sources in precedence order, finest first: what `source_index` indexes
 
 
 class TerrainTileParams(msgspec.Struct, frozen=True):
@@ -348,6 +357,7 @@ class TerrainTileResult(msgspec.Struct, frozen=True):
     tile_origin: tuple[float, float, float]
     valid_fraction: float
     revision: int
+    source_ids: tuple[str, ...] = ()  # the sources in precedence order for this revision
 
 
 # --- alignment.envelope ----------------------------------------------------------------------------------
@@ -662,7 +672,12 @@ METHODS: tuple[MethodSpec, ...] = (
             "of `path` and `paths` (several files of one format, e.g. the sheets of one survey, are one "
             "source: counts are summed, extents united, and differing declared CRSs are warned about and "
             "reported as null); every path must be absolute. `format_id` picks a reader instead of "
-            "sniffing; a ZIP holding a single supported file reads like the bare file. Needs no project."
+            "sniffing; a ZIP holding a single supported file reads like the bare file. Needs no project. "
+            "Instead of files, `provider` (with an optional `query`) inspects an online source: the report "
+            "counts the sheets or tiles the query's clip selects, their size, and proposes the settings "
+            "(including the clip); it fetches index files only, never the data, and needs a project with a "
+            "CRS (`E_NO_PROJECT`, `E_CRS_REQUIRED`). An unknown provider or a bad query is `E_BAD_PARAMS`; "
+            "a service that cannot be reached is `E_BAD_PARAMS` with the reason."
         ),
         stability=Stability.EXPERIMENTAL,
         mutates=False,
@@ -674,6 +689,9 @@ METHODS: tuple[MethodSpec, ...] = (
             ErrorCode.NOT_FOUND,
             ErrorCode.INTERNAL,
             ErrorCode.BUSY,
+            ErrorCode.NO_PROJECT,
+            ErrorCode.CRS_REQUIRED,
+            ErrorCode.EMPTY,
         ),
     ),
     MethodSpec(
@@ -687,7 +705,13 @@ METHODS: tuple[MethodSpec, ...] = (
             "their GUID, and the source keeps its id. Without it the import is a new source with all-new "
             "GUIDs. Counts report added, changed, unchanged and removed objects. Give exactly one of "
             "`path` and `paths`; every path must be absolute. With `paths` all files must resolve to the "
-            "same reader (mixed formats are `E_BAD_PARAMS`) and each file yields its own objects."
+            "same reader (mixed formats are `E_BAD_PARAMS`) and each file yields its own objects. "
+            "`provider` (with `query`) is the third alternative: exactly one of `path`, `paths` and "
+            "`provider`. The provider's files are fetched into its per-user cache (never the repository or "
+            "the data folder), read by the ordinary readers, and the source records a provider origin "
+            "(provider id, canonical query, file hashes), the provider's licence and attribution. A clip "
+            "left out of `settings` defaults to the query's. `reimport_of` fetches again, reconciles on "
+            "the object keys (sheet codes, tile names) and keeps the GUIDs. The result shape is the same."
         ),
         stability=Stability.EXPERIMENTAL,
         mutates=True,
@@ -718,7 +742,8 @@ METHODS: tuple[MethodSpec, ...] = (
         summary=(
             "Fetch one source's full provenance record: origin with file hashes, the settings as confirmed, "
             "declared and effective CRS, the transformation used, licence, attribution, import time, tool "
-            "version and every object's key and GUID."
+            "version, every object's key and GUID, and for terrain the declared resolution [m] that orders "
+            "the sources (finest first)."
         ),
         stability=Stability.EXPERIMENTAL,
         mutates=False,
@@ -839,7 +864,11 @@ METHODS: tuple[MethodSpec, ...] = (
             "(Godot axes relative to the base point; its y is the tile's minimum valid height) and "
             "`valid_fraction`, plus the `revision` that changes whenever the sources change. Tiles are "
             "regular 129 x 129 heightfields derived from the analysis surface, for display only. A project "
-            "without terrain returns an empty list. Page by calling `terrain.tile` for each listed tile."
+            "without terrain returns an empty list. Page by calling `terrain.tile` for each listed tile. "
+            "`source_ids` names the terrain sources in precedence order (finest declared resolution first, "
+            "the newest import first among equals): the index into it is what each tile's `source_index` "
+            "blob holds. `warnings` also report the height step along each seam between two sources, as "
+            "mean and 95th percentile of the absolute difference."
         ),
         stability=Stability.EXPERIMENTAL,
         mutates=False,
@@ -850,9 +879,10 @@ METHODS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="terrain.tile",
         summary=(
-            "Fetch one terrain display tile listed by `terrain.tiles`: its metadata plus the `heights` blob. "
-            "`revision` must be the one the list returned; a stale revision, or a tile not in the list, is "
-            "`E_NOT_FOUND`, and the client re-lists instead of mixing old and new tiles."
+            "Fetch one terrain display tile listed by `terrain.tiles`: its metadata plus the `heights` and "
+            "`source_index` blobs. `revision` must be the one the list returned; a stale revision, or a "
+            "tile not in the list, is `E_NOT_FOUND`, and the client re-lists instead of mixing old and new "
+            "tiles. `source_ids` is the ordered source list of that revision."
         ),
         stability=Stability.EXPERIMENTAL,
         mutates=False,
@@ -866,6 +896,14 @@ METHODS: tuple[MethodSpec, ...] = (
                 "Heights in metres relative to the y of `tile_origin`; row 0 is the south edge, column 0 the "
                 "west edge, spacing `edge_m / 128`. NaN where the tile has no data. Position the node at "
                 "`tile_origin`; the origin is never folded into the values.",
+            ),
+            BlobSpec(
+                "source_index",
+                "<u1",
+                "(129, 129)",
+                "Which source answered at each sample, laid out like `heights`: an index into `source_ids` "
+                "(0 = the finest source), 255 where no source has data. One byte per sample (byte order does "
+                "not apply); written as `<u1` on the wire, as the other blobs are written `<`.",
             ),
         ),
         errors=(

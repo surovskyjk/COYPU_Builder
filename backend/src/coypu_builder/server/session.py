@@ -42,6 +42,7 @@ class SourceEntry:
     payloads: dict[EntityId, object]  # reader-specific, keyed by the object's GUID
     warnings: tuple[str, ...] = ()
     coverage: object | None = None  # shapely Polygon / MultiPolygon of the import clip; None = no clip
+    resolution_m: float | None = None  # declared resolution of a terrain source (T-133); None = not measured
 
 
 @dataclass
@@ -54,6 +55,7 @@ class TerrainCache:
     build: Any = None  # the asyncio future of the build in flight, shared by concurrent requests
     baking: dict[tuple[int, int, int], Any] = field(default_factory=dict)  # tile bakes in flight
     coverage: tuple = ()  # per source: a bounds box or a shapely geometry
+    source_ids: tuple[str, ...] = ()  # the stack's sources in precedence order: what `source_index` indexes
     warnings: tuple[str, ...] = ()
     level_keys: dict[int, tuple[tuple[int, int], ...]] = field(default_factory=dict)
     meta: dict[tuple[int, int, int], tuple[tuple[float, float, float], float]] = field(default_factory=dict)

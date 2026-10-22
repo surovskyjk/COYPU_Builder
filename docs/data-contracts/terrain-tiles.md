@@ -82,8 +82,9 @@ four surrounding cells is NaN, including a neighbour whose weight is zero.
 ### Stack
 
 `TerrainStack.heights` takes the first surface's value where it has one and asks the next only about the
-points still missing. T-135 and T-137 query the stack; T-133 will decide the order. Until then the handler
-puts the **most recently imported source first**.
+points still missing; `heights_and_source` also returns the index of the surface that answered (-1 where none
+did). T-135 and T-137 query the stack. Since T-133 the stack is ordered by **declared resolution, finest first,
+the newest import first among equals**, and tiles carry a per-sample source map: see `terrain-providers.md`.
 
 ## Display tiles
 
@@ -110,6 +111,7 @@ A tile carries:
 | `tile_origin` | the SW corner at the tile's minimum valid height, in Godot axes relative to the base point: `(E - E0, Hmin - H0, -(N - N0))`, float64 |
 | `heights` | `<f4` `(129, 129)`; row 0 is the south edge, column 0 the west edge; metres relative to the origin height; NaN = no data |
 | `valid_fraction` | share of the 129 x 129 samples that are not NaN |
+| `source_index` (second blob, `<u1` `(129, 129)`) | which source answered at each sample: an index into `source_ids`, 255 = none (T-133) |
 
 **Position the tile node at `tile_origin`; the origin is never folded into the values** (ADR 0004). Vertex
 `(row r, column c)` is at `x = c * edge / 128`, `z = -r * edge / 128` (north is `-z`) and `y = heights[r, c]`
@@ -137,8 +139,8 @@ between LOD levels belong to T-135.
 
 | Method | Params | Result |
 |---|---|---|
-| `terrain.tiles` | `level` | `level`, `revision`, `tiles`: per tile `level`, `ix`, `iy`, `edge_m`, `tile_origin`, `valid_fraction`; `warnings` |
-| `terrain.tile` | `level`, `ix`, `iy`, `revision` | the same metadata for that tile plus `revision`, and the blob `heights` |
+| `terrain.tiles` | `level` | `level`, `revision`, `tiles`: per tile `level`, `ix`, `iy`, `edge_m`, `tile_origin`, `valid_fraction`; `warnings`; `source_ids` |
+| `terrain.tile` | `level`, `ix`, `iy`, `revision` | the same metadata for that tile plus `revision` and `source_ids`, and the blobs `heights` and `source_index` |
 
 The pattern is F18's: list a level, then fetch the listed tiles one at a time.
 
@@ -150,9 +152,10 @@ The pattern is F18's: list a level, then fetch the listed tiles one at a time.
   `E_NOT_FOUND`.
 - `level` outside 0 to 4 is `E_BAD_PARAMS`, as is a level with more than 5000 tiles (about 140 to 170 bytes
   each as JSON, which keeps the answer under 1 MB): ask for a coarser level.
-- A `terrain.tile` response is 66 869 bytes (66 564 of them the blob). A `terrain.tiles` entry costs about
+- A `terrain.tile` response is about 83 650 bytes (66 564 of them the `heights` blob, 16 641 the `source_index` blob). A `terrain.tiles` entry costs about
   140 bytes.
-- `warnings` names a source that was skipped because it could not be triangulated.
+- `warnings` names a source that was skipped because it could not be triangulated, and reports the height step at
+  each seam between two sources (T-133).
 - Listing a level bakes each of its tiles once, because `tile_origin` and `valid_fraction` come from the
   baked heights: 78 L0 tiles take 0.76 s on the Kralupy corridor, and a level near the 5000-tile cap would
   take about a minute. The metadata is then kept for the revision, so later listings are immediate. The bake

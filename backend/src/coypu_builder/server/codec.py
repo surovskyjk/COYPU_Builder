@@ -36,10 +36,11 @@ def pack_blobs(named_arrays: dict[str, np.ndarray]) -> tuple[tuple[BlobRef, ...]
     for name, array in named_arrays.items():
         array = np.ascontiguousarray(array)
         data = array.tobytes()
+        dtype = array.dtype.str
+        if dtype.startswith("|"):  # one-byte types: numpy says `|`, the contract says `<` (T-133)
+            dtype = "<" + dtype[1:]
         refs.append(
-            BlobRef(
-                name=name, dtype=array.dtype.str, shape=tuple(array.shape), offset=offset, length=len(data)
-            )
+            BlobRef(name=name, dtype=dtype, shape=tuple(array.shape), offset=offset, length=len(data))
         )
         chunks.append(data)
         offset += len(data)

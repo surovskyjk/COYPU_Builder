@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 from pyproj import CRS, Transformer
@@ -30,24 +31,32 @@ from coypu_builder.domain.sources import (
     ClipRegion,
     FileOrigin,
     ImportSettings,
+    ProviderOrigin,
     Reconciliation,
     SourceDataset,
     SourceKind,
     reconcile,
 )
+from coypu_builder.domain.terrain import TerrainGrid, TerrainPoints, TerrainTin
+from coypu_builder.domain.terrain_surface import source_resolution_m
 from coypu_builder.io.gis.envelope import EnvelopeOptions, GisExtraMissing, corridor_envelope
+from coypu_builder.io.providers import cache as provider_cache
+from coypu_builder.io.providers import canonical_query, clip_from_query
 from coypu_builder.io.sources.registry import (
     CrsTransform,
     ImportedObject,
     InspectReport,
     ReaderFailure,
+    SourceProvider,
     SourceReader,
+    providers,
     reader_for,
 )
 from coypu_builder.io.terrain.archive import extraction_scope, release
 
 _HASH_CHUNK = 1 << 20
 _NOTES: ContextVar[list[str] | None] = ContextVar("import_notes", default=None)
+_FETCH_NOTES: ContextVar[list[str] | None] = ContextVar("fetch_notes", default=None)
 # The Krovak variants whose positive-valued X/Y axes `resolve_coordinates` turns into East-North values; the
 # resolved coordinates are then in the East-North twin of the declared CRS, which is what gets reprojected.
 _KROVAK_EAST_NORTH = {5513: 5514, 2065: 5221, 8352: 8353}
@@ -72,12 +81,22 @@ class ImportOutcome:
     payloads: dict[EntityId, object]  # keyed by the object's GUID
     reconciliation: Reconciliation
     warnings: tuple[str, ...]
+    resolution_m: float | None = None  # terrain: the finest declared resolution of the objects (T-133)
+    cache_files: tuple[str, ...] = ()  # provider imports: the cache-relative files read (pinned when stored)
 
 
 def note(message: str) -> None:
     """Called by a reader while it reads: a warning for the import in progress, for example why a file
     contributed no object. Ignored outside an import."""
     notes = _NOTES.get()
+    if notes is not None and message not in notes:
+        notes.append(message)
+
+
+def fetch_note(message: str) -> None:
+    """Called by a provider while it fetches: a warning for the import in progress, for example a tile that
+    was skipped, or what the data is. It is stored with the source. Ignored outside a provider import."""
+    notes = _FETCH_NOTES.get()
     if notes is not None and message not in notes:
         notes.append(message)
 
@@ -403,12 +422,16 @@ def run_import(
     format_id: str | None = None,
     previous: SourceDataset | None = None,
     make_id: Callable[[], EntityId] = new_id,
+    provider: tuple[str, str] | None = None,
+    licence: str | None = None,
+    attribution: str = "",
 ) -> ImportOutcome:
     """Import one source, a file or a list of files read by the same reader, with the confirmed `settings`.
 
     With `previous`, objects are matched to that import on their own keys, so matched objects keep their GUID
     and the dataset keeps its id; without it every GUID is new. `previous` must have the same kind and
-    format.
+    format. `provider = (provider_id, canonical query JSON)` records a `ProviderOrigin` (with the file hashes)
+    instead of a `FileOrigin`, and `licence` / `attribution` are the provider's; see `run_provider_import`.
     Raises `ValueError` for bad input, `CrsRequired`, `UnknownAlignment`, `NoAlignments`, `GisExtraMissing`,
     `OSError` and `ReaderFailure`.
     """
@@ -474,14 +497,18 @@ def run_import(
         kind=kind,
         name=name or (previous.name if previous is not None else _default_name(paths)),
         format_id=reader.format_id,
-        origin=FileOrigin(paths=tuple(str(p) for p in paths), sha256=digests),
+        origin=(
+            FileOrigin(paths=tuple(str(p) for p in paths), sha256=digests)
+            if provider is None
+            else ProviderOrigin(provider[0], provider[1], digests)
+        ),
         settings=settings,
         declared_crs=report.declared_crs,
         effective_crs=transform.effective_crs,
         transformation=transform.description,
         transformation_accuracy_m=transform.accuracy_m,
-        licence=report.licence_hint or UNKNOWN_LICENCE,
-        attribution="",
+        licence=licence or report.licence_hint or UNKNOWN_LICENCE,
+        attribution=attribution,
         imported_at=datetime.now(UTC).isoformat(timespec="seconds"),
         tool_version=f"coypu-builder {__version__}",
         objects=reconciliation.objects,
@@ -492,7 +519,9 @@ def run_import(
             "the import produced no objects: every file was empty after the class filter, nodata handling "
             "and clip (see the warnings above)"
         )
-    return ImportOutcome(dataset, payloads, reconciliation, tuple(warnings))
+    terrain = [p for p in payloads_by_key.values() if isinstance(p, (TerrainPoints, TerrainGrid, TerrainTin))]
+    resolution = source_resolution_m(terrain) if kind == SourceKind.TERRAIN and terrain else None
+    return ImportOutcome(dataset, payloads, reconciliation, tuple(warnings), resolution)
 
 
 def _default_name(paths: Sequence[Path]) -> str:
@@ -500,3 +529,148 @@ def _default_name(paths: Sequence[Path]) -> str:
     if len(paths) > 1 and len({p.parent for p in paths}) == 1 and paths[0].parent.name:
         return paths[0].parent.name
     return paths[0].stem
+
+
+# --- providers (T-133)  ----------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProviderContext:
+    """What a built-in provider needs from the project to turn a query into ground: the project CRS and the
+    alignments a corridor clip is built around. Set for the duration of `inspect` and `fetch`."""
+
+    project_crs: ProjectCRS
+    alignments: Mapping[str, Alignment]
+
+    def clip_polygon(self, clip: ClipRegion):
+        """The clip as a shapely geometry in the project CRS (see `clip_polygon`)."""
+        polygon = clip_polygon(clip, self.alignments)
+        if polygon is None or polygon.is_empty:
+            raise ValueError("the clip region is empty")
+        return polygon
+
+
+_PROVIDER_CONTEXT: ContextVar[ProviderContext | None] = ContextVar("provider_context", default=None)
+
+
+def provider_context() -> ProviderContext:
+    """The context of the provider call in progress. Raises `ValueError` outside one."""
+    context = _PROVIDER_CONTEXT.get()
+    if context is None:
+        raise ValueError("a provider can only be used while a project import is running")
+    return context
+
+
+def find_provider(provider_id: str) -> SourceProvider:
+    for provider in providers():
+        if provider.provider_id == provider_id:
+            return provider
+    known = ", ".join(sorted(p.provider_id for p in providers())) or "none registered"
+    raise ValueError(f"unknown provider '{provider_id}' (known: {known})")
+
+
+def _normalised_query(provider: SourceProvider, query: Mapping[str, object]) -> dict[str, object]:
+    """The query with the provider's defaults written out, so the recorded request reproduces the import. A
+    provider without `normalise_query` keeps the query as given. It must be JSON."""
+    normalise = getattr(provider, "normalise_query", None)
+    result = dict(normalise(query) if normalise is not None else query)
+    try:
+        canonical_query(result)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"the provider query must be JSON: {exc}") from exc
+    return result
+
+
+def inspect_provider(
+    provider_id: str,
+    query: Mapping[str, object],
+    project_crs: ProjectCRS,
+    alignments: Mapping[str, Alignment],
+) -> tuple[SourceProvider, InspectReport]:
+    """Ask a provider what its `query` selects: sheets or tiles, sizes, extent, warnings and the settings it
+    proposes. Network access happens here (index files, never the data), so call it off the event loop."""
+    provider = find_provider(provider_id)
+    normal = _normalised_query(provider, query)
+    token = _PROVIDER_CONTEXT.set(ProviderContext(project_crs, alignments))
+    try:
+        report = _call_reader(f"provider '{provider_id}'", lambda: provider.inspect(normal))
+    finally:
+        _PROVIDER_CONTEXT.reset(token)
+    if not isinstance(report, InspectReport) or not isinstance(report.kind, SourceKind):
+        raise ReaderFailure(f"provider '{provider_id}' returned a malformed inspect report")
+    return provider, report
+
+
+def run_provider_import(
+    provider_id: str,
+    query: Mapping[str, object],
+    kind: SourceKind,
+    settings: ImportSettings,
+    project_crs: ProjectCRS,
+    alignments: Mapping[str, Alignment],
+    *,
+    name: str | None = None,
+    format_id: str | None = None,
+    previous: SourceDataset | None = None,
+    make_id: Callable[[], EntityId] = new_id,
+    cache_dir: Path | None = None,
+) -> ImportOutcome:
+    """Import what a provider's `query` selects: `fetch` into the provider cache, then the ordinary readers
+    and reconciliation of `run_import`.
+
+    The dataset records a `ProviderOrigin` (provider id, canonical JSON of the query with its defaults
+    written out, and the SHA-256 of every fetched file) and the provider's licence and attribution. When
+    `settings.clip` is None the query's own clip is used, so the readers keep only what the query asked for.
+    Re-importing with `previous` fetches again (the cache revalidates what it holds) and reconciles on the
+    objects' keys. The fetched files are pinned in the cache for the life of the source.
+    Raises what `run_import` does, and `ValueError` for an unknown provider, kind or query.
+    """
+    provider = find_provider(provider_id)
+    if kind not in provider.kinds:
+        raise ValueError(f"provider '{provider_id}' does not supply {kind.value} sources")
+    normal = _normalised_query(provider, query)
+    if settings.clip is None and "clip" in normal:
+        settings = replace(settings, clip=clip_from_query(normal, 250.0))
+    directory = Path(cache_dir) if cache_dir is not None else provider_cache.provider_cache_dir(provider_id)
+    cache = provider_cache.ProviderCache(directory)
+    pending = f"pending:{uuid4().hex}"
+    token = _PROVIDER_CONTEXT.set(ProviderContext(project_crs, alignments))
+    fetch_notes: list[str] = []
+    note_token = _FETCH_NOTES.set(fetch_notes)
+    try:
+        try:
+            fetched = _call_reader(f"provider '{provider_id}'", lambda: provider.fetch(normal, directory))
+        finally:
+            _FETCH_NOTES.reset(note_token)
+        if not isinstance(fetched, (list, tuple)) or not fetched:
+            raise ReaderFailure(f"provider '{provider_id}' fetched no files")
+        paths = [Path(p) for p in fetched]
+        files = [cache.relative(p) for p in paths]
+        cache.pin(pending, files)
+        outcome = run_import(
+            paths,
+            kind,
+            settings,
+            project_crs,
+            alignments,
+            name=name or (None if previous is not None else getattr(provider, "title", provider_id)),
+            format_id=format_id or getattr(provider, "format_id", None),
+            previous=previous,
+            make_id=make_id,
+            provider=(provider_id, canonical_query(normal)),
+            licence=provider.licence,
+            attribution=provider.attribution,
+        )
+        return replace(outcome, warnings=(*fetch_notes, *outcome.warnings), cache_files=tuple(files))
+    finally:
+        _PROVIDER_CONTEXT.reset(token)
+        cache.unpin(pending)
+
+
+def pin_provider_source(outcome: ImportOutcome) -> None:
+    """Pin the cache files of a provider import to its dataset, once the import is stored in a project.
+    It runs on the event loop, never in the worker thread: a connection closed mid-import keeps no pin."""
+    origin = outcome.dataset.origin
+    if isinstance(origin, ProviderOrigin) and outcome.cache_files:
+        directory = provider_cache.provider_cache_dir(origin.provider_id)
+        provider_cache.ProviderCache(directory).pin(outcome.dataset.id, list(outcome.cache_files))

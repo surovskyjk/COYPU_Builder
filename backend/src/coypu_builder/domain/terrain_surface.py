@@ -360,11 +360,26 @@ def _mosaic(grids: Sequence[TerrainGrid]) -> TerrainGrid | None:
 # --- stack and sources -------------------------------------------------------------------------------------
 
 
+NO_SOURCE = -1  # `TerrainStack.heights_and_source` index where no surface has data
+RESOLUTION_BAND_STEP = 0.5  # sources whose log2 resolution rounds to the same multiple of this are tied
+_RESOLUTION_SAMPLE = 20_000  # query points for the median point spacing of a cloud
+
+
 @dataclass(frozen=True, eq=False)
 class TerrainStack:
-    """Surfaces by precedence, highest first: the height at a point is the first one that has data there."""
+    """Surfaces by precedence, highest first: the height at a point is the first one that has data there.
+
+    `source_ids`, when given, names the source of each surface (one per surface, same order), so that
+    `heights_and_source` can say which source answered."""
 
     surfaces: tuple[TerrainSurface, ...]
+    source_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.source_ids and len(self.source_ids) != len(self.surfaces):
+            raise ValueError(
+                f"source_ids names {len(self.source_ids)} sources for {len(self.surfaces)} surfaces"
+            )
 
     def warm_up(self) -> None:
         """Prepare every surface that has something to prepare (see `TinSurface.warm_up`)."""
@@ -373,15 +388,23 @@ class TerrainStack:
             if warm is not None:
                 warm()
 
-    def heights(self, e, n) -> np.ndarray:
+    def heights_and_source(self, e, n) -> tuple[np.ndarray, np.ndarray]:
+        """`(heights, source_index)`: the first surface's value at each point and the index of that surface in
+        `surfaces` (`NO_SOURCE`, -1, where none has data). Both are shaped like the broadcast inputs."""
         e_flat, n_flat, shape = _query(e, n)
         out = np.full(e_flat.shape, np.nan)
-        for surface in self.surfaces:
+        index = np.full(e_flat.shape, NO_SOURCE, dtype=np.int16)
+        for number, surface in enumerate(self.surfaces):
             missing = np.nonzero(np.isnan(out))[0]
             if missing.size == 0:
                 break
-            out[missing] = surface.heights(e_flat[missing], n_flat[missing])
-        return out.reshape(shape)
+            found = surface.heights(e_flat[missing], n_flat[missing])
+            out[missing] = found
+            index[missing[~np.isnan(found)]] = number
+        return out.reshape(shape), index.reshape(shape)
+
+    def heights(self, e, n) -> np.ndarray:
+        return self.heights_and_source(e, n)[0]
 
     def bounds(self) -> Bounds:
         if not self.surfaces:
@@ -393,6 +416,78 @@ class TerrainStack:
             max(b[2] for b in boxes),
             max(b[3] for b in boxes),
         )
+
+
+# --- precedence  -----------------------------------------------------------------------------------------
+
+
+def payload_resolution_m(payload: TerrainPayload) -> float | None:
+    """The declared resolution of one terrain object, in metres (smaller is finer): the median distance from a
+    point to its nearest neighbour for a cloud (measured from up to 20 000 evenly spread query points against
+    the whole cloud), the geometric mean cell size for a grid, the median edge length for a TIN. None when
+    it cannot be measured (fewer than two points)."""
+    if isinstance(payload, TerrainGrid):
+        return float(math.sqrt(payload.cell_e * payload.cell_n))
+    if isinstance(payload, TerrainPoints):
+        points = payload.points[:, :2]
+        if len(points) < 2:
+            return None
+        from scipy.spatial import cKDTree
+
+        step = max(1, len(points) // _RESOLUTION_SAMPLE)
+        centred = points - points.mean(axis=0)
+        distance, _ = cKDTree(centred).query(centred[::step], k=2)
+        return float(np.median(distance[:, 1]))
+    if isinstance(payload, TerrainTin):
+        if len(payload.triangles) == 0:
+            return None
+        step = max(1, len(payload.triangles) // _RESOLUTION_SAMPLE)
+        tri = payload.triangles[::step]
+        xy = payload.points[:, :2]
+        a, b, c = (xy[tri[:, k]] for k in range(3))
+        lengths = np.concatenate([np.hypot(*(p - q).T) for p, q in ((a, b), (b, c), (c, a))])
+        return float(np.median(lengths))
+    raise ValueError(f"not a terrain payload: {type(payload).__name__}")
+
+
+def source_resolution_m(payloads: Sequence[TerrainPayload]) -> float | None:
+    """The finest resolution among a source's objects, None if none can be measured."""
+    values = [r for r in (payload_resolution_m(p) for p in payloads) if r is not None and r > 0.0]
+    return min(values) if values else None
+
+
+def resolution_band(resolution_m: float | None) -> float:
+    """Sources are compared by band, not by the raw number: a measured spacing wobbles by a few per cent
+    between two surveys of the same density, and that must not decide precedence. A band is a factor of
+    sqrt(2) wide; an unknown resolution is the coarsest band."""
+    if resolution_m is None or not (math.isfinite(resolution_m) and resolution_m > 0.0):
+        return math.inf
+    return round(math.log2(resolution_m) / RESOLUTION_BAND_STEP)
+
+
+@dataclass(frozen=True, eq=False)
+class StackSource:
+    """One terrain source on its way into a `TerrainStack`."""
+
+    source_id: str
+    surface: TerrainSurface
+    resolution_m: float | None
+    recency: int  # larger = imported later
+    from_provider: bool = (
+        False  # a generic provider (ADR 0009 decision 6): a user's own file beats it in a band
+    )
+
+
+def order_sources(sources: Sequence[StackSource]) -> list[StackSource]:
+    """Precedence order: finest declared resolution first (by `resolution_band`); within a band a user's own
+    file before a provider (`from_provider`); then the most recently imported first."""
+    return sorted(sources, key=lambda s: (resolution_band(s.resolution_m), s.from_provider, -s.recency))
+
+
+def stack_from_sources(sources: Sequence[StackSource]) -> TerrainStack:
+    """A `TerrainStack` of `sources` in precedence order, remembering which source each surface is."""
+    ordered = order_sources(sources)
+    return TerrainStack(tuple(s.surface for s in ordered), tuple(s.source_id for s in ordered))
 
 
 def surface_for_source(

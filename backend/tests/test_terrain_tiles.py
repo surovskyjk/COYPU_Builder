@@ -359,7 +359,9 @@ async def test_list_then_fetch_each_tile_and_a_reimport_makes_a_stale_fetch_not_
             if np.isfinite(heights).any():
                 assert 100.0 < origin[1] + base["height"] < 260.0  # a plausible terrain height, not a relief
         assert max(sizes) < MAX_RESPONSE_BYTES
-        assert max(sizes) < 70_000  # one L0 tile: 129 * 129 * 4 bytes plus the envelope
+        assert (
+            max(sizes) < 85_000
+        )  # one L0 tile: 129 * 129 * (4 + 1) bytes (heights, source_index) plus the envelope
 
         second = await _import(ws, "i3", paths[:1])
         assert second["added"] == 1

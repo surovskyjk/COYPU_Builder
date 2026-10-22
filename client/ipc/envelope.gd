@@ -82,6 +82,8 @@ static func _decode_array(raw: PackedByteArray, dtype: String, shape: Array) -> 
 			return raw.to_float64_array()
 		"<i4":
 			return raw.to_int32_array()
+		"<u1":
+			return raw  # one byte per value, so a PackedByteArray is the whole array (T-133 source_index)
 		_:
 			push_warning("IPC: unsupported blob dtype '%s'; returning raw bytes" % dtype)
 			return raw
