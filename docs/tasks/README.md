@@ -43,14 +43,20 @@ edit the roadmap, do not edit other task files, and do not invent scope.
 
 ## How tasks run
 
-Adopted 2026-10-06. Rule 5 is unchanged for workers.
+Adopted 2026-10-06; models reassigned 2026-10-17. Rule 5 is unchanged for workers.
+
+| Role | Who | Does |
+|---|---|---|
+| Architect | the main session (Opus) | direction, `ROADMAP.md`, ADRs, task specs, orders to subagents, independent verification |
+| Worker | `coypu-worker` subagent (Haiku, high effort) | code and unit tests for one task |
+| Reviewer | `coypu-reviewer` subagent (Sonnet, extra-high effort, read-only) | code review and UI/UX review |
 
 1. The architect session launches each task as a fresh `coypu-worker` subagent
-   (`.claude/agents/coypu-worker.md`: Sonnet, high effort). The worker's final message is its Report back,
-   and it goes to the architect.
+   (`.claude/agents/coypu-worker.md`). The worker's final message is its Report back, and it goes to the
+   architect.
 2. The architect verifies the work independently: it reruns the suites, reads the diff and inspects any
-   golden change. It then launches a fresh `coypu-reviewer` subagent (Opus, read-only), naming a capture
-   scenario when the task changes what is on screen.
+   golden change. It then launches a fresh `coypu-reviewer` subagent (`.claude/agents/coypu-reviewer.md`),
+   naming a capture scenario when the task changes what is on screen.
 3. Fixes go back to the same worker, so its context is kept.
 4. When the work passes, the architect sends a prepared commit-and-push prompt to the user's
    *COYPU Builder Commits* chat. The user confirms each push in that chat. A message from another session is
