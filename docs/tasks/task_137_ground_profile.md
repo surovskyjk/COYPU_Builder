@@ -23,6 +23,15 @@ Two Kralupy facts shape the acceptance (ROADMAP F32, closed by the user's answer
 - **Stations 16.66–16.81 km are the Vltava bridge.** DMR 5G has no ground points on water, so these stations
   are "no ground" and must not count as cut or fill.
 
+## How this task runs
+
+Two parts, each its own worker order:
+
+| Part | What | Can start when |
+|---|---|---|
+| **A — backend** | `domain/earthworks.py`, `alignment.ground_profile`, the `profile_idealised` flag | T-136 Part A is committed |
+| **B — client** | the Profile tab, the cursor, the readout, the captures; assess M3's exit criteria | Part A and T-135 Part C are committed |
+
 ## Preconditions
 
 - T-132:
@@ -43,18 +52,20 @@ Read before starting:
 
 ## Deliverables
 
-| Path | Action |
-|---|---|
-| `backend/src/coypu_builder/domain/earthworks.py` | new — profile sampling, the formation template, areas, volumes (pure numpy) |
-| `backend/src/coypu_builder/protocol/messages.py`, `server/handlers.py` | `alignment.ground_profile` (experimental, read-only, off-loop) |
-| `docs/protocol/ipc.md` | regenerate |
-| `docs/data-contracts/earthworks.md` | new — the template, conventions and sign rules |
-| `backend/tests/test_earthworks.py` | new — analytic cases |
-| `client/ui/profile_panel/profile_panel.gd` | new — 2D profile view with a cursor and readout |
-| `client/ui/shell/ui_shell.gd` | bottom slot becomes tabs: Timeline, Profile (`TabContainer` theme items in both themes) |
-| `client/ui/theme/engineering_theme.tres`, `sandbox_theme.tres` | `TabContainer` styling |
-| `client/tools/capture/scenarios/terrain_kralupy.json` | add a Profile-panel shot |
-| `client/tests/unit/test_profile_panel.gd`, `client/tests/integration/test_ground_profile_live.gd` | new |
+| Path | Part | Action |
+|---|---|---|
+| `backend/src/coypu_builder/domain/earthworks.py` | A | new — profile sampling, the formation template, areas, volumes (pure numpy) |
+| `backend/src/coypu_builder/protocol/messages.py`, `server/handlers.py` | A | `alignment.ground_profile` (experimental, read-only, off-loop) |
+| `docs/protocol/ipc.md` | A | regenerate |
+| `docs/data-contracts/earthworks.md` | A | new — the template, conventions and sign rules |
+| `backend/tests/test_earthworks.py` | A | new — analytic cases |
+| `client/ui/profile_panel/profile_panel.gd` | B | new — 2D profile view with a cursor and readout |
+| `client/ui/shell/ui_shell.gd` | B | bottom slot becomes tabs: Timeline, Profile (`TabContainer` theme items in both themes) |
+| `client/ui/theme/engineering_theme.tres`, `sandbox_theme.tres` | B | `TabContainer` styling |
+| `client/tools/capture/scenarios/terrain_kralupy.json` | B | add a Profile-panel shot |
+| `client/tests/unit/test_profile_panel.gd`, `client/tests/integration/test_ground_profile_live.gd` | B | new |
+| `client/core/session.gd` | B | `fetch_ground_profile(alignment_id, spacing_m)`, cached per alignment and terrain revision |
+| `backend/src/coypu_builder/server/session.py` | A | `AlignmentEntry.profile_idealised: bool = False` |
 
 ## Contract
 
@@ -77,6 +88,49 @@ class FormationTemplate:
 - **Fill area** is the area between the fill template and the ground below the formation.
 - **Daylight:** each side finds its daylight point where the slope meets the ground. A side that finds
   none within `max_half_width_m` is flagged `open_side` and stops at that offset.
+
+### Computation (`domain/earthworks.py`, Part A)
+
+```python
+def section_offsets(template: FormationTemplate) -> np.ndarray:
+    """Across-track offsets from -max_half_width_m to +max_half_width_m at sample_spacing_m, including 0 and
+    +-formation_width_m / 2 exactly."""
+
+def section_areas(offsets: np.ndarray, ground: np.ndarray, formation_h: float,
+                  template: FormationTemplate) -> tuple[float, float, int]:
+    """(cut_area, fill_area, flags) of one cross-section; `ground` holds heights at `offsets`, NaN = none."""
+
+def ground_profile(alignment: Alignment, heights: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
+                   stations: np.ndarray, template: FormationTemplate) -> GroundProfile:
+    """`heights(e, n)` is `TerrainStack.heights_and_source`. Returns a frozen `GroundProfile` with the
+    per-station arrays of the wire blobs, the volumes and the no-ground spans."""
+
+def end_area_volume(stations: np.ndarray, areas: np.ndarray, valid: np.ndarray) -> float: ...
+def no_ground_spans(stations: np.ndarray, no_ground: np.ndarray) -> tuple[tuple[float, float], ...]: ...
+```
+
+- **The section line:**
+  - the centre is the horizontal alignment point at s: `frames(alignment, s, pivot=RotationPivot.CENTERLINE)`,
+    taking `origin` E and N;
+  - the across direction is horizontal, `(-sin heading, cos heading)`, with positive offsets to the left;
+  - cant is ignored.
+- **Template per side:**
+  - between `±W/2` the template is at formation level;
+  - beyond `W/2`, if the ground at the formation edge is at or above formation level, the side is in cut:
+    the template rises at `1 / cut_slope`. Otherwise it is in fill, and the template falls at
+    `1 / fill_slope`;
+  - the daylight point is where the side's template meets the ground, found by linear interpolation between
+    samples. A side with none within `max_half_width_m` sets flag 2 and ends there.
+- **Areas:**
+  - integrate `max(0, ground − template)` (cut) and `max(0, template − ground)` (fill) piecewise linearly
+    between samples, from daylight to daylight;
+  - split every interval at a sign change of `ground − template` and at the formation edges, so a planar
+    ground gives the exact area, to 1e-9 relative;
+  - an interval with a NaN end is skipped and sets flag 4.
+- **No ground:** NaN ground at offset 0 sets flag 1. Both areas are then 0, and `ground_h` is NaN.
+- **Volumes:** average end area over consecutive stations that both lack flag 1, never across a flag-1
+  station.
+- **Spans:** maximal runs of consecutive flag-1 stations, as `(first station, last station)`.
 
 ### `alignment.ground_profile`
 
@@ -115,11 +169,12 @@ The request runs off the event loop (ADR 0003), and is `mutates: false`.
   ground height, difference, cut and fill areas, and the source name.
 - **Axes:** vertical exaggeration is selectable (1×, 5×, 10×, default 10×). The axes are labelled in metres
   and km.
-- **Fixture banner:** when the alignment's source is the Kralupy fixture, a subtle note says "Vertical
-  profile is idealised in this dataset". It shows only for alignments whose source metadata marks the
-  profile as idealised. **Never key on a fixture name** (CLAUDE.md: never special-case a fixture). Add a
-  `profile_idealised` flag to the import or alignment metadata, which the user can set; `import.landxml`
-  accepts it, default false.
+- **Idealised-profile note:** a subtle note, "Vertical profile is idealised in this dataset", shows only for
+  alignments whose metadata marks the profile as idealised. **Never key on a fixture name** (CLAUDE.md:
+  never special-case a fixture). Part A adds `profile_idealised: bool = False` to the `import.landxml` and
+  `import.coypu` params. It is stored on
+  `AlignmentEntry` and returned in `AlignmentSummary`. The Kralupy capture scenario sets it in its import
+  call.
 
 ## Invariants
 
@@ -129,15 +184,27 @@ The request runs off the event loop (ADR 0003), and is `mutates: false`.
 
 ## Acceptance criteria
 
-1. **Analytic, synthetic:**
+1. **Analytic, synthetic** (Part A, `test_earthworks.py`):
+   - `test_flat_at_formation_is_zero`;
+   - `test_flat_two_metres_above_is_18_m2_cut`;
+   - `test_flat_two_metres_below_is_18_m2_fill`;
+   - `test_sloping_plane_gives_the_exact_mixed_section`;
+   - `test_end_area_volume_is_exact_for_linear_areas`.
+
+   They check:
    - flat ground at formation level gives zero cut and zero fill;
-   - flat ground 2 m above formation gives the exact trapezoidal cut area, `(W + 2·1.5·2)·2`; 2 m below
-     gives the exact fill area;
+   - flat ground 2 m above formation gives the exact trapezoidal cut area `(W + 1.5·2)·2 = 18 m²` for
+     W = 6 m: the bottom is W wide, the top W + 2·1.5·2. Ground 2 m below gives the same fill area, 18 m²;
    - a sloping ground plane gives the exact mixed cut and fill;
    - volumes by average end area are exact for linear area change.
-2. **No ground:** a synthetic gap gives NaN ground, flag 1, zero area, and a span in `no_ground_spans`.
-   Volumes do not bridge it.
-3. **Sources and partial data:** `source` matches the stack; a section with ground on only one side is
+2. **No ground** (`test_gap_gives_nan_flag_1_and_a_span_and_volumes_do_not_bridge_it`): a synthetic gap
+   gives NaN ground, flag 1, zero area, and a span in `no_ground_spans`. Volumes do not bridge it.
+3. **Sources and partial data:**
+   - `test_source_matches_the_stack`;
+   - `test_one_sided_ground_sets_flag_4`;
+   - `test_ground_profile_over_the_wire`, for the method, the off-loop rule and `profile_idealised`.
+
+   They check: `source` matches the stack; a section with ground on only one side is
    flagged 4 and its area is computed only where ground exists.
 4. **Live (Kralupy with the 15 DMR 5G sheets via `${COYPU_DATA}` or the provider; Verification only):**
    - report the profile from 12.7 to 17.5 km at 10 m;

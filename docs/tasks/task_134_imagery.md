@@ -341,6 +341,8 @@ Each criterion names the test that must prove it in `backend/tests/test_imagery.
   - **Failure:** a fetch that still fails after its retries leaves those pixels not valid, so relief shows
     through, and adds a warning. It is never an error.
   - **Size:** a single tile body is capped at 2 MB; a larger `Content-Length` or body is refused.
+- **Provider attributes:** both providers carry `title`, `description`, `licence`, `attribution` and
+  `notices`, as the terrain providers do. T-136's `import.formats` lists them.
 
 ### Acceptance criteria (Part B)
 
