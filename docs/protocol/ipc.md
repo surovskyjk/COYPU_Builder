@@ -211,6 +211,8 @@ Import a .coypu archive: its embedded LandXML alignment(s), every kinematics run
 | `runs` | `tuple[RunSummary, ...]` | required |
 | `trainsets` | `tuple[TrainsetSummary, ...]` | required |
 | `stops` | `tuple[StopDTO, ...]` | required |
+| `format_version` | `int` | required |
+| `line` | `CoypuLineDTO | None` | required |
 | `warnings` | `tuple[str, ...]` | `()` |
 
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_EMPTY`, `E_CRS_REQUIRED`, `E_BUSY`

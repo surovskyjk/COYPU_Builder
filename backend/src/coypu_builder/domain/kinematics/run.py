@@ -8,7 +8,7 @@ a time jump at (almost) constant station, never as a change of sign or a gap in 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 
 import numpy as np
@@ -37,6 +37,8 @@ class Stop:
     station_m: float
     dwell_s: float = 30.0
     name: str = ""
+    stop_id: str = ""
+    patterns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -93,7 +95,7 @@ def _match_names(stops: tuple[Stop, ...], reference: tuple[Stop, ...]) -> tuple[
         deltas = np.abs(ref_station - stop.station_m)
         j = int(np.argmin(deltas))
         name = reference[j].name if deltas[j] <= STOP_NAME_MATCH_TOLERANCE_M else stop.name
-        matched.append(Stop(stop.station_m, stop.dwell_s, name))
+        matched.append(replace(stop, name=name))
     return tuple(matched)
 
 

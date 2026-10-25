@@ -44,7 +44,7 @@ from coypu_builder.domain.terrain_surface import (
     surface_for_source,
 )
 from coypu_builder.io.catalogue.vehicles import Catalogue, load_catalogue, resolve
-from coypu_builder.io.coypu.archive import CoypuProject, read_coypu
+from coypu_builder.io.coypu.archive import CoypuLine, CoypuProject, read_coypu
 from coypu_builder.io.coypu.kinematics_csv import read_kinematics_csv, read_stops_csv
 from coypu_builder.io.coypu.vehicles import dynamics_from_coypu, merge_dynamics
 from coypu_builder.io.gis.envelope import (
@@ -93,6 +93,7 @@ from coypu_builder.protocol.messages import (
     CarSpecDTO,
     CatalogueVehiclesResult,
     CorridorClipDTO,
+    CoypuLineDTO,
     ErrorCode,
     FileOriginDTO,
     ImportCoypuParams,
@@ -320,15 +321,30 @@ def _import_alignments(
 
 
 def _stop_dto(stop: Stop) -> StopDTO:
-    return StopDTO(station_m=stop.station_m, dwell_s=stop.dwell_s, name=stop.name)
+    return StopDTO(
+        station_m=stop.station_m,
+        dwell_s=stop.dwell_s,
+        name=stop.name,
+        stop_id=stop.stop_id,
+        patterns=stop.patterns,
+    )
 
 
-def _stops_from_coypu(raw_stops: list[Any]) -> tuple[Stop, ...]:
-    """`CoypuProject.stops` is the archive's already-decoded `[station_km, dwell_s, name]` rows -- there is
-    no `io/` converter for this shape yet (only for the standalone stops CSV), so it is done here; see the
-    T-114 closing report."""
+def _line_dto(line: CoypuLine) -> CoypuLineDTO | None:
+    if not (line.number or line.name or line.category):
+        return None
+    return CoypuLineDTO(number=line.number, name=line.name, category=line.category)
+
+
+def _stops_from_coypu(coypu_project: CoypuProject) -> tuple[Stop, ...]:
+    """The archive's stops: every stop record of a format 2 archive with its pattern membership, otherwise
+    the legacy `[station_km, dwell_s, name]` rows of `trainStops`. The legacy rows are already decoded and
+    there is no `io/` converter for that shape (only for the standalone stops CSV), so it is done here; see
+    the T-114 closing report."""
+    if coypu_project.stop_records:
+        return coypu_project.record_stops()
     stops = []
-    for row in raw_stops:
+    for row in coypu_project.stops:
         station_km, dwell_s = float(row[0]), float(row[1])
         name = str(row[2]) if len(row) > 2 else ""
         stops.append(Stop(station_m=station_km * 1000.0, dwell_s=dwell_s, name=name))
@@ -464,20 +480,30 @@ async def handle_import_landxml(session: Session, params: dict[str, Any] | None)
 
 def _read_coypu_bundle(path: Path):
     """Blocking: everything `import.coypu` reads from the archive, with no project state touched. Returns the
-    LandXML alignments, the stops, and per kinematics run its run, trainset and catalogue warning."""
-    coypu_project = read_coypu(path)
+    LandXML alignments, the stops, per kinematics run its run, trainset and catalogue warning, and the
+    archive's format version, line and warnings only: the archive's raw assets and karto entry are released
+    on return. An archive that is not a COYPU project is a bad parameter."""
+    try:
+        coypu_project = read_coypu(path)
+    except ValueError as exc:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
     xml_texts = [text for name, text in coypu_project.raw_assets.items() if name.endswith(".xml")]
     if not xml_texts:
         raise ProtocolError(ErrorCode.EMPTY, "archive carries no embedded assets/*.xml LandXML")
     raws = [raw for text in xml_texts for raw in read_landxml(text.encode("utf-8"))]
     if not raws:
         raise ProtocolError(ErrorCode.EMPTY, "embedded LandXML carries no <Alignment> elements")
-    stops = _stops_from_coypu(coypu_project.stops)
+    stops = _stops_from_coypu(coypu_project)
     runs = []
     for index, run in enumerate(coypu_project.kinematics_runs(stops=stops)):
         trainset, warning = _trainset_for_vehicle(coypu_project, index)
         runs.append((run, trainset, warning))
-    return raws, stops, runs
+    return (
+        raws,
+        stops,
+        runs,
+        (coypu_project.format_version, _line_dto(coypu_project.line), coypu_project.warnings),
+    )
 
 
 async def handle_import_coypu(session: Session, params: dict[str, Any] | None) -> HandlerResult:
@@ -486,13 +512,15 @@ async def handle_import_coypu(session: Session, params: dict[str, Any] | None) -
     path = Path(req.path)
     if not path.is_file():
         raise ProtocolError(ErrorCode.NOT_FOUND, f"no such file: {path}")
-    raws, stops, bundle = await _offload(session, _read_coypu_bundle, path)
+    raws, stops, bundle, (format_version, line, archive_warnings) = await _offload(
+        session, _read_coypu_bundle, path
+    )
     alignment_summaries, alignment_ids = _import_alignments(project, raws, req.crs)
     sole_alignment_id = alignment_ids[0] if len(alignment_ids) == 1 else None
 
     project.stops = stops
 
-    warnings: list[str] = []
+    warnings: list[str] = list(archive_warnings)
     for summary in alignment_summaries:
         warnings.extend(summary.warnings)
 
@@ -517,6 +545,8 @@ async def handle_import_coypu(session: Session, params: dict[str, Any] | None) -
         runs=tuple(run_summaries),
         trainsets=tuple(trainset_summaries),
         stops=tuple(_stop_dto(s) for s in stops),
+        format_version=format_version,
+        line=line,
         warnings=tuple(warnings),
     )
     return msgspec.to_builtins(result), {}

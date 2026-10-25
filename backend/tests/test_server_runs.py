@@ -108,7 +108,7 @@ async def test_import_coypu_missing_file_returns_not_found(server_url):
 async def test_import_coypu_without_embedded_landxml_is_empty_not_a_fallback(server_url, tmp_path):
     path = tmp_path / "no_assets.coypu"
     with zipfile.ZipFile(path, "w") as zf:
-        zf.writestr("project.json", "{}")
+        zf.writestr("project.json", '{"formatVersion": 1}')
 
     async with connect(server_url) as ws:
         await _hello_and_project(ws)

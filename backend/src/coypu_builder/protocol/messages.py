@@ -479,6 +479,8 @@ class StopDTO(msgspec.Struct, frozen=True):
     station_m: float
     dwell_s: float
     name: str = ""
+    stop_id: str = ""
+    patterns: tuple[str, ...] = ()
 
 
 class RunSummary(msgspec.Struct, frozen=True):
@@ -521,11 +523,19 @@ class ImportCoypuParams(msgspec.Struct, frozen=True):
     crs: str | None = None
 
 
+class CoypuLineDTO(msgspec.Struct, frozen=True):
+    number: str
+    name: str
+    category: str
+
+
 class ImportCoypuResult(msgspec.Struct, frozen=True):
     alignments: tuple[AlignmentSummary, ...]
     runs: tuple[RunSummary, ...]
     trainsets: tuple[TrainsetSummary, ...]
     stops: tuple[StopDTO, ...]
+    format_version: int
+    line: CoypuLineDTO | None
     warnings: tuple[str, ...] = ()
 
 
