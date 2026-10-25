@@ -44,7 +44,13 @@ from coypu_builder.domain.terrain_surface import (
     surface_for_source,
 )
 from coypu_builder.io.catalogue.vehicles import Catalogue, load_catalogue, resolve
-from coypu_builder.io.coypu.archive import CoypuLine, CoypuProject, read_coypu
+from coypu_builder.io.coypu.archive import MAP_BACK_WARNING_PREFIX, CoypuLine, CoypuProject, read_coypu
+from coypu_builder.io.coypu.geometry import (
+    FALLBACK_WARNING,
+    GATE_SEVERAL_ALIGNMENTS,
+    optimised_alignment,
+    simulated_stops_warning,
+)
 from coypu_builder.io.coypu.kinematics_csv import read_kinematics_csv, read_stops_csv
 from coypu_builder.io.coypu.vehicles import dynamics_from_coypu, merge_dynamics
 from coypu_builder.io.gis.envelope import (
@@ -482,7 +488,11 @@ def _read_coypu_bundle(path: Path):
     """Blocking: everything `import.coypu` reads from the archive, with no project state touched. Returns the
     LandXML alignments, the stops, per kinematics run its run, trainset and catalogue warning, and the
     archive's format version, line and warnings only: the archive's raw assets and karto entry are released
-    on return. An archive that is not a COYPU project is a bad parameter."""
+    on return. An archive that is not a COYPU project is a bad parameter.
+
+    An optimised archive whose geometry passes the gates (T-129) imports COYPU's optimised alignment; its runs
+    stay on the active chainage and its stops are mapped onto it. Otherwise the original geometry is imported
+    and the runs are mapped back to it (T-128)."""
     try:
         coypu_project = read_coypu(path)
     except ValueError as exc:
@@ -493,16 +503,34 @@ def _read_coypu_bundle(path: Path):
     raws = [raw for text in xml_texts for raw in read_landxml(text.encode("utf-8"))]
     if not raws:
         raise ProtocolError(ErrorCode.EMPTY, "embedded LandXML carries no <Alignment> elements")
+
+    warnings = list(coypu_project.warnings)
+    optimised = None
+    geometry_warnings: list[str] = []
+    if coypu_project.chainage_map is not None:
+        if len(raws) > 1:
+            geometry_warnings = [FALLBACK_WARNING.format(gate=GATE_SEVERAL_ALIGNMENTS)]
+        else:
+            optimised, geometry_warnings = optimised_alignment(coypu_project, raws[0])
+    on_active = optimised is not None
+    if on_active:
+        raws = [optimised, *raws[1:]]
+        warnings = [warning for warning in warnings if not warning.startswith(MAP_BACK_WARNING_PREFIX)]
+        stop_warning = simulated_stops_warning(coypu_project)
+        geometry_warnings = [*geometry_warnings, *([stop_warning] if stop_warning else [])]
+    warnings.extend(geometry_warnings)
+
     stops = _stops_from_coypu(coypu_project)
     runs = []
-    for index, run in enumerate(coypu_project.kinematics_runs(stops=stops)):
+    for index, run in enumerate(coypu_project.kinematics_runs(stops=stops, on_active_chainage=on_active)):
         trainset, warning = _trainset_for_vehicle(coypu_project, index)
         runs.append((run, trainset, warning))
+    shown_stops = coypu_project.map_stops_to_active(stops) if on_active else stops
     return (
         raws,
-        stops,
+        shown_stops,
         runs,
-        (coypu_project.format_version, _line_dto(coypu_project.line), coypu_project.warnings),
+        (coypu_project.format_version, _line_dto(coypu_project.line), tuple(warnings)),
     )
 
 

@@ -50,8 +50,9 @@ NON_MONOTONIC_CHAINAGE_WARNING = "chainage map is not monotonic; the run is left
 MISMATCHED_CHAINAGE_WARNING = (
     "chainage map arrays differ in length; the run is left on COYPU's active chainage"
 )
+MAP_BACK_WARNING_PREFIX = "COYPU optimised this alignment after import"
 OPTIMISED_CHAINAGE_WARNING = (
-    "COYPU optimised this alignment after import: the embedded LandXML is the original geometry, so the "
+    f"{MAP_BACK_WARNING_PREFIX}: the embedded LandXML is the original geometry, so the "
     "run's stations were mapped from the optimised chainage back to it (largest shift {d:.2f} m). "
     "Positions follow the original track."
 )
@@ -152,7 +153,27 @@ class CoypuProject:
             name: np.asarray(self.data_storage[key]) for name, key in keys.items() if key in self.data_storage
         }
 
-    def kinematics_run(self, index: int, *, stops: Sequence[Stop] = ()) -> KinematicsRun:
+    def map_stops_to_active(self, stops: Sequence[Stop]) -> tuple[Stop, ...]:
+        """Stops entered on the baseline chainage, moved onto COYPU's active chainage; unchanged when the
+        archive has no applicable chainage map."""
+        chainage = self.chainage_map
+        if chainage is None:
+            return tuple(stops)
+        baseline_km, active_km = chainage
+        mapped = baseline_to_active_m(
+            np.array([stop.station_m for stop in stops], dtype=float), baseline_km, active_km
+        )
+        return tuple(
+            dataclasses.replace(stop, station_m=float(station_m))
+            for stop, station_m in zip(stops, mapped, strict=True)
+        )
+
+    def kinematics_run(
+        self, index: int, *, stops: Sequence[Stop] = (), on_active_chainage: bool = False
+    ) -> KinematicsRun:
+        """One vehicle's stored run. By default its stations are mapped back onto the baseline chainage of the
+        embedded LandXML. With `on_active_chainage` the stations are kept as stored and the stops are mapped
+        baseline to active, for an archive whose optimised geometry Builder uses (T-129)."""
         raw = self.kinematics(index)
         required = ("station_m", "time_s", "speed_ms", "accel_ms2")
         missing = [key for key in required if key not in raw]
@@ -160,8 +181,10 @@ class CoypuProject:
             raise ValueError(f"vehicle {index}: archive kinematics is missing required arrays: {missing}")
         station_m = raw["station_m"]
         chainage = self.chainage_map
-        if chainage is not None:
+        if chainage is not None and not on_active_chainage:
             station_m = _active_to_baseline_m(np.asarray(station_m, dtype=float), *chainage)
+        if on_active_chainage:
+            stops = self.map_stops_to_active(stops)
         run = normalise_run(
             station_m,
             raw["time_s"],
@@ -175,11 +198,19 @@ class CoypuProject:
             vehicle_index=index,
         )
         if self.stop_records:
-            return dataclasses.replace(run, stops=self.pattern_stops())
+            pattern = self.pattern_stops()
+            if on_active_chainage:
+                pattern = self.map_stops_to_active(pattern)
+            return dataclasses.replace(run, stops=pattern)
         return run
 
-    def kinematics_runs(self, *, stops: Sequence[Stop] = ()) -> tuple[KinematicsRun, ...]:
-        return tuple(self.kinematics_run(i, stops=stops) for i in range(self.vehicle_count))
+    def kinematics_runs(
+        self, *, stops: Sequence[Stop] = (), on_active_chainage: bool = False
+    ) -> tuple[KinematicsRun, ...]:
+        return tuple(
+            self.kinematics_run(i, stops=stops, on_active_chainage=on_active_chainage)
+            for i in range(self.vehicle_count)
+        )
 
 
 def _text(value: Any) -> str:
@@ -349,6 +380,18 @@ def _active_to_baseline_m(
     above = station_km > active_km[-1]
     mapped_km[below] = baseline_km[0] + (station_km[below] - active_km[0])
     mapped_km[above] = baseline_km[-1] + (station_km[above] - active_km[-1])
+    return mapped_km * 1000.0
+
+
+def baseline_to_active_m(station_m: np.ndarray, baseline_km: np.ndarray, active_km: np.ndarray) -> np.ndarray:
+    """Stations on the baseline chainage mapped onto COYPU's active chainage, the mirror of
+    `_active_to_baseline_m`: beyond the map's ends the shift of the nearest end is kept."""
+    station_km = np.asarray(station_m, dtype=float) / 1000.0
+    mapped_km = np.interp(station_km, baseline_km, active_km)
+    below = station_km < baseline_km[0]
+    above = station_km > baseline_km[-1]
+    mapped_km[below] = active_km[0] + (station_km[below] - baseline_km[0])
+    mapped_km[above] = active_km[-1] + (station_km[above] - baseline_km[-1])
     return mapped_km * 1000.0
 
 

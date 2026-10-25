@@ -146,7 +146,9 @@ original geometry, so Builder places every kinematics run on the baseline chaina
   `chainage map is not monotonic; the run is left on COYPU's active chainage`.
 - Two arrays of different lengths are not applied either. The archive gets the warning
   `chainage map arrays differ in length; the run is left on COYPU's active chainage`.
-- Stop records and `trainStops` are not converted. They were entered on the imported chainage already.
+- Stop records and `trainStops` are not converted on this path. They were entered on the imported chainage already.
+  An optimised archive whose geometry passes the gates of "Optimised alignments (T-129)" is imported from its
+  element arrays instead, and then its runs stay on the active chainage and its stops are mapped onto it.
 
 #### Survey of the COYPU source (format 2)
 
@@ -199,3 +201,113 @@ file named before each colon.
    from a run made after the last optimisation and are on the active chainage whenever the map is not the identity.
    Builder applies the map, as the rule under
    "Chainage map of an optimised alignment" says.
+
+#### Optimised alignments (T-129)
+
+COYPU's optimiser re-geometrises the alignment and re-stations it onto the active chainage. The archive keeps the
+optimised element arrays under `alignmentsData.landXml`, so Builder can rebuild the optimised alignment from them.
+It does so only when the chainage map applies (above) and every gate below passes. Otherwise Builder imports the
+embedded original geometry and maps the runs back, as the T-128 rule says. The code is `io/coypu/geometry.py`
+(`optimised_alignment`, `elements_from_arrays`).
+
+**Rebuild.**
+
+- Element `i` has kind `geometryType[2i]` (`Line`, `Spiral` or `Curve`), and takes entry `i` of the arrays of its
+  kind, counted per kind from zero, as COYPU's element table does (`landxml_exporter.py:75-91`).
+- Its points are the raw tokens of the `X` and `Y` arrays, in the order the embedded file writes them (survey 1).
+  Every point therefore goes through the same CRS rule as the embedded file.
+- Its station start is `stationHorizontal[2i] × 1000` m. Its length is a spiral's `spiralLength`. A line and a curve
+  have none, so their length follows from the chord or the swept arc, as in the embedded file and in COYPU's dense
+  sampling. The station span `stationHorizontal[2i+1] − stationHorizontal[2i]` is not used: on the Kralupy fixture
+  it is up to 0.36 mm away from a curve's arc length, which moves the rebuilt positions by that much.
+- Name, EPSG, application and dialect come from the embedded file. The alignment starts at `stationHorizontal[0]`.
+- Attributes are the ones the reader consumes: a spiral's `radiusStart`, `radiusEnd` (written `INF` for infinity),
+  `rot` and `spiType`, and a curve's `radius` and `rot`.
+
+**Gates.** The first gate that fails names the fallback.
+
+1. *One alignment.* The archive embeds exactly one `<Alignment>` (`assets/*.xml` together). COYPU merges several
+   LandXML sources into one parsed geometry, which the archive cannot separate again, so an archive that embeds several
+   alignments never uses the optimised geometry. Failure: "the archive embeds several alignments".
+2. *Arrays.* Each kind's point arrays, `…StationStart`, and its attribute arrays (`spiralLength`, `spiralRadiusStart`,
+   `spiralRadiusEnd`, `spiralRot`, `spiralType`, `curveRadius`, `curveRot`) exist with one entry per element of that
+   kind, and `geometryType` lists each element's kind twice. Failure: "the per-type element arrays are missing or do not
+   match the element count".
+3. *Continuity.* The end point of element `i` lies within 1 mm of the start point of element `i+1`, and the station end
+   of `i` within 1 mm of the station start of `i+1`. Failure: "the elements do not chain end to start within 1 mm".
+4. *Dense axis.* Each point of `denseAlignment` is taken from (station km, latitude, longitude) back to the project
+   CRS, and must lie within 20 mm of the rebuilt axis. The distance is measured to the axis, not to the rebuilt position
+   at the point's own station, because the station column is not reliable for curves (survey 2). The axis is sampled
+   every 0.1 m and the distance is to the segments that touch the nearest samples. Failure: "the rebuilt axis does not
+   match COYPU's dense axis within 20 mm".
+5. *Chainage map.* The baseline stations of the map are strictly increasing. Failure: "the chainage map is not strictly
+   increasing on the baseline".
+6. *Conversion.* An `ArithmeticError`, `IndexError`, `KeyError`, `TypeError` or `ValueError` raised while the elements
+   are built or converted to an axis is a failure, not an exception. Failure: "the optimised elements cannot be
+   converted to an axis". Non-finite stations fail gate 2, and non-finite dense points fail gate 4.
+7. *Coordinate system.* The archive's EPSG code must be known to pyproj. Failure: "the archive names no coordinate
+   system, or one that is not known".
+
+The 20 mm limit is chosen for the round trip through pyproj, which alone gives 1.8 mm on the Kralupy fixture, and a
+wrongly built element is metres off. The largest deviation on the Kralupy fixture is 1.84 mm; the rebuilt positions
+themselves match the embedded file to 1e-9 m at 1 m sampling.
+
+A failing gate gives `optimised geometry not used: <gate>; the run was mapped back to the original geometry`, and the
+T-128 map-back warning follows it. The one-alignment gate uses the same format.
+
+**When the optimised geometry is used.**
+
+- The profile is the original file's. Each PVI station is mapped baseline to active with `np.interp`, and beyond the
+  map's ends the nearest end's shift is kept. Elevations, curve lengths and radii are unchanged.
+- The cant is COYPU's calculation on the optimised geometry: `calculationCache.landXmlDerived.stationCantPossible`
+  and `cantPossible` (survey 3). They are already on the active chainage, so they are not mapped. The gauge and the
+  rotation point come from the embedded file. If the archive holds no calculation, the original cant is mapped instead.
+- Each run keeps its stored stations (no mapping back).
+- The stops are the stop records of the active pattern, or the legacy `trainStops`, mapped baseline to active with the
+  same `np.interp`. `calculationCache.dataStorage.simulatedTrainStops`, when present, must match the mapped scheduled
+  stops within 1 mm. Otherwise the warning is `the stops Builder maps onto the optimised chainage differ from the stops
+  COYPU simulated by up to {d} mm`, or, when the counts differ, a count warning.
+- The archive gets the notice
+  `COYPU optimised this alignment: Builder uses the optimised geometry from the archive ({n} elements; largest deviation
+  from COYPU's dense axis {d:.1f} mm), with the original file's profile re-stationed onto it and {cant}`, where `{cant}`
+  is `COYPU's calculated cant` when the archive stores `stationCantPossible` and `cantPossible`, and
+  `the original cant re-stationed onto it` when it stores none.
+- The map-back warning of T-128 is not written.
+
+**Archives that are not optimised** (no applicable map, or the identity) are read exactly as T-128 reads them.
+
+**Survey of the COYPU source (T-129).** Read-only; line numbers are in the file named before each colon.
+
+1. **Token order.** The arrays hold the raw tokens, with no swap and no sign. `readfile.py:176` (Line), `:197`
+   (Spiral) and `:224` (Curve) store the first token of each `Start`, `End`, `PI` and `Center` text as X, the second
+   as Y. `landxml_exporter.py:264-268` writes X then Y. The Křovák sign is applied later: `readfile.py:30-31` takes
+   E = −Y and N = −X, so the first token is the northing value, as the LandXML native order says. The fixture confirms
+   it: for all 65 elements every X entry equals the first token of the embedded text, and every Y entry the second,
+   with a difference of 0.0 (the swapped pairing differs by about 292 km).
+2. **`denseAlignment`.** Each entry is `(station km, latitude, longitude)` in WGS 84 degrees. `readfile.py:687-727`
+   builds it (`dense_points.append` at `:708`, sorted by station at `:726`) with the transform of `readfile.py:26-31`.
+   The fixture's first entry `(0.0, 50.26208, 14.52270)` is the transform of its first key point. The station column is
+   not reliable for curves: all samples of each of the 16 curves carry the curve's start station (784 of the 2434
+   points). Cause: COYPU builds before 2026-09-25 set a curve's end station by searching `stationHorizontal` for the
+   curve's start station and taking the next entry (`readfile.py` at commit `9ba224d`, 2026-05-27, the curve
+   sampling). That start station also appears as the previous element's end, so the end station equals the start
+   station and all samples share one station (16 of 16 curves on the fixture, which was saved on 2026-08-23). Commit
+   `7019d7f` (2026-09-25, on COYPU's `main`) fixed it with `curveEndStation`, which addresses the element stream, and
+   the current source samples each element over its own length. Archives saved by older builds still carry the defect.
+   The sample positions lie on the axis, which is why the gate measures the distance to it.
+3. **Cant.** The simulation of an optimised alignment used the calculated `cantPossible`. The design calculation
+   computes `cantPossible` on the new geometry (`geometry_engine.py:81`, `:196`, and `runCalculationLoop` at `:30-40`),
+   and the speeds the simulation reads come from it (`vehicle_engine.py:34`, `:58`, default `stationSpeed150` and
+   `speedLimits150`). The imported cant is read only by the as-built branch (`geometry_engine.py:617-619`), which
+   `optimization_runner.py:181-184` and `gui.py:4691-4698` select, and which `gui.py:5171-5186` disables on an optimised
+   alignment. The export agrees: `landxml_exporter.py:389-398` writes the calculated cant when it exists. The fixture
+   shows the difference: its imported cant is zero everywhere, while `cantPossible` is non-zero at 64 of 130 stations
+   and reaches ±100 mm. Builder therefore shows the calculated cant, the Contract's alternative. `cantPossible` is the
+   cant the speeds were computed from in both modes: in as-built mode it holds the interpolated imported cant
+   (`geometry_engine.py:619`).
+4. **Spiral and curve parameters.** The optimiser does not change `spiralRot` or `curveRot`: the returned element dict
+   carries each element's `rot` unchanged (`geometry_engine.py:2661`, `:2675`), and it returns no `spiralType`,
+   `spiralConst` or `curveType` (`geometry_engine.py:2628-2695`). `promoteOptimizedElements` (`geometry_engine.py:1050-1056`)
+   copies only the keys the optimiser returns, so the imported `spiralType` stays. `spiralConst` is read from the
+   attribute name `consant` (`readfile.py:412`), which the file does not use, so the array is NaN in the fixture, and
+   `curveType` (`readfile.py:427`) is not used by the reader. Neither is needed to rebuild an element.

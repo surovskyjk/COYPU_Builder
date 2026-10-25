@@ -362,7 +362,7 @@ def main() -> None:
         ("trainset_chain.json", trainset_chain()),
     )
     for name, payload in payloads:
-        (GOLDEN / name).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        (GOLDEN / name).write_text(json.dumps(payload, indent=2), encoding="utf-8", newline="\n")
         print(f"wrote {GOLDEN / name}")
 
 
