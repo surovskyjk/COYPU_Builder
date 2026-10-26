@@ -1,7 +1,7 @@
 class_name LayerState
 extends RefCounted
 ## Pure visibility/opacity state for the layers panel (T-142) and whatever renderers subscribe to it
-## (T-121 track, T-132 vehicles, …): no scene tree, no rendering, just a small map plus a change signal.
+## (T-121 track, T-135 terrain, …): no scene tree, no rendering, just a small map plus a change signal.
 ## An undefined layer reads back as visible and fully opaque, so a subscriber can query a layer id before
 ## anyone has called [method define] without special-casing "unknown".
 

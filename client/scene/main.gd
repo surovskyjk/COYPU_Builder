@@ -26,6 +26,9 @@ extends Node
 ## T-140: [method status_overlay] now returns the shell's status bar (the overlay's content moved there), and
 ## [method shell] gives the capture driver the style and chrome switches. A capture run uses memory-only
 ## [UserSettings], so it neither reads nor changes the user's preferences.
+##
+## T-135 adds [TerrainField] under the world root, on the "terrain" layer, fed the active camera (it follows the
+## camera mode switch). Nothing else changes here.
 
 ## Emitted once, when the corridor is built and -- if the project has a run -- playback is wired.
 signal scene_ready()
@@ -39,6 +42,7 @@ var _corridor: TrackCorridor
 var _corridor_alignment_id := ""
 
 var _camera_manager: CameraManager
+var _terrain: TerrainField
 
 var _timeline: TimelineState
 var _playback: PlaybackController
@@ -69,6 +73,12 @@ func _ready() -> void:
 	_camera_manager = CameraManager.new()
 	_world.add_child(_camera_manager)
 	_shell.bind_camera_manager(_camera_manager)
+
+	_terrain = TerrainField.new()
+	_world.add_child(_terrain)
+	Session.layers().define(TerrainField.LAYER_ID, "Terrain")
+	_terrain.set_camera(_camera_manager.active_camera())
+	_camera_manager.mode_changed.connect(_on_camera_mode_changed)
 
 	Backend.start()
 
@@ -110,6 +120,10 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		Backend.shutdown()
 		get_tree().quit()
+
+
+func _on_camera_mode_changed(_mode: CameraManager.Mode) -> void:
+	_terrain.set_camera(_camera_manager.active_camera())
 
 
 func _on_backend_state_changed(state: Backend.State) -> void:

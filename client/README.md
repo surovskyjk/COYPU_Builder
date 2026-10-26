@@ -77,8 +77,8 @@ nothing else in the client computes an alignment, evaluates a clothoid or recomp
 - **`EntityRegistry`** (`entity_registry.gd`) — a flat `entity_id -> (kind, data)` store for whatever the
   backend attaches to the scene (trainsets, stops, gizmos, …); pure bookkeeping, no scene nodes.
 - **`LayerState`** (`layer_state.gd`) — visibility/opacity per layer id plus a `layer_changed` signal; pure
-  state with no rendering of its own. T-142 builds the layers panel on top of it; T-121/T-132 subscribe to
-  apply visibility to track/vehicle rendering.
+  state with no rendering of its own. T-142 builds the layers panel on top of it; T-121 (track) and T-135
+  (terrain) subscribe to apply visibility to their rendering.
 
 Positions and rotations on the wire are already base-point-relative and in Godot axes (ADR 0004) — none of
 the above ever routes them through `Origin`, which would double-apply the mapping.
@@ -116,6 +116,36 @@ since per-instance placement is evaluation (ADR 0007).
   `tile_origin` subtracted before `set_instance_transform`, never left in.
 - **`TrackMaterials`** (`track_materials.gd`) — three cached placeholder `StandardMaterial3D`s (rail,
   sleeper, ballast), distinguishable by albedo/roughness only. T-144's view modes replace these.
+
+## Terrain scene (`scene/terrain/`)
+
+T-135 Part A: the terrain the backend serves as 129 x 129 heightfield display tiles (T-132) at five levels of
+detail, streamed around the active camera. ADR 0007's addendum makes the client responsible for connecting
+those heights into triangles; every ground *query* still goes to the backend's analysis surface.
+
+- **`TerrainLod`** (`terrain_lod.gd`) — pure static `select_tiles(camera, lists)`: a quadtree from every
+  level-4 tile down to level 0. A tile is replaced by its children while the camera is closer than
+  `1.5 × edge_m` to its x-z bounding box (`split_factor` 1.5). Only listed children are kept, a parent with no
+  listed child stays, and holes are never filled. The result is nearest first, ties by `(level, ix, iy)`.
+- **`HeightfieldMesh`** (`heightfield_mesh.gd`) — pure static `build(heights, edge_m, skirt_m)` returning the
+  `vertices`/`normals`/`uvs`/`indices` arrays. Vertex `(r, c)` is at `x = c·edge/128`, `z = −r·edge/128`,
+  `y = heights[r·129 + c]`; quads with a NaN corner are omitted; normals come from central differences; UVs put
+  the north-west corner at v = 0; each edge has a skirt `max(0.5, edge/64)` m deep so cracks between levels
+  never show sky. Triangles are clockwise seen from above, which is Godot's front face. It runs on a worker thread.
+- **`TerrainTile`** (`terrain_tile.gd`) — one tile node, placed at its `tile_origin` (ADR 0004, never folded
+  into the vertices) with one `MeshInstance3D`. The `ArrayMesh` is made on the main thread; the material is one
+  shared neutral grey-green `StandardMaterial3D` until T-135 Part B adds imagery.
+- **`TerrainField`** (`terrain_field.gd`) — the scene. `_process` selects tiles, queues the missing ones and
+  attaches at most 2 finished tiles per frame; it never sends a request. One paging coroutine lists the five
+  levels (4 down to 0) and fetches the queue one `terrain.tile` at a time, nearest first. Builds run in
+  `WorkerThreadPool` tasks (arrays only, never the scene tree). `E_BUSY` backs off 0.1 s, doubling to 2 s.
+  `E_NOT_FOUND` re-lists, and the old tiles stay on screen until their replacements are attached. An LRU
+  keeps 256 built tiles. A cached tile is shown only while it is selected, or while the selected tiles over its
+  area are not all attached yet, so a coarse tile never covers finer ones that are already shown. An empty listing
+  frees every tile. The `"terrain"` layer (`Session.layers()`, "Terrain") hides the whole field.
+  Call `relist()` after a terrain import (T-136).
+- **`Session.fetch_terrain_tiles(level)` / `fetch_terrain_tile(level, ix, iy, revision)`** — return the
+  `IpcEnvelope` as the backend answered it, with no cache; `E_BUSY` and `E_NOT_FOUND` are the caller's to handle.
 
 ## Vehicle scene (`scene/vehicles/`)
 

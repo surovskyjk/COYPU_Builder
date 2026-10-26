@@ -2,7 +2,9 @@ extends Node
 ## Autoload `Session`: the client's read-only mirror of backend document state (ADR 0007 — the client
 ## interpolates baked tables and computes no geometry of its own). T-103 populates project identity and
 ## alignment summaries from `project.get`/`project.new`/`import.landxml`; T-115 adds the alignment/run
-## table caches, the vehicle catalogue, the entity registry and layer state; T-121 adds the
+## table caches, the vehicle catalogue, the entity registry and layer state; T-135 adds the terrain tile
+## calls [TerrainField] pages through (no cache: the revision moves when the sources change, so the field
+## owns what it has built); T-121 adds the
 ## `alignment.track_mesh` page cache [TrackCorridor] pages through; T-122 adds the trainset cache
 ## [TrainsetNode] builds from.
 ##
@@ -31,6 +33,11 @@ var _track_mesh_chunk_lists: Dictionary = {}
 
 ## trainset_id -> TrainsetDTO dictionary, as decoded from `trainset.create`/`trainset.get`.
 var _trainsets: Dictionary = {}
+
+## Test seam (T-135): `(method: String, params: Dictionary) -> IpcEnvelope or null`. When valid, it is asked
+## first for every terrain request; a returned envelope is used instead of the backend, and `null` lets the
+## request go to the backend. Nothing in the application sets it.
+var _terrain_request_override := Callable()
 
 var _entities := EntityRegistry.new()
 var _layers := LayerState.new()
@@ -211,6 +218,51 @@ func fetch_track_mesh_chunks(
 		"chunk_length_m": chunk_length_m, "spacing_m": spacing_m, "chunks": chunks
 	}
 	return chunks
+
+
+## Test seam (T-135): see [member _terrain_request_override]. An invalid Callable restores the backend.
+func set_terrain_request_override(override: Callable) -> void:
+	_terrain_request_override = override
+
+
+## Coroutine. `terrain.tiles` for one level (0 to 4): the `IpcEnvelope` as the backend answered it, so the
+## caller can read `result` (`revision`, `tiles`, `source_ids`) on `res` and the code on `err`. `E_BUSY` and
+## `E_NOT_FOUND` are the caller's to handle (back off, re-list), and `E_NO_PROJECT` and `E_NO_SESSION` are the
+## expected state before a project opens (`project_changed` re-lists); none of the four is reported as a backend
+## error. Any other failure emits [signal EventBus.backend_error]. Always resolves.
+func fetch_terrain_tiles(level: int) -> IpcEnvelope:
+	var envelope := await _terrain_request("terrain.tiles", {"level": level})
+	_report_terrain_failure(envelope)
+	return envelope
+
+
+## Coroutine. `terrain.tile` for one listed tile of `revision`: the `IpcEnvelope` as the backend answered it.
+## On `res`, `result` holds `tile_origin`, `edge_m`, `valid_fraction` and `source_ids`, and `blobs` holds
+## `heights` (`PackedFloat32Array`, 129 x 129, row-major) and `source_index` (`PackedByteArray`). A stale
+## revision or an unlisted tile is `E_NOT_FOUND`, which the caller answers by listing again. Error reporting
+## is as for [method fetch_terrain_tiles].
+func fetch_terrain_tile(level: int, ix: int, iy: int, revision: int) -> IpcEnvelope:
+	var params := {"level": level, "ix": ix, "iy": iy, "revision": revision}
+	var envelope := await _terrain_request("terrain.tile", params)
+	_report_terrain_failure(envelope)
+	return envelope
+
+
+func _terrain_request(method: String, params: Dictionary) -> IpcEnvelope:
+	if _terrain_request_override.is_valid():
+		var replaced: Variant = _terrain_request_override.call(method, params)
+		if replaced is IpcEnvelope:
+			return replaced
+	return await Backend.request(method, params)
+
+
+func _report_terrain_failure(envelope: IpcEnvelope) -> void:
+	if envelope.type == "res":
+		return
+	var code := String(envelope.error.get("code", "E_INTERNAL"))
+	if code == "E_BUSY" or code == "E_NOT_FOUND" or code == "E_NO_PROJECT" or code == "E_NO_SESSION":
+		return
+	EventBus.backend_error.emit(code, envelope.error.get("message", ""))
 
 
 ## Coroutine. Replaces [method vehicle_catalogue] from `catalogue.vehicles`. Leaves the previous
