@@ -130,6 +130,8 @@ Read before starting:
 | `client/ui/dialogs/import_dialog.gd` | new — `class_name ImportDialog`, the five-step dialog |
 | `client/ui/top_bar/ribbon.gd` | Import group: "Import terrain or imagery…" |
 | `client/ui/shell/ui_shell.gd` | open and own the dialog, like the export dialog |
+| `client/core/event_bus.gd` | new signal `sources_changed(kind: String)` |
+| `client/scene/terrain/terrain_field.gd` | connect `sources_changed` to `relist()` |
 | `client/tests/unit/test_crs_picker.gd`, `test_import_dialog.gd` | new — fake requester |
 | `client/README.md` | document the dialog |
 
@@ -193,7 +195,11 @@ Read before starting:
    - the added / changed / unchanged / removed counts;
    - the effective CRS and the transformation, with its accuracy in metres;
    - the warnings, the licence and the attribution;
-   - *Close*. The terrain scene picks the new source up by revision (T-135).
+   - *Close*.
+
+   After a successful `import.run` the dialog emits `EventBus.sources_changed(kind)`. T-135 Part A left this
+   signal out, because `event_bus.gd` was not in its Deliverables. `TerrainField` connects it to its
+   `relist()`, so the new source appears at once and not only at the next `E_NOT_FOUND`.
 
 **Rules:**
 - Settings the user changed are sent exactly as entered. The dialog never rewrites a CRS the user chose.
@@ -216,7 +222,9 @@ Read before starting:
 - `test_busy_retries_with_backoff`;
 - `test_crs_required_returns_to_settings_and_focuses_the_crs_field`;
 - `test_file_filters_come_from_import_formats`;
-- `test_escape_closes_and_enter_presses_the_primary_button`.
+- `test_escape_closes_and_enter_presses_the_primary_button`;
+- `test_a_successful_import_emits_sources_changed`, plus, in `test_terrain_field.gd`,
+  `test_sources_changed_relists`.
 
 No regressions: both suites are green, with executed = declared test counts.
 

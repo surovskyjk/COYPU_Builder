@@ -117,8 +117,14 @@ Read before starting:
 - **Skirts:** each tile edge gets a strip hanging `skirt_m` straight down from its edge vertices, so cracks
   between neighbouring levels never show sky. Only edge vertices that are not NaN get a skirt.
   `TerrainTile` passes `skirt_m = max(0.5, edge_m / 64)`.
-- **Winding:** counter-clockwise seen from above (+y), so Godot's default back-face culling keeps the top
-  side.
+- **Winding:** **clockwise** seen from above (+y). That is Godot's front face, so the default back-face
+  culling keeps the top side. Skirts are clockwise seen from outside the tile. Test it with Godot's own
+  convention: `Plane(a, b, c).normal` points to the front of a clockwise triangle. This line said
+  "counter-clockwise" until 2026-10-26 (F44): the review showed on the GPU that the terrain was culled from
+  above.
+- **Visibility:** a tile the selection no longer wants is hidden as soon as every selected tile covering its
+  area is attached. Until then it stays visible, so refining or coarsening never leaves a hole. An empty
+  listing frees every tile.
 
 **Paging and budget** (`TerrainField`):
 - **Listing:** on start, and whenever the project's terrain may have changed (`EventBus` source import, or
@@ -180,6 +186,9 @@ Read before starting:
 | `client/ui/shell/ui_shell.gd` | attribution label on the right of the status bar, and the Data sources popover |
 | `client/tests/unit/test_terrain_material.gd` | new |
 | `client/tests/integration/test_terrain_field.gd` | imagery cases |
+| `client/tools/capture/scenario.gd`, `capture_driver.gd` | the `imports` key (moved here from Part C, so every later review sees terrain on the GPU) |
+| `client/tests/fixtures/terrain/synthetic_tin.xml` | new — a small synthetic LandXML TIN (a few hundred points, analytic surface, EPSG:5514, under 100 kB), written by a script under `tools/` that is committed with it |
+| `client/tools/capture/scenarios/terrain_synthetic.json` | new — the Kralupy project plus the synthetic TIN and a synthetic image source; shots from above, low oblique, from below (the terrain must be culled) and with the boundary overlay |
 
 ### Contract (Part B)
 
@@ -218,7 +227,12 @@ Read before starting:
    - `test_attribution_lists_exactly_the_sources_in_view`;
    - `test_an_imagery_only_import_does_not_rebuild_meshes`.
 3. **Settings:** `test_source_boundary_toggle_persists`, through `UserSettings`.
-4. **UI:** the reviewer judges a `ui_shell` capture with terrain, imagery and the popover open.
+4. **Capture:** `terrain_synthetic` passes on the GPU.
+   - The shots from above and low oblique show terrain with imagery.
+   - The shot from below shows the terrain culled.
+   - p95 stays under 16.7 ms while tiles stream.
+   - The reviewer judges the shots, and a `ui_shell` capture with the Data sources popover open.
+5. **`imports` key:** `test_imports_must_be_a_list_of_dictionaries`, in `test_capture_scenario.gd`.
 5. **No regressions:** as Part A.
 
 ## Part C — capture
@@ -227,7 +241,7 @@ Read before starting:
 
 | Path | Action |
 |---|---|
-| `client/tools/capture/scenario.gd`, `capture_driver.gd` | the `imports` key; skipping when a variable is unset |
+| `client/tools/capture/scenario.gd`, `capture_driver.gd` | skipping when a variable is unset (the `imports` key itself is Part B's) |
 | `tools/capture.ps1` | expand `${COYPU_DATA}` from the environment; pass the expanded scenario to Godot |
 | `client/tools/capture/scenarios/terrain_kralupy.json` | new |
 | `client/tests/unit/test_capture_scenario.gd` | `imports` validation cases |
@@ -263,7 +277,11 @@ Read before starting:
    - the bridge gap at km 16.7 shows as a hole or water area under the track;
    - the boundary overlay distinguishes DMR 5G from Copernicus;
    - attribution text is present;
-   - in the perf block, p95 stays under 16.7 ms, and no frame exceeds 50 ms while streaming.
+   - in the perf block, p95 stays under 16.7 ms, and no frame after the first 60 exceeds 50 ms while
+     streaming. The T-135 A review measured one 25–90 ms start-up stall in every capture, with or without the
+     terrain field, so it is machine-state noise and not streaming;
+   - a level whose listing is refused with `E_BAD_PARAMS` (more than `MAX_LISTED_TILES`, 5000) is skipped
+     with one status-bar message, and the coarser levels still show.
 3. **No regressions:** as Part A.
 
 ## Invariants

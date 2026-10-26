@@ -17,7 +17,8 @@ session that launched you names the task file, or a section of one, in its promp
    for every acceptance criterion and check that it fails when the behaviour is broken. Edit files with the
    Edit tool. When a script must write or restore a file, write bytes with LF line endings
    (`Path.write_bytes`, or `open(path, "w", newline="\n")`), never `Path.write_text`, which writes CRLF on
-   Windows. Finish with `git diff --stat` and check that no file shows whole-file churn.
+   Windows. Finish with `git diff --stat` and check that no file shows whole-file churn. Never run a bare
+   `uv sync`: it removes the GIS extra. Use `uv sync --extra gis`.
 3. Implement the Deliverables. Run every command in the task's Verification block and read its output.
    Never report a command as passing that you did not run. Compare gdUnit4's executed case count with the
    number of `func test_` declarations in the files it ran, because its runner silently skips the rest of a
