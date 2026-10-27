@@ -159,6 +159,9 @@ class ImportInspectParams(msgspec.Struct, frozen=True):
     paths: tuple[str, ...] | None = None  # absolute; several files of one format are one source
     provider: str | None = None  # an online provider id, e.g. "cuzk-dmr5g"; needs a project with a CRS
     query: dict[str, Any] | None = None  # the provider's request: `clip`, limits (see terrain-providers.md)
+    # "terrain" | "imagery" | ...: with no format_id, only that kind's readers are tried.
+    # Ignored when `provider` is given.
+    kind: str | None = None
 
 
 class ImportInspectResult(msgspec.Struct, frozen=True):
@@ -358,6 +361,53 @@ class TerrainTileResult(msgspec.Struct, frozen=True):
     valid_fraction: float
     revision: int
     source_ids: tuple[str, ...] = ()  # the sources in precedence order for this revision
+
+
+# --- imagery.tiles / imagery.tile ------------------------------------------------------------------------
+# Imagery display tiles (T-134): an orthophoto, or shaded relief where there is none, composed on the terrain
+# tile grid. List a level, then fetch the listed tiles one at a time.
+# See docs/data-contracts/imagery-tiles.md.
+
+
+class ImageryTilesParams(msgspec.Struct, frozen=True):
+    level: int = 0  # 0 to 4, as `terrain.tiles`
+
+
+class ImageryTileInfo(msgspec.Struct, frozen=True):
+    level: int
+    ix: int
+    iy: int
+    edge_m: float
+    source_ids: tuple[str, ...] = ()  # the imagery sources whose bounds meet the tile, in precedence order
+
+
+class ImageryTilesResult(msgspec.Struct, frozen=True):
+    level: int
+    revision: int  # changes when the imagery or the terrain sources change
+    terrain_revision: int  # the terrain revision this imagery was composed against
+    tiles: tuple[ImageryTileInfo, ...]  # the terrain tiles of the level, one entry each
+    attributions: dict[str, str]  # source id -> attribution, for every imagery and terrain source
+    notices: dict[str, tuple[str, ...]]  # source id -> licence notices that must be shown with it
+    warnings: tuple[str, ...] = ()
+
+
+class ImageryTileParams(msgspec.Struct, frozen=True):
+    level: int
+    ix: int
+    iy: int
+    revision: int  # from the `imagery.tiles` that listed this tile
+
+
+class ImageryTileResult(msgspec.Struct, frozen=True):
+    level: int
+    ix: int
+    iy: int
+    edge_m: float
+    revision: int
+    width: int = 512
+    height: int = 512
+    has_alpha: bool = False  # true when the `alpha` blob is present
+    source_ids: tuple[str, ...] = ()  # imagery sources that won a pixel, then "relief" if relief filled any
 
 
 # --- alignment.envelope ----------------------------------------------------------------------------------
@@ -914,6 +964,58 @@ METHODS: tuple[MethodSpec, ...] = (
                 "Which source answered at each sample, laid out like `heights`: an index into `source_ids` "
                 "(0 = the finest source), 255 where no source has data. One byte per sample (byte order does "
                 "not apply); written as `<u1` on the wire, as the other blobs are written `<`.",
+            ),
+        ),
+        errors=(
+            ErrorCode.BAD_PARAMS,
+            ErrorCode.NO_SESSION,
+            ErrorCode.NO_PROJECT,
+            ErrorCode.NOT_FOUND,
+            ErrorCode.BUSY,
+        ),
+    ),
+    MethodSpec(
+        name="imagery.tiles",
+        summary=(
+            "List the imagery display tiles of one level (0 to 4): one entry per terrain tile of that level, "
+            "with the `source_ids` of the imagery sources that cover it, nothing composed. `revision` "
+            "changes when the imagery or the terrain sources change, `terrain_revision` when the terrain "
+            "sources do. "
+            "`attributions` maps every imagery and terrain source to its attribution, and `notices` to the "
+            "licence notices that must be shown with it. A project with no terrain lists no tiles."
+        ),
+        stability=Stability.EXPERIMENTAL,
+        mutates=False,
+        params=ImageryTilesParams,
+        result=ImageryTilesResult,
+        errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION, ErrorCode.NO_PROJECT, ErrorCode.BUSY),
+    ),
+    MethodSpec(
+        name="imagery.tile",
+        summary=(
+            "Fetch one imagery display tile listed by `imagery.tiles`: a 512 x 512 RGB JPEG of the imagery, "
+            "with shaded relief where no imagery is, plus an `alpha` blob when some pixel is transparent. "
+            "`revision` must be the one the list returned; a stale revision, or a tile that is not a terrain "
+            "tile, is `E_NOT_FOUND`. Composition runs off the event loop."
+        ),
+        stability=Stability.EXPERIMENTAL,
+        mutates=False,
+        params=ImageryTileParams,
+        result=ImageryTileResult,
+        blobs=(
+            BlobSpec(
+                "image",
+                "<u1",
+                "(n,)",
+                "The JPEG bytes of the RGB tile (baseline, quality 85, no EXIF). Transparent pixels are "
+                "black here; `alpha` says which they are.",
+            ),
+            BlobSpec(
+                "alpha",
+                "<u1",
+                "(512, 512)",
+                "0 where the tile has neither imagery nor relief, 255 elsewhere. Present only when "
+                "`has_alpha` is true. Row 0 is the north edge, column 0 the west edge.",
             ),
         ),
         errors=(

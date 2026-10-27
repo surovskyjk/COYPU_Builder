@@ -15,9 +15,11 @@ from coypu_builder.domain.model.ids import EntityId
 from coypu_builder.domain.model.trainset import Trainset
 from coypu_builder.domain.sources import SourceDataset, SourceKind
 from coypu_builder.domain.terrain_surface import TerrainStack
+from coypu_builder.io.mesh.imagery_tiles import ImageryTile
 from coypu_builder.io.mesh.terrain_tiles import TerrainTile
 
 TILE_CACHE_SIZE = 512
+IMAGERY_TILE_CACHE_SIZE = 64
 MAX_EXECUTING = 4  # coroutine requests of one connection that do their blocking work at once
 _REVISIONS = itertools.count(1)  # process-wide, so a revision is never reused across projects
 
@@ -77,6 +79,41 @@ class TerrainCache:
 
 
 @dataclass
+class ImageryCache:
+    """What is composed from a project's imagery sources and its terrain, valid for one `revision` (T-134).
+
+    `layers` (precedence order), `attributions`, `notices` and `warnings` are filled from the sources as they
+    are when the handlers first use the cache (`layers is None` until then); `heights_range` is the relief
+    ramp, built off the event loop with the terrain stack. The fingerprint is `(terrain revision, imagery
+    sources)`, so the revision changes when either changes."""
+
+    revision: int = field(default_factory=lambda: next(_REVISIONS))
+    fingerprint: tuple | None = None
+    layers: tuple | None = None
+    attributions: dict[str, str] = field(default_factory=dict)
+    notices: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    warnings: tuple[str, ...] = ()
+    heights_range: tuple[float, float] | None = None
+    range_ready: bool = False
+    build: Any = None  # the asyncio future of the relief ramp in flight
+    composing: dict[tuple[int, int, int], Any] = field(default_factory=dict)  # tile composes in flight
+    tiles: OrderedDict[tuple[int, int, int], ImageryTile] = field(default_factory=OrderedDict)
+    max_tiles: int = IMAGERY_TILE_CACHE_SIZE
+
+    def get_tile(self, level: int, ix: int, iy: int) -> ImageryTile | None:
+        key = (level, ix, iy)
+        tile = self.tiles.get(key)
+        if tile is not None:
+            self.tiles.move_to_end(key)
+        return tile
+
+    def put_tile(self, tile: ImageryTile) -> None:
+        self.tiles[(tile.level, tile.ix, tile.iy)] = tile
+        while len(self.tiles) > self.max_tiles:
+            self.tiles.popitem(last=False)
+
+
+@dataclass
 class ProjectState:
     project_id: str
     crs: ProjectCRS | None = None
@@ -87,6 +124,7 @@ class ProjectState:
     stops: tuple[Stop, ...] = ()
     sources: dict[EntityId, SourceEntry] = field(default_factory=dict)
     terrain: TerrainCache = field(default_factory=TerrainCache, repr=False)
+    imagery: ImageryCache = field(default_factory=ImageryCache, repr=False)
     terrain_build_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)  # one Qhull at a time
 
     def _terrain_fingerprint(self) -> tuple:
@@ -96,9 +134,23 @@ class ProjectState:
             if entry.dataset.kind == SourceKind.TERRAIN
         )
 
+    def _imagery_fingerprint(self) -> tuple:
+        return (
+            self.terrain_cache().revision,
+            tuple(
+                (source_id, id(entry), id(entry.payloads))
+                for source_id, entry in self.sources.items()
+                if entry.dataset.kind == SourceKind.IMAGERY
+            ),
+        )
+
     def invalidate_terrain(self) -> None:
         """Drop everything derived from the sources; the next terrain call gets a new revision."""
         self.terrain = TerrainCache(fingerprint=self._terrain_fingerprint())
+
+    def invalidate_imagery(self) -> None:
+        """Drop what is composed from the imagery sources; the terrain stack is kept."""
+        self.imagery = ImageryCache(fingerprint=self._imagery_fingerprint())
 
     def terrain_cache(self) -> TerrainCache:
         """The terrain cache, replaced first if the terrain sources changed since it was built. The handlers
@@ -107,6 +159,14 @@ class ProjectState:
         if self.terrain.fingerprint != fingerprint:
             self.terrain = TerrainCache(fingerprint=fingerprint)
         return self.terrain
+
+    def imagery_cache(self) -> ImageryCache:
+        """The imagery cache, replaced when the terrain revision or the imagery sources changed. An
+        imagery-only change keeps the terrain cache and its stack."""
+        fingerprint = self._imagery_fingerprint()
+        if self.imagery.fingerprint != fingerprint:
+            self.imagery = ImageryCache(fingerprint=fingerprint)
+        return self.imagery
 
 
 @dataclass

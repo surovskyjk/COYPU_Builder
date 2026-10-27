@@ -397,6 +397,7 @@ class CopernicusGlo30Provider:
     kinds = frozenset({SourceKind.TERRAIN})
     licence = LICENCE
     attribution = ATTRIBUTION
+    notices = (LIABILITY_NOTICE,)  # shown with the attribution wherever this source's data is (T-134)
     format_id = "geotiff"
 
     def __init__(self) -> None:

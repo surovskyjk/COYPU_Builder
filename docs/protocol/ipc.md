@@ -256,6 +256,7 @@ Read a context-data source cheaply (terrain, imagery, later buildings, vegetatio
 | `paths` | `tuple[str, ...] | None` | `None` |
 | `provider` | `str | None` | `None` |
 | `query` | `dict[str, Any] | None` | `None` |
+| `kind` | `str | None` | `None` |
 
 **Result**
 
@@ -514,6 +515,70 @@ Fetch one terrain display tile listed by `terrain.tiles`: its metadata plus the 
 |---|---|---|---|
 | `heights` | `<f4` | `(129, 129)` | Heights in metres relative to the y of `tile_origin`; row 0 is the south edge, column 0 the west edge, spacing `edge_m / 128`. NaN where the tile has no data. Position the node at `tile_origin`; the origin is never folded into the values. |
 | `source_index` | `<u1` | `(129, 129)` | Which source answered at each sample, laid out like `heights`: an index into `source_ids` (0 = the finest source), 255 where no source has data. One byte per sample (byte order does not apply); written as `<u1` on the wire, as the other blobs are written `<`. |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_BUSY`
+
+### `imagery.tiles`
+
+**Stability**: `experimental`  ·  **Changes state**: no
+
+List the imagery display tiles of one level (0 to 4): one entry per terrain tile of that level, with the `source_ids` of the imagery sources that cover it, nothing composed. `revision` changes when the imagery or the terrain sources change, `terrain_revision` when the terrain sources do. `attributions` maps every imagery and terrain source to its attribution, and `notices` to the licence notices that must be shown with it. A project with no terrain lists no tiles.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `level` | `int` | `0` |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `level` | `int` | required |
+| `revision` | `int` | required |
+| `terrain_revision` | `int` | required |
+| `tiles` | `tuple[ImageryTileInfo, ...]` | required |
+| `attributions` | `dict[str, str]` | required |
+| `notices` | `dict[str, tuple[str, ...]]` | required |
+| `warnings` | `tuple[str, ...]` | `()` |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_BUSY`
+
+### `imagery.tile`
+
+**Stability**: `experimental`  ·  **Changes state**: no
+
+Fetch one imagery display tile listed by `imagery.tiles`: a 512 x 512 RGB JPEG of the imagery, with shaded relief where no imagery is, plus an `alpha` blob when some pixel is transparent. `revision` must be the one the list returned; a stale revision, or a tile that is not a terrain tile, is `E_NOT_FOUND`. Composition runs off the event loop.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `level` | `int` | required |
+| `ix` | `int` | required |
+| `iy` | `int` | required |
+| `revision` | `int` | required |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `level` | `int` | required |
+| `ix` | `int` | required |
+| `iy` | `int` | required |
+| `edge_m` | `float` | required |
+| `revision` | `int` | required |
+| `width` | `int` | `512` |
+| `height` | `int` | `512` |
+| `has_alpha` | `bool` | `False` |
+| `source_ids` | `tuple[str, ...]` | `()` |
+
+**Blobs**
+
+| Name | dtype | Shape | Description |
+|---|---|---|---|
+| `image` | `<u1` | `(n,)` | The JPEG bytes of the RGB tile (baseline, quality 85, no EXIF). Transparent pixels are black here; `alpha` says which they are. |
+| `alpha` | `<u1` | `(512, 512)` | 0 where the tile has neither imagery nor relief, 255 elsewhere. Present only when `has_alpha` is true. Row 0 is the north edge, column 0 the west edge. |
 
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_BUSY`
 

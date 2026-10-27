@@ -153,10 +153,13 @@ def providers() -> tuple[SourceProvider, ...]:
     return tuple(_PROVIDERS.values())
 
 
-def reader_for(path: Path, format_id: str | None = None) -> SourceReader:
+def reader_for(path: Path, format_id: str | None = None, kind: SourceKind | None = None) -> SourceReader:
     """The reader for `path`: the one named by `format_id`, else the first registered reader (suffix matches
-    first) whose `sniff` accepts the file. Raises `ValueError` if none fits, and `ReaderFailure` if a
-    `sniff` raised and no other reader matched."""
+    first) whose `sniff` accepts the file. With `kind` and no `format_id`, the readers of that kind are tried
+    first (T-134: a GeoTIFF is an imagery file for `kind = imagery`, a terrain file otherwise). A file that
+    none of them recognises still gets the first other reader that does, so the caller's kind check can say
+    what the mismatch is. Raises `ValueError` if none fits, and `ReaderFailure` if a `sniff` raised and no
+    other reader matched."""
     if format_id is not None:
         reader = _READERS.get(format_id)
         if reader is None:
@@ -164,9 +167,15 @@ def reader_for(path: Path, format_id: str | None = None) -> SourceReader:
             raise ValueError(f"unknown format_id '{format_id}' (known: {known})")
         return reader
     suffix = Path(path).suffix.lower()
-    ordered = sorted(_READERS.values(), key=lambda r: suffix not in {s.lower() for s in r.suffixes})
+
+    def rank(reader: SourceReader) -> tuple[bool, bool]:
+        return (
+            kind is not None and kind not in reader.kinds,
+            suffix not in {s.lower() for s in reader.suffixes},
+        )
+
     broken: list[str] = []
-    for reader in ordered:
+    for reader in sorted(_READERS.values(), key=rank):
         try:
             if reader.sniff(Path(path)):
                 return reader

@@ -123,9 +123,12 @@ def as_paths(path: Path | str | Sequence[Path | str]) -> tuple[Path, ...]:
     return tuple(items)
 
 
-def reader_for_all(paths: Sequence[Path], format_id: str | None = None) -> SourceReader:
-    """The one reader that fits every file; files that need different readers are refused."""
-    readers = {id(r): r for r in (reader_for(p, format_id) for p in paths)}
+def reader_for_all(
+    paths: Sequence[Path], format_id: str | None = None, kind: SourceKind | None = None
+) -> SourceReader:
+    """The one reader that fits every file; files that need different readers are refused. `kind` restricts
+    the choice to readers of that kind (see `registry.reader_for`)."""
+    readers = {id(r): r for r in (reader_for(p, format_id, kind) for p in paths)}
     if len(readers) > 1:
         names = ", ".join(sorted(r.format_id for r in readers.values()))
         raise ValueError(f"the files are of different formats ({names}); import one format at a time")
@@ -133,14 +136,16 @@ def reader_for_all(paths: Sequence[Path], format_id: str | None = None) -> Sourc
 
 
 def inspect_source(
-    path: Path | str | Sequence[Path | str], format_id: str | None = None
+    path: Path | str | Sequence[Path | str], format_id: str | None = None, kind: SourceKind | None = None
 ) -> tuple[SourceReader, InspectReport]:
     """Pick the reader and ask it what the source holds. A source with no declared CRS gets a warning here,
     whatever the reader says, because import will refuse it unless the settings supply one. Several paths
     are one source: their counts are summed, their extents united, and files declaring different CRSs are
-    reported with no declared CRS and a warning."""
+    reported with no declared CRS and a warning. `kind` picks among the readers of that kind."""
     paths = as_paths(path)
-    reader = reader_for_all(paths, format_id)
+    reader = reader_for_all(paths, format_id, kind)
+    if kind is not None and kind not in reader.kinds:
+        raise ValueError(f"reader '{reader.format_id}' does not read {kind.value} sources")
     with extraction_scope():
         report = _merge_reports(paths, [_inspect(reader, p) for p in paths])
     if report.declared_crs is None:
@@ -439,7 +444,7 @@ def run_import(
     for item in paths:
         if not item.is_absolute():
             raise ValueError(f"path must be absolute, got '{item}'")
-    reader = reader_for_all(paths, format_id)
+    reader = reader_for_all(paths, format_id, kind)
     if kind not in reader.kinds:
         raise ValueError(f"reader '{reader.format_id}' does not read {kind.value} sources")
     if previous is not None and (previous.kind != kind or previous.format_id != reader.format_id):

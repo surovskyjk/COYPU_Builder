@@ -23,6 +23,7 @@ from coypu_builder.domain.crs import (
     quaternion_from_matrix,
 )
 from coypu_builder.domain.geometry.cant import RotationPivot
+from coypu_builder.domain.imagery import ImageryLayer, bounds_meet
 from coypu_builder.domain.kinematics import Stop, bake_run_table
 from coypu_builder.domain.model.trainset import Trainset
 from coypu_builder.domain.model.vehicle import CarSpec, TractionBand, VehicleDynamics, VehicleSpec
@@ -61,11 +62,14 @@ from coypu_builder.io.gis.envelope import (
     export_corridor_envelope,
     validate_output_crs,
 )
+from coypu_builder.io.imagery import layer_for_payload, register_imagery_readers
 from coypu_builder.io.landxml import LandXmlAlignment, read_landxml, to_alignment
+from coypu_builder.io.mesh.imagery_tiles import ImageryTile, compose_tile, height_range
 from coypu_builder.io.mesh.terrain_tiles import (
     TerrainTile,
     bake_tile,
     check_level,
+    tile_bounds,
     tile_edge,
     tiles_for_coverage,
 )
@@ -73,6 +77,7 @@ from coypu_builder.io.mesh.track import bake_track_mesh
 from coypu_builder.io.providers import cache as provider_cache
 from coypu_builder.io.providers import register_builtin_providers
 from coypu_builder.io.sources.registry import InspectReport, plugin_report
+from coypu_builder.io.sources.registry import providers as registered_providers
 from coypu_builder.io.sources.runner import (
     CrsRequired,
     NoAlignments,
@@ -102,6 +107,11 @@ from coypu_builder.protocol.messages import (
     CoypuLineDTO,
     ErrorCode,
     FileOriginDTO,
+    ImageryTileInfo,
+    ImageryTileParams,
+    ImageryTileResult,
+    ImageryTilesParams,
+    ImageryTilesResult,
     ImportCoypuParams,
     ImportCoypuResult,
     ImportInspectParams,
@@ -148,6 +158,7 @@ from coypu_builder.protocol.messages import (
 )
 from coypu_builder.server.session import (
     AlignmentEntry,
+    ImageryCache,
     ProjectState,
     RunEntry,
     Session,
@@ -156,6 +167,7 @@ from coypu_builder.server.session import (
 )
 
 register_builtin_readers()
+register_imagery_readers()
 register_builtin_providers()
 
 HandlerResult = tuple[dict[str, Any], dict[str, np.ndarray]]
@@ -792,8 +804,9 @@ async def handle_import_inspect(session: Session, params: dict[str, Any] | None)
         return await _inspect_provider(session, req)
     paths = _source_paths(req.path, req.paths)
     plugin_report()  # allow-listed plugin readers must be registered before one is looked up
+    kind = None if req.kind is None else _source_kind(req.kind)
     try:
-        _reader, report = await _offload(session, inspect_source, paths, req.format_id)
+        _reader, report = await _offload(session, inspect_source, paths, req.format_id, kind)
         result = _inspect_result(report)
     except (GisExtraMissing, ReaderFailure) as exc:
         raise ProtocolError(ErrorCode.INTERNAL, str(exc)) from exc
@@ -906,7 +919,10 @@ def _store_import(project: ProjectState, outcome, coverage) -> HandlerResult:
     project.sources[dataset.id] = SourceEntry(
         dataset, outcome.payloads, outcome.warnings, coverage, outcome.resolution_m
     )
-    project.invalidate_terrain()
+    if dataset.kind == SourceKind.IMAGERY:
+        project.invalidate_imagery()  # an imagery-only import keeps the terrain stack (T-134)
+    else:
+        project.invalidate_terrain()
     pin_provider_source(outcome)  # on the loop: a connection that closed mid-import pins nothing
 
     recon = outcome.reconciliation
@@ -1360,6 +1376,176 @@ async def handle_terrain_tile(session: Session, params: dict[str, Any] | None) -
     return msgspec.to_builtins(result), {"heights": tile.heights, "source_index": tile.source_index}
 
 
+# --- imagery display tiles (T-134, Part A) -----------------------------------------------------------------
+
+
+def _notices_for(origin: object) -> tuple[str, ...]:
+    """The licence notices of a source: its provider's `notices`. A file source has none."""
+    if not isinstance(origin, ProviderOrigin):
+        return ()
+    for provider in registered_providers():
+        if provider.provider_id == origin.provider_id:
+            notices = getattr(provider, "notices", ())
+            if isinstance(notices, str):
+                notices = (notices,)
+            return tuple(notices)
+    return ()
+
+
+def _prepare_imagery(project: ProjectState) -> ImageryCache:
+    """On the event loop, with no await: the imagery cache current now, with its layers, attributions and
+    notices read from the sources as they are now. The layers are in precedence order: finest declared
+    resolution first, the newest import first among equals (the sort is stable and the sources are read
+    newest first)."""
+    imagery = project.imagery_cache()
+    if imagery.layers is not None:
+        return imagery
+    attributions: dict[str, str] = {}
+    notices: dict[str, tuple[str, ...]] = {}
+    for source_id, entry in project.sources.items():
+        if entry.dataset.kind in (SourceKind.TERRAIN, SourceKind.IMAGERY):
+            attributions[source_id] = entry.dataset.attribution
+            notices[source_id] = _notices_for(entry.dataset.origin)
+    layers: list[ImageryLayer] = []
+    for source_id, entry in reversed(list(project.sources.items())):
+        if entry.dataset.kind != SourceKind.IMAGERY:
+            continue
+        for record in entry.dataset.objects:
+            payload = entry.payloads.get(record.id)
+            if payload is not None:
+                layers.append(layer_for_payload(source_id, payload))
+    layers.sort(key=lambda layer: layer.resolution_m)
+    imagery.layers = tuple(layers)
+    imagery.attributions = attributions
+    imagery.notices = notices
+    return imagery
+
+
+async def _ensure_imagery(session: Session, imagery: ImageryCache, terrain: TerrainCache) -> ImageryCache:
+    """`imagery` with its relief ramp built off the event loop, from the stack of `terrain` (built by
+    `_ensure_terrain`). Concurrent callers for one revision share one build."""
+    if imagery.range_ready:
+        return imagery
+    if imagery.build is None:
+        imagery.build = asyncio.ensure_future(_range_into(session, imagery, terrain.stack))
+        imagery.build.add_done_callback(lambda f: f.cancelled() or f.exception())
+    try:
+        await asyncio.shield(imagery.build)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise ProtocolError(ErrorCode.INTERNAL, f"relief ramp failed: {type(exc).__name__}: {exc}") from exc
+    return imagery
+
+
+async def _range_into(session: Session, imagery: ImageryCache, stack) -> None:
+    try:
+        async with session.gate:
+            value = await asyncio.to_thread(height_range, stack)
+    except BaseException:
+        imagery.build = None
+        raise
+    imagery.heights_range = value
+    imagery.range_ready = True
+
+
+async def _compose(
+    session: Session, imagery: ImageryCache, terrain: TerrainCache, level: int, ix: int, iy: int
+) -> ImageryTile:
+    """The imagery tile, from the cache or composed in a worker thread. Concurrent requests for one tile of
+    one revision share one composition, as `_bake` does for terrain."""
+    tile = imagery.get_tile(level, ix, iy)
+    if tile is not None:
+        return tile
+    key = (level, ix, iy)
+    future = imagery.composing.get(key)
+    if future is None:
+        future = asyncio.ensure_future(_compose_into(session, imagery, terrain, level, ix, iy))
+        imagery.composing[key] = future
+        future.add_done_callback(lambda f: f.cancelled() or f.exception())
+    return await asyncio.shield(future)
+
+
+async def _compose_into(
+    session: Session, imagery: ImageryCache, terrain: TerrainCache, level: int, ix: int, iy: int
+) -> ImageryTile:
+    key = (level, ix, iy)
+    try:
+        async with session.gate:
+            tile = await asyncio.to_thread(
+                compose_tile, imagery.layers, terrain.stack, imagery.heights_range, level, ix, iy
+            )
+        imagery.put_tile(tile)
+        return tile
+    finally:
+        imagery.composing.pop(key, None)
+
+
+async def handle_imagery_tiles(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    project = _require_project(session)
+    req = _convert(params, ImageryTilesParams)
+    level = _level(req.level)
+    imagery = _prepare_imagery(project)  # as of this request's place in the order, as for the terrain
+    terrain = await _ensure_terrain(session, project)
+    imagery = await _ensure_imagery(session, imagery, terrain)
+    keys = _level_keys(terrain, level)
+    # a listed tile costs about 70 bytes plus 40 per imagery layer: the answer stays under 1 MB
+    limit = min(MAX_LISTED_TILES, 900_000 // (70 + 40 * len(imagery.layers)))
+    if len(keys) > limit:
+        raise ProtocolError(
+            ErrorCode.BAD_PARAMS,
+            f"level {level} has {len(keys)} tiles, more than the {limit} one answer lists for "
+            f"{len(imagery.layers)} imagery layers; ask for a coarser level",
+        )
+    tiles = []
+    for ix, iy in keys:
+        bounds = tile_bounds(level, ix, iy)
+        covering = tuple(
+            dict.fromkeys(layer.source_id for layer in imagery.layers if bounds_meet(layer.bounds(), bounds))
+        )
+        tiles.append(ImageryTileInfo(level=level, ix=ix, iy=iy, edge_m=tile_edge(level), source_ids=covering))
+    result = ImageryTilesResult(
+        level=level,
+        revision=imagery.revision,
+        terrain_revision=terrain.revision,
+        tiles=tuple(tiles),
+        attributions=dict(imagery.attributions),
+        notices=dict(imagery.notices),
+        warnings=imagery.warnings,
+    )
+    return msgspec.to_builtins(result), {}
+
+
+async def handle_imagery_tile(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    project = _require_project(session)
+    req = _convert(params, ImageryTileParams)
+    level = _level(req.level)
+    stale = ProtocolError(
+        ErrorCode.NOT_FOUND, f"imagery revision {req.revision} is out of date; list the tiles again"
+    )
+    imagery = _prepare_imagery(project)
+    if req.revision != imagery.revision:  # no composition for a request that is already stale
+        raise stale
+    terrain = await _ensure_terrain(session, project)
+    if (req.ix, req.iy) not in set(_level_keys(terrain, level)):
+        raise ProtocolError(ErrorCode.NOT_FOUND, f"no terrain tile {level}/{req.ix}/{req.iy}")
+    imagery = await _ensure_imagery(session, imagery, terrain)
+    tile = await _compose(session, imagery, terrain, level, req.ix, req.iy)
+    result = ImageryTileResult(
+        level=tile.level,
+        ix=tile.ix,
+        iy=tile.iy,
+        edge_m=tile.edge_m,
+        revision=imagery.revision,
+        has_alpha=tile.alpha is not None,
+        source_ids=tile.source_ids,
+    )
+    blobs: dict[str, np.ndarray] = {"image": np.frombuffer(tile.jpeg, dtype=np.uint8)}
+    if tile.alpha is not None:
+        blobs["alpha"] = tile.alpha
+    return msgspec.to_builtins(result), blobs
+
+
 def _repository_root() -> Path | None:
     """The nearest ancestor of the `coypu_builder` package that holds `.git`; None outside a checkout."""
     for parent in Path(__file__).resolve().parents:
@@ -1523,6 +1709,8 @@ DISPATCH: dict[str, Handler] = {
     "alignment.track_mesh": handle_alignment_track_mesh,
     "terrain.tiles": handle_terrain_tiles,
     "terrain.tile": handle_terrain_tile,
+    "imagery.tiles": handle_imagery_tiles,
+    "imagery.tile": handle_imagery_tile,
     "alignment.envelope": handle_alignment_envelope,
     "run.list": handle_run_list,
     "run.get": handle_run_get,
