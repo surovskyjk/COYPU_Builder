@@ -87,38 +87,81 @@ Read before starting:
 
 **`crs.search {query: str, limit: int = 20, kind: str | None = None}`** returns
 `{results: [{code, name, kind, area, deprecated}]}`:
-- `code` is `"EPSG:5514"`-style. `kind` is one of `projected`, `geographic`, `vertical` or `compound`, and
-  the `kind` parameter filters by it.
-- **Source:** `pyproj.database.query_crs_info(auth_name="EPSG")`, read once and cached in the module. Match
-  on the code, and on every word of the query against the name, case-insensitively and ignoring diacritics
-  (NFKD fold), so "krovak" finds "Křovák".
+- `code` is `"EPSG:5514"`-style, and **each code appears at most once**. PROJ returns one row per area of
+  use, so keep one row per code, the one with the widest area.
+- `kind` in a result is one of `projected`, `geographic`, `vertical` or `compound`.
+- **The `kind` parameter** is one of those four, or `horizontal`, or `None`. `""` counts as `None`.
+  - `horizontal` means projected plus 2D geographic: the CRSs `import.run` accepts as `horizontal_crs`. It
+    leaves out 3D geographic CRSs (EPSG:4979, 4937 and the like), vertical and compound CRSs.
+  - Any other value is `E_BAD_PARAMS`.
+- **Source:** `pyproj.database.query_crs_info(auth_name="EPSG", allow_deprecated=True)`, read once and cached
+  in the module.
+- **Matching** is case-insensitive and ignores diacritics (NFKD fold), so "krovak" finds "Křovák".
+  - Split the query into words.
+  - Drop words that are only punctuation ("—", "/", "+"), and the word "epsg". Strip an "epsg:" prefix from
+    any word.
+  - A CRS matches when every remaining word matches **either** its code (as a prefix: "551" matches 5514,
+    not 4551) **or** its name or an alias (as a substring).
+  - A name also matches with spaces and hyphens removed from both sides, so "sjtsk" finds "S-JTSK" and
+    "wgs84" finds "WGS 84".
+  - The string the picker shows for a chosen CRS, `EPSG:5514 — S-JTSK / Krovak East North`, must find that
+    CRS first.
 - **Order:**
-  - for an empty query, or one of at most 2 characters, the Czech-practice codes come first, in this order:
-    `5514, 5513, 4326, 4258, 32633, 32634, 5705, 3855`;
-  - otherwise an exact code match first, then names that start with the query, then the rest;
   - deprecated CRSs last;
-  - each group alphabetically.
+  - then, for an empty query or one of at most 2 characters, the Czech-practice codes first, in this order:
+    `5514, 5513, 4326, 4258, 25833, 25834, 32633, 32634, 5705, 3855`;
+  - then the match groups: an exact code; a code that starts with the query; an exact name; a name that
+    starts with the query; the rest;
+  - within each group, the Czech-practice codes first, in the order above, for every query length;
+  - then alphabetically by name, then by code number.
 - **Limit:** at most `limit`, clamped to 1–200.
-- `mutates: false`. Time it: if the first call stays under 100 ms after the cache is warm, run it on the loop.
-  Otherwise use `_offload`, and say which in the report.
+- `mutates: false`, on the loop. Warm calls take 2–9 ms. The first build of the catalogue takes about 0.1 s
+  and mostly holds the GIL, so `serve()` builds it once before the socket opens, and no client ever waits
+  for it.
 
 **`import.formats {}`** returns
 `{readers: [{format_id, kinds, suffixes}], providers: [{provider_id, title, description, kinds, licence, attribution, notices, default_query}]}`:
-- every registered reader and provider, sorted by id;
-- `default_query` is what `normalise_query({})` gives, or `{}` where it needs a project;
-- `notices` defaults to `[]`;
+- every registered reader and provider, sorted by id. Call `plugin_report()` first, as the inspect and run
+  handlers do;
+- `default_query` is what `normalise_query({})` gives. A provider that has no `normalise_query`, raises
+  from it, or returns something that is not JSON gives `{}`. One plugin must never break the whole list;
+- `notices` defaults to `[]`, and a plain-string `notices` is one notice, not a list of characters (as
+  `_notices_for` does);
+- reader suffixes are lower case with a leading dot. `register_reader` refuses any other suffix, so the
+  plugin is recorded as failed;
 - `mutates: false`, on the loop.
+
+**Provider descriptions** (one line in the dialog's list, plain language):
+
+| Provider | `description` |
+|---|---|
+| `cuzk-dmr5g` | Bare-ground height points from the Czech national laser scan, downloaded one map sheet at a time. Czech Republic only. |
+| `cuzk-dmr4g` | A 5 m grid of bare-ground heights, downloaded one map sheet at a time. Czech Republic only. |
+| `copernicus-glo30` | Free worldwide heights on a grid of about 30 m. They follow treetops and rooftops, not bare ground, so use them only where better ground data is missing. |
 
 ### Acceptance criteria (Part A)
 
-1. `test_code_query_finds_it_first`: "5514" gives EPSG:5514 first.
+1. `test_code_query_finds_it_first`: "2003" gives EPSG:2003 (Grenada 1953 / British West Indies Grid) first,
+   ahead of EPSG:20034 (CGVD2013a(2002) height), which matches by prefix and whose name sorts first. "5514"
+   cannot test the order, because it matches only one CRS.
 2. `test_name_query_ignores_diacritics`: "krovak" and "Křovák" both list EPSG:5514 and EPSG:5513.
 3. `test_vertical_filter`: `kind = "vertical"` with "Baltic" or "Bpv" finds EPSG:5705, and every result is
    vertical.
 4. `test_short_query_puts_czech_codes_first`, and `test_limit_is_respected_and_clamped`.
 5. `test_import_formats_lists_every_reader_and_provider`: it matches the registry and carries the Copernicus
-   liability notice.
-6. **No regressions:** as T-134. `gen_protocol_docs.py --check` exits 0.
+   liability notice. The `las` reader's suffixes are exactly `[".las", ".laz", ".zip"]`.
+6. From the review:
+   - `test_codes_are_unique`, and "utm zone 33" lists EPSG:25833 once;
+   - `test_the_shown_value_finds_its_crs`: `EPSG:5514 — S-JTSK / Krovak East North`, "epsg 5514",
+     "5514 krovak", "sjtsk" and "wgs84" each find their CRS first;
+   - `test_code_matches_by_prefix`: "551" lists 5514 before 4551, or leaves 4551 out;
+   - `test_czech_codes_lead_their_group`: "krovak" and "S-JTSK" give EPSG:5514 within the first two;
+   - `test_short_query_boundary`: two characters put the Czech-practice codes first, three do not;
+   - `test_horizontal_kind`: "wgs 84" with `kind = "horizontal"` lists 4326 and not 4979, and `kind = ""`
+     is no filter;
+   - `test_a_broken_plugin_provider_does_not_break_the_list`;
+   - `test_reader_suffixes_must_be_lower_case_with_a_dot`.
+7. **No regressions:** as T-134. `gen_protocol_docs.py --check` exits 0.
 
 ## Part B — the dialog for files
 
@@ -167,8 +210,8 @@ Read before starting:
    - the extent, the counts (for LAS, a small class table), the resolution note and the licence;
    - every warning, verbatim.
 3. **Settings**, pre-filled from `suggested_settings`, every field editable:
-   - horizontal CRS (`CrsPicker`). It is required: when none is declared, the primary button stays disabled
-     until one is chosen;
+   - horizontal CRS (`CrsPicker` with `kind = horizontal`). It is required: when none is declared, the
+     primary button stays disabled until one is chosen;
    - vertical CRS (`CrsPicker` with `kind = vertical`), labelled "recorded only — heights are not
      transformed";
    - coordinate order: Auto / East-North / North-East. Next to it, one line on what Auto means for this
