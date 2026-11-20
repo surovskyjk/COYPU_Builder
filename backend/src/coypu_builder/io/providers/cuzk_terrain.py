@@ -62,9 +62,18 @@ class CuzkTerrainProvider:
     licence = "CC BY 4.0"
     attribution = "© ČÚZK"
 
-    def __init__(self, provider_id: str, title: str, dataset: CuzkDataset, format_id: str, note: str):
+    def __init__(
+        self,
+        provider_id: str,
+        title: str,
+        description: str,
+        dataset: CuzkDataset,
+        format_id: str,
+        note: str,
+    ):
         self.provider_id = provider_id
         self.title = title
+        self.description = description
         self.format_id = format_id
         self._dataset = dataset
         self._note = note
@@ -175,6 +184,8 @@ def cuzk_dmr5g_provider() -> CuzkTerrainProvider:
     return CuzkTerrainProvider(
         "cuzk-dmr5g",
         "ČÚZK DMR 5G",
+        "Bare-ground height points from the Czech national laser scan, downloaded one map sheet at a time. "
+        "Czech Republic only.",
         CuzkDataset.DMR5G,
         "las",
         "DMR 5G is a point cloud of ground key points, all of LAS class 8: keep every class (no filter is "
@@ -186,6 +197,7 @@ def cuzk_dmr4g_provider() -> CuzkTerrainProvider:
     return CuzkTerrainProvider(
         "cuzk-dmr4g",
         "ČÚZK DMR 4G",
+        "A 5 m grid of bare-ground heights, downloaded one map sheet at a time. Czech Republic only.",
         CuzkDataset.DMR4G,
         "geotiff",
         "DMR 4G is a 5 m height grid of the ground. Heights are Bpv (EPSG:5705) and are not transformed",

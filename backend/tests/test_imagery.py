@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import statistics
 import time
 import zipfile
 from collections import Counter
@@ -636,6 +637,7 @@ async def test_ping_answers_while_tiles_compose(server_url, tmp_path, monkeypatc
             )
         replies: dict[str, Envelope] = {}
         latencies: list[float] = []
+        pings_before_first_tile: int | None = None
         number = 0
         while len(replies) < len(keys):
             number += 1
@@ -650,8 +652,15 @@ async def test_ping_answers_while_tiles_compose(server_url, tmp_path, monkeypatc
                     answered = True
                 else:
                     replies[envelope.id] = envelope
+                    if pings_before_first_tile is None:
+                        pings_before_first_tile = len(latencies)
     assert all(reply.type == "res" for reply in replies.values())
-    assert len(latencies) >= 5 and max(latencies) < 0.1
+    # F45: a single descheduled ping must not fail the test, so the property is asserted, not the maximum of
+    # thousands of samples: pings keep being answered while tiles compose, the typical ping is quick, and no
+    # ping waits for a second.
+    assert pings_before_first_tile is not None and pings_before_first_tile >= 5
+    assert statistics.quantiles(latencies, n=10)[8] < 0.1
+    assert max(latencies) < 1.0
     assert all(counts[(0, ix, iy)] == 1 for ix, iy in keys)
 
 

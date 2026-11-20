@@ -394,6 +394,10 @@ def _remove_stale_parts(directory: Path) -> None:
 class CopernicusGlo30Provider:
     provider_id = PROVIDER_ID
     title = "Copernicus DEM GLO-30"
+    description = (
+        "Free worldwide heights on a grid of about 30 m. They follow treetops and rooftops, not bare ground, "
+        "so use them only where better ground data is missing."
+    )
     kinds = frozenset({SourceKind.TERRAIN})
     licence = LICENCE
     attribution = ATTRIBUTION

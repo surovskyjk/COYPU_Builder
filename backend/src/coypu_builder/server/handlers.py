@@ -44,6 +44,7 @@ from coypu_builder.domain.terrain_surface import (
     stack_from_sources,
     surface_for_source,
 )
+from coypu_builder.io import crs_search
 from coypu_builder.io.catalogue.vehicles import Catalogue, load_catalogue, resolve
 from coypu_builder.io.coypu.archive import MAP_BACK_WARNING_PREFIX, CoypuLine, CoypuProject, read_coypu
 from coypu_builder.io.coypu.geometry import (
@@ -78,6 +79,7 @@ from coypu_builder.io.providers import cache as provider_cache
 from coypu_builder.io.providers import register_builtin_providers
 from coypu_builder.io.sources.registry import InspectReport, plugin_report
 from coypu_builder.io.sources.registry import providers as registered_providers
+from coypu_builder.io.sources.registry import readers as registered_readers
 from coypu_builder.io.sources.runner import (
     CrsRequired,
     NoAlignments,
@@ -105,6 +107,9 @@ from coypu_builder.protocol.messages import (
     CatalogueVehiclesResult,
     CorridorClipDTO,
     CoypuLineDTO,
+    CrsSearchEntryDTO,
+    CrsSearchParams,
+    CrsSearchResult,
     ErrorCode,
     FileOriginDTO,
     ImageryTileInfo,
@@ -114,6 +119,9 @@ from coypu_builder.protocol.messages import (
     ImageryTilesResult,
     ImportCoypuParams,
     ImportCoypuResult,
+    ImportFormatProviderDTO,
+    ImportFormatReaderDTO,
+    ImportFormatsResult,
     ImportInspectParams,
     ImportInspectResult,
     ImportKinematicsParams,
@@ -979,6 +987,86 @@ def handle_plugins_list(session: Session, params: dict[str, Any] | None) -> Hand
     return msgspec.to_builtins(result), {}
 
 
+def handle_crs_search(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    _require_hello(session)
+    req = _convert(params, CrsSearchParams)
+    try:
+        found = crs_search.search(req.query, limit=req.limit, kind=req.kind)
+    except ValueError as exc:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
+    result = CrsSearchResult(
+        results=tuple(
+            CrsSearchEntryDTO(entry.code, entry.name, entry.kind, entry.area, entry.deprecated)
+            for entry in found
+        )
+    )
+    return msgspec.to_builtins(result), {}
+
+
+def _default_query(provider: Any) -> dict[str, Any]:
+    """What `normalise_query({})` gives, as JSON; `{}` if it gives nothing usable. A provider needing an open
+    import raises `ValueError` outside one, so it has no default to show."""
+    normalise = getattr(provider, "normalise_query", None)
+    if normalise is None:
+        return {}
+    try:
+        as_builtins = msgspec.to_builtins(dict(normalise({})))
+        msgspec.json.encode(as_builtins)
+    except Exception:  # plugin boundary: whatever a plugin's normalise_query does, the list still answers
+        return {}
+    return as_builtins
+
+
+def _provider_dto(provider: Any) -> ImportFormatProviderDTO | None:
+    notices = getattr(provider, "notices", ())
+    if isinstance(notices, str):
+        notices = (notices,)
+    try:
+        return ImportFormatProviderDTO(
+            provider_id=provider.provider_id,
+            title=str(getattr(provider, "title", provider.provider_id)),
+            description=str(getattr(provider, "description", "")),
+            kinds=tuple(sorted(str(kind.value) for kind in provider.kinds)),
+            licence=str(provider.licence),
+            attribution=str(provider.attribution),
+            notices=tuple(str(notice) for notice in notices),
+            default_query=_default_query(provider),
+        )
+    except Exception:
+        # Plugin boundary: a provider with broken attributes is left out; plugin_report says why.
+        return None
+
+
+def _reader_dto(reader: Any) -> ImportFormatReaderDTO | None:
+    try:
+        return ImportFormatReaderDTO(
+            format_id=str(reader.format_id),
+            kinds=tuple(sorted(str(kind.value) for kind in reader.kinds)),
+            suffixes=tuple(str(suffix) for suffix in reader.suffixes),
+        )
+    except Exception:  # plugin boundary: a reader with broken attributes is left out, plugin_report says why
+        return None
+
+
+def handle_import_formats(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    _require_hello(session)
+    plugin_report()
+    readers = tuple(
+        dto
+        for dto in (_reader_dto(reader) for reader in sorted(registered_readers(), key=lambda r: r.format_id))
+        if dto is not None
+    )
+    providers = tuple(
+        dto
+        for dto in (
+            _provider_dto(provider)
+            for provider in sorted(registered_providers(), key=lambda p: p.provider_id)
+        )
+        if dto is not None
+    )
+    return msgspec.to_builtins(ImportFormatsResult(readers=readers, providers=providers)), {}
+
+
 async def handle_alignment_frame_table(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     project = _require_project(session)
     req = _convert(params, AlignmentFrameTableParams)
@@ -1705,6 +1793,8 @@ DISPATCH: dict[str, Handler] = {
     "source.list": handle_source_list,
     "source.get": handle_source_get,
     "plugins.list": handle_plugins_list,
+    "crs.search": handle_crs_search,
+    "import.formats": handle_import_formats,
     "alignment.frame_table": handle_alignment_frame_table,
     "alignment.track_mesh": handle_alignment_track_mesh,
     "terrain.tiles": handle_terrain_tiles,

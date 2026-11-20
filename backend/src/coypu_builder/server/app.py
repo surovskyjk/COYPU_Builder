@@ -13,6 +13,7 @@ from websockets.asyncio.server import serve as ws_serve
 from websockets.exceptions import ConnectionClosed
 
 from coypu_builder import PROTOCOL_VERSION
+from coypu_builder.io import crs_search
 from coypu_builder.protocol.messages import METHODS, Envelope, ErrorCode, ErrorInfo
 from coypu_builder.server.codec import decode_frame, encode_frame, pack_blobs
 from coypu_builder.server.handlers import DISPATCH, ProtocolError, release_provider_pins
@@ -168,6 +169,10 @@ async def serve(
         raise ValueError("serve() refuses an empty token")
     elif allow_no_token:
         raise ValueError("allow_no_token=True contradicts an explicit token")
+
+    # The EPSG list is read from PROJ once (about 0.1 s, holding the GIL), here and not on a client's first
+    # `crs.search`, so that no request waits for it.
+    crs_search.catalogue()
 
     async def connection_handler(ws: ServerConnection) -> None:
         await _handle_connection(ws, token)

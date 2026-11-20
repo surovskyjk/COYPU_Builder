@@ -383,6 +383,47 @@ None.
 
 **Errors**: `E_NO_SESSION`
 
+### `crs.search`
+
+**Stability**: `experimental`  ·  **Changes state**: no
+
+Search the EPSG coordinate reference systems by code or by the words of their name, ignoring case, diacritics, spaces and hyphens (`krovak` finds `Křovák`, `sjtsk` finds `S-JTSK`); each word matches a code by prefix or a name by substring. `kind` is one of `projected`, `geographic` (2D and 3D), `vertical`, `compound`, or `horizontal` (projected plus 2D geographic, the CRSs `import.run` takes as `horizontal_crs`); an empty string or no `kind` means any. Any other value is `E_BAD_PARAMS`. Read-only; needs no project.
+
+**Params**
+
+| Field | Type | Default |
+|---|---|---|
+| `query` | `str` | required |
+| `limit` | `int` | `20` |
+| `kind` | `str | None` | `None` |
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `results` | `tuple[CrsSearchEntryDTO, ...]` | required |
+
+**Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`
+
+### `import.formats`
+
+**Stability**: `experimental`  ·  **Changes state**: no
+
+List the registered source readers (format, kinds, suffixes) and context-data providers (title, description, kinds, licence, attribution, notices, default query) that `import.inspect` and `import.run` accept. Read-only; needs no project.
+
+**Params**
+
+None.
+
+**Result**
+
+| Field | Type | Default |
+|---|---|---|
+| `readers` | `tuple[ImportFormatReaderDTO, ...]` | required |
+| `providers` | `tuple[ImportFormatProviderDTO, ...]` | required |
+
+**Errors**: `E_NO_SESSION`
+
 ### `alignment.frame_table`
 
 **Stability**: `experimental`  ·  **Changes state**: no

@@ -103,6 +103,8 @@ class SourceReader(Protocol):
 
 class SourceProvider(Protocol):
     provider_id: str
+    title: str  # the name the dialog shows
+    description: str  # one plain-language sentence: what the data is, its resolution, its coverage
     kinds: frozenset[SourceKind]
     licence: str
     attribution: str
@@ -128,6 +130,12 @@ def register_reader(reader: SourceReader) -> None:
     suffixes = reader.suffixes
     if isinstance(suffixes, str) or not all(isinstance(x, str) for x in suffixes):
         raise ValueError(f"reader '{format_id}': suffixes must be a tuple of strings")
+    malformed = [x for x in suffixes if x != x.lower() or not x.startswith(".") or len(x) < 2]
+    if malformed:
+        raise ValueError(
+            f"reader '{format_id}': suffixes must be lower case with a leading dot, e.g. '.las'; "
+            f"got {', '.join(repr(x) for x in malformed)}"
+        )
     if format_id in _READERS:
         raise ValueError(f"a reader with format_id '{format_id}' is already registered")
     _READERS[format_id] = reader

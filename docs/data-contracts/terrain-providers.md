@@ -21,6 +21,10 @@ sit behind the `SourceProvider` seam of T-130 (`provider_id`, `kinds`, `licence`
 `format_id` (the reader to use) and `normalise_query(query)` (the query with every default written out); the
 three built-ins define all of them. Third-party providers (entry points) need none of these.
 
+Every provider defines `title` and `description` (one plain-language sentence for the import dialog), and may
+define `notices` (a tuple of strings that go with the data; a bare string counts as one notice). `import.formats`
+lists all of them, with each provider's `default_query`, so the dialog can show them before an import.
+
 ## Provider imports on the wire
 
 `import.inspect` and `import.run` take, as the third alternative to `path` and `paths`:

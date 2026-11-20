@@ -269,6 +269,51 @@ class PluginsListResult(msgspec.Struct, frozen=True):
     warnings: tuple[str, ...] = ()  # problems with the per-user config.toml
 
 
+# --- crs.search / import.formats -------------------------------------------------------------------------
+# What the import dialog needs before it inspects anything: a CRS picker over the EPSG list, and the readers
+# and providers with their suffixes, licences and default queries (T-136).
+
+
+class CrsSearchParams(msgspec.Struct, frozen=True):
+    query: str  # a code ("5514", "EPSG:5514") or words of a name ("krovak", "Křovák", "Bpv")
+    limit: int = 20  # clamped to 1..200
+    kind: str | None = None  # "projected" | "geographic" | "vertical" | "compound" | "horizontal"; "" = none
+
+
+class CrsSearchEntryDTO(msgspec.Struct, frozen=True):
+    code: str  # "EPSG:5514"
+    name: str
+    kind: str  # "projected" | "geographic" | "vertical" | "compound"
+    area: str | None  # the area of use, as the PROJ database names it
+    deprecated: bool
+
+
+class CrsSearchResult(msgspec.Struct, frozen=True):
+    results: tuple[CrsSearchEntryDTO, ...]
+
+
+class ImportFormatReaderDTO(msgspec.Struct, frozen=True):
+    format_id: str
+    kinds: tuple[str, ...]  # "terrain" | "imagery" | ...
+    suffixes: tuple[str, ...]  # lower case, with the dot: ".las", ".tif"
+
+
+class ImportFormatProviderDTO(msgspec.Struct, frozen=True):
+    provider_id: str
+    title: str
+    description: str  # one plain-language sentence: what the data is, its resolution, its coverage
+    kinds: tuple[str, ...]
+    licence: str
+    attribution: str
+    notices: tuple[str, ...]  # the licence's notices that go with the data; empty when there are none
+    default_query: dict[str, Any]  # the query with its defaults written out; {} if it needs a project
+
+
+class ImportFormatsResult(msgspec.Struct, frozen=True):
+    readers: tuple[ImportFormatReaderDTO, ...]
+    providers: tuple[ImportFormatProviderDTO, ...]
+
+
 # --- alignment.frame_table ------------------------------------------------------------------------------
 # Result carries only metadata; the frame table itself rides the blobs (station, position, rotation, roll,
 # pitch, cant_mm, curvature, gradient, elevation, segment_index) so the client streams it as typed arrays.
@@ -823,6 +868,35 @@ METHODS: tuple[MethodSpec, ...] = (
         mutates=False,
         params=None,
         result=PluginsListResult,
+        errors=(ErrorCode.NO_SESSION,),
+    ),
+    MethodSpec(
+        name="crs.search",
+        summary=(
+            "Search the EPSG coordinate reference systems by code or by the words of their name, ignoring "
+            "case, diacritics, spaces and hyphens (`krovak` finds `Křovák`, `sjtsk` finds `S-JTSK`); each "
+            "word matches a code by prefix or a name by substring. `kind` is one of `projected`, "
+            "`geographic` (2D and 3D), `vertical`, `compound`, or `horizontal` (projected plus 2D "
+            "geographic, the CRSs `import.run` takes as `horizontal_crs`); an empty string or no `kind` "
+            "means any. Any other value is `E_BAD_PARAMS`. Read-only; needs no project."
+        ),
+        stability=Stability.EXPERIMENTAL,
+        mutates=False,
+        params=CrsSearchParams,
+        result=CrsSearchResult,
+        errors=(ErrorCode.BAD_PARAMS, ErrorCode.NO_SESSION),
+    ),
+    MethodSpec(
+        name="import.formats",
+        summary=(
+            "List the registered source readers (format, kinds, suffixes) and context-data providers (title, "
+            "description, kinds, licence, attribution, notices, default query) that `import.inspect` and "
+            "`import.run` accept. Read-only; needs no project."
+        ),
+        stability=Stability.EXPERIMENTAL,
+        mutates=False,
+        params=None,
+        result=ImportFormatsResult,
         errors=(ErrorCode.NO_SESSION,),
     ),
     MethodSpec(
