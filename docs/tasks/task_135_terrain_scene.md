@@ -333,8 +333,22 @@ control. These decisions follow from it:
 | `tools/capture.ps1` | expand `${COYPU_DATA}` from the environment; pass the expanded scenario to Godot |
 | `client/tools/capture/scenarios/terrain_kralupy.json` | new |
 | `client/tests/unit/test_capture_scenario.gd` | `imports` validation cases |
+| `client/scene/terrain/terrain_field.gd`, `client/tests/integration/test_terrain_field.gd` | retry of incomplete imagery tiles (added 2026-11-23, from T-134 B's review) |
+| `docs/tasks/task_135_terrain_scene.md` | F48: the measured video memory of draped imagery on Kralupy |
 
 ### Contract (Part C)
+
+- **Incomplete imagery** (added 2026-11-23). `imagery.tile` reports `complete: false` when a streamed layer
+  could not fetch some of its tiles, for example while the ČÚZK breaker is open. The backend does not cache
+  such a composition.
+  - **Retry:** the field keeps the draped result and re-requests that tile after a delay: 30 s, doubling to
+    5 min, at the same revision, from the paging coroutine and never from `_process`.
+  - **Abandon:** it stops when the tile becomes complete, leaves the view, or the revision changes.
+  - **Tests:**
+    - `test_incomplete_imagery_is_retried_then_kept`;
+    - `test_retry_stops_when_the_tile_leaves_the_view`.
+- **F48:** measure the video memory the attached imagery holds in the Kralupy capture, with the tile
+  counts per level, and report it.
 
 - **`imports` key:** the scenario's `imports` is a list of `import.run` parameter dictionaries. They are
   issued after the project loads and before `scene_ready`, and each must succeed.

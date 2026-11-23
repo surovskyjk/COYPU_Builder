@@ -316,14 +316,31 @@ Each criterion names the test that must prove it in `backend/tests/test_imagery.
   - Its import records only a `WmtsSource(service_url, layer, tile_matrix_set, matrices, clip)` payload,
     where `matrices` comes from the capabilities. **Nothing is downloaded at import time** beyond the
     capabilities document.
+  - **Import path (added 2026-11-23).** The provider seam stays as ADR 0009 has it: `fetch(query, cache_dir)`
+    returns files, and a reader turns them into payloads.
+    - `fetch` reads the capabilities and writes one small descriptor, `<cache_dir>/<layer>.wmts`. It is JSON,
+      LF, and holds the service URL, layer, TileMatrixSet, the parsed matrices and the clip.
+    - A reader with `format_id` `wmts-descriptor`, kind imagery and suffix `.wmts` reads it into the
+      `WmtsSource` payload. The object key is `<layer>/<TileMatrixSet>`, so a re-import keeps the GUID.
+    - A descriptor is data, not trust. Its service URL passes the same allow-list before any request, so a
+      crafted `.wmts` file on disk cannot point the backend at another host.
+  - **Descriptions** (one line in the import dialog, plain language):
+    - `cuzk-ortho-wmts`: "Aerial photos of the Czech Republic, streamed tile by tile while you look at
+      them. Nothing is downloaded in advance."
+    - `cuzk-ortho-sheets`: "Aerial photos of the Czech Republic, downloaded one map sheet at a time for
+      offline work. Large: check the size first."
   - **Capabilities:** read with `defusedxml`. Take each TileMatrix's identifier, scale denominator,
     top-left corner, tile size and matrix size.
     - Pixel size is `scale_denominator × 0.00028` m.
-    - In EPSG:5514 the WMTS corner is given as (X, Y) Křovák. Apply the coordinate-token rule from
-      `CLAUDE.md`, and test the corner against a known tile of the live service in the network test.
+    - In EPSG:5514 the WMTS corner is in the CRS's own axis order, East then North (negative Křovák
+      values). The worker proved this from the layer's BoundingBox and from `MatrixWidth` counting East
+      tiles; it is not (X, Y). Apply the coordinate-token rule from `CLAUDE.md`, and test the corner against
+      a known tile of the live service in the network test.
   - **`WmtsLayer.render(bounds, size)`:**
-    - choose the coarsest TileMatrix whose pixel size is at most `edge / size`; if none qualifies, the
-      finest;
+    - choose the coarsest TileMatrix whose pixel size is at most `edge / size × 1.001`; if none qualifies,
+      the finest. The 0.1 % tolerance was decided on 2026-11-23: ČÚZK's matrices are 0.013 % above the
+      powers of two (TileMatrix 11 is 1.00013 m), and a strict "at most" skips the matrix that fits at
+      every level, fetching four times the tiles;
     - fetch the WMTS tiles that cover `bounds`;
     - mosaic them into an `ImageryRaster`;
     - render it with `RasterLayer`'s resampling.
@@ -347,6 +364,89 @@ Each criterion names the test that must prove it in `backend/tests/test_imagery.
 - **Provider attributes:** both providers carry `title`, `description`, `licence`, `attribution` and
   `notices`, as the terrain providers do. T-136's `import.formats` lists them.
 
+### Review decisions (Part B, 2026-11-23)
+
+The review passed Part B with changes. These decisions are part of the contract.
+
+- **Allow-list:**
+  - `cuzk-ortho-wmts` allows exactly `ags.cuzk.gov.cz`, on port 443 or with no port. T-139 keeps its own,
+    wider list for the ATOM hosts.
+  - A test pins the module's production defaults, so a committed widening fails.
+- **Hostile descriptors and capabilities:**
+  - a matrix's pixel size must lie between 0.01 m and 100 000 m;
+  - a tile side must be at most 1024 px;
+  - a single render that would need more than 64 WMTS tiles, or a mosaic over 64 Mpx, fetches nothing and
+    degrades with one warning;
+  - the descriptor's clip polygon is read and applied.
+- **The clip:** `render` intersects the window with the clip box before choosing tiles, and pixels outside
+  the clip are not valid.
+- **Transparency:** a tile's alpha (RGBA, LA, or P with transparency) becomes part of `valid`, so where
+  coverage ends, relief shows through, as Part A's reader does.
+- **Disk errors degrade:** a store, load or cap failure (`OSError`, including Windows sharing violations and
+  device names such as `NUL`) never raises out of `render`. The decoded tile is used uncached.
+- **The cache cap is cheap:**
+  - a running byte total, seeded once per process;
+  - eviction walks the tree only when the total passes the cap, with `os.scandir` (one stat per file);
+  - `FileNotFoundError` from a concurrent eviction is tolerated.
+- **Circuit breaker**, per host, module-level, with an injectable clock:
+  - **What counts:** only a transient failure that exhausted its retries (5xx, 429, a timeout or a
+    connection error). A 403 or 404, a bad image or an oversized body does not.
+  - **Trip:** after 3 consecutive such tiles. A success resets the count.
+  - **Open:** for 30 s, doubling up to 5 min. While open, no request is made and no backoff is slept.
+    Workers in flight check the breaker before each attempt and between retries.
+  - **Half-open:** after the cool-down, one probe with a single attempt. Success closes the breaker;
+    failure re-opens it with the doubled cool-down.
+  - **Warning:** one aggregated warning while it is open, for example "ČÚZK orthophoto is not reachable
+    (HTTP 503); shaded relief is shown; retrying in 30 s". It is cleared when the breaker closes.
+  - **Timeouts:** the tile connect timeout is 4 s, and each render has a 15 s deadline after which
+    unfetched tiles degrade at once.
+- **Degraded tiles are not kept:**
+  - A composition with missing WMTS tiles is not put in the imagery LRU.
+  - `imagery.tile` gains `complete: bool`, false when any layer reported missing tiles. The client retries
+    an incomplete tile later; that is T-135 Part C.
+  - A failed revalidation, whether it ends in a failure or a bad body, keeps the stale tile and counts
+    toward the breaker.
+- **Licence notice:** both providers carry one notice: "Licensed under CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/). Resampled for display." CC BY asks for a link to the
+  licence and an indication of changes.
+- **Private imports:** the helpers `cuzk_bulk.py` and `cuzk_wmts.py` import from `cuzk_terrain.py` and
+  `io/gis/envelope.py` get public names. The three copies of `_check_url` and `_atomic_write` across the
+  Copernicus, T-139 and orthophoto modules are left for a later cleanup (F49).
+- **The live test** also asserts placement:
+  - the tile at the computed row and column for the Kralupy box is a real image, not blank or missing,
+    and no warning is raised;
+  - a ranged GET of the last 64 KB of one ORTOFOTO sheet ZIP lists its member names, and the reader's
+    object key for that sheet must equal the sheet code. That is one small request, not a bulk download.
+
+**Re-review (2026-11-23).** The fix round passed with changes. These decisions add to the list above.
+
+- **Warnings are for people.**
+  - A failure reason is a short phrase: "cannot connect", "timed out", "HTTP 503". The exception text goes
+    to the log only.
+  - A tile's warning is dropped when that tile later loads. All tile warnings clear when the breaker
+    closes and a render completes with nothing missing.
+- **An old copy beats none:** a tile whose stale copy is on disk keeps that copy when its revalidation
+  runs past the render deadline.
+- **No tile here is an answer.** A 403 or 404 means the service has no tile there, for example at the edge
+  of coverage. Those pixels are not valid, but the composition still counts as complete, so the client does
+  not retry it. A marker remembers the answer for 30 days.
+- **The breaker is honest:**
+  - a worker that waited for a fetch slot re-checks the breaker and the deadline before it sends anything;
+  - a bad revalidation body counts as a failure without a success being credited first;
+  - the body loop checks the render deadline.
+- **A corrupt validator sidecar** (valid JSON that is not an object) is ignored, not raised.
+- **Tests for what survived mutation:**
+  - userinfo in the production defaults;
+  - a tile count over 64 below the pixel cap;
+  - P-mode transparency;
+  - an in-flight success does not close an open breaker;
+  - the 300 s cool-down cap;
+  - the between-retry check;
+  - a probe abandoned at the deadline does not leave the breaker stuck;
+  - the deadline inside retries;
+  - a newer sheet edition keeps the GUID;
+  - `complete: false` at the wire for the breaker-open and deadline cases.
+
 ### Acceptance criteria (Part B)
 
 1. **Streaming.** `test_wmts_tile_fetches_only_what_it_needs`, against a local server that mimics the
@@ -354,8 +454,13 @@ Each criterion names the test that must prove it in `backend/tests/test_imagery.
    - one `imagery.tile` fetches only the WMTS tiles that cover it;
    - a second request hits the cache;
    - after the expiry, a 304 refetches nothing.
-2. **Allow-list.** `test_wmts_refuses_foreign_hosts`: a foreign host, plain http, userinfo and a redirect off
-   the allow-list are each refused.
+2. **Allow-list.** `test_wmts_refuses_foreign_hosts`: each of these is refused, and none of them makes a
+   request:
+   - a foreign host;
+   - plain http;
+   - userinfo in the URL;
+   - a redirect off the allow-list;
+   - a `.wmts` descriptor on disk whose service URL names a foreign host.
 3. **Degrading.** `test_wmts_503_degrades_to_relief`: a 503 is retried, then the pixels show relief and a
    warning names the failure.
 4. **Corner and orientation.** `test_wmts_matrix_choice_and_corner`: for each level 0–4, the chosen
@@ -368,7 +473,27 @@ Each criterion names the test that must prove it in `backend/tests/test_imagery.
    - stream Kralupy L0 imagery over the KRAV82 area from the WMTS;
    - report the tile count, bytes fetched, cold and warm times, and one composed tile's JPEG size;
    - do **not** bulk-download sheets; list their total only.
-7. **No regressions:** as Part A.
+7. **From the review:**
+   - `test_production_allow_list_is_one_host`;
+   - `test_redirect_loop_is_refused_after_five_hops`;
+   - `test_hostile_matrices_and_tile_counts_fetch_nothing`;
+   - `test_render_respects_the_clip`;
+   - `test_png_alpha_is_not_valid`;
+   - `test_jpeg_tiles_are_stored_and_reused`;
+   - `test_decoder_errors_are_failed_tiles` (garbage, truncated, a decompression bomb);
+   - `test_disk_errors_degrade_and_do_not_raise`;
+   - `test_cache_cap_walks_only_when_over`;
+   - `test_failed_revalidation_keeps_the_stale_tile`;
+   - `test_fetch_slots_are_shared_across_renders` (two renders at once, never more than 4 in flight);
+   - the circuit breaker:
+     - `test_breaker_trips_after_three`;
+     - `test_breaker_open_makes_no_request`;
+     - `test_breaker_probes_once_after_cool_down`;
+     - `test_breaker_resets_on_success`;
+     - `test_missing_tiles_do_not_trip_the_breaker`;
+   - `test_incomplete_composition_is_not_cached_and_says_so`;
+   - TileMatrix boundary cases: 1.0005 qualifies, 1.002 does not.
+8. **No regressions:** as Part A.
 
 ## Invariants
 
