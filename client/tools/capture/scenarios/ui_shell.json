@@ -75,6 +75,24 @@
       "ui": "visible",
       "preset": "sandbox",
       "overlay_text": "\u010c \u00da \u017d \u0159 \u016f \u011b \u0161 \u0165 \u010f \u0148 \u011a \u0160 \u0147 \u0164 \u010e \u016e \u2013 \u2014"
+    },
+    {
+      "name": "data_sources_empty_engineering",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "engineering",
+      "dialog": "data_sources"
+    },
+    {
+      "name": "data_sources_empty_sandbox",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "sandbox",
+      "dialog": "data_sources"
     }
   ],
   "perf": {

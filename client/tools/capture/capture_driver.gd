@@ -27,6 +27,8 @@ extends Node
 
 const _OVER_60HZ_MS := 16.7
 const _OVER_30HZ_MS := 33.3
+## A shot of a scene that imports terrain waits this long at most for the terrain to settle (T-135 Part B).
+const TERRAIN_SETTLE_TIMEOUT_S := 60.0
 
 var _main: Node
 var _scenario: Scenario
@@ -100,6 +102,8 @@ func _run(scenario_path: String) -> void:
 
 
 func _capture_all() -> void:
+	if not await _run_imports():
+		return
 	if not await _wait_for_scene():
 		return
 
@@ -123,10 +127,66 @@ func _capture_all() -> void:
 	_shell.set_chrome_visible(false)
 	await _frames(2)
 
+	# A perf block marked "first" runs before the shots: a shot that frames a whole terrain loads every tile it
+	# shows, and the perf block then has nothing left to stream (T-135 Part B).
+	var perf_first: bool = _scenario.has_perf() and bool(_scenario.perf.get("first", false))
+	if perf_first:
+		await _record_perf(_scenario.perf, timeline)
 	for shot in _scenario.shots:
 		await _capture_shot(shot, timeline, playback)
-	if _scenario.has_perf():
+	if _scenario.has_perf() and not perf_first:
 		await _record_perf(_scenario.perf, timeline)
+
+
+## T-135 Part B: the scenario's `imports`, each run through the calls the app itself makes: `import.inspect` for the
+## suggested settings, then `import.run` with the scenario's own `settings` laid over them. Paths are relative to the
+## repository and resolved here, so no scenario file carries an absolute path. Afterwards the project is read again,
+## as the app reads it after an import. Records the first failure and returns false; true when there is nothing to do.
+func _run_imports() -> bool:
+	if _scenario.imports.is_empty():
+		return true
+	var deadline := Time.get_ticks_msec() + int(_scenario.ready_timeout_s * 1000.0)
+	while Session.project_id().is_empty():
+		if Backend.state() == Backend.State.FAILED or Time.get_ticks_msec() > deadline:
+			_errors.append("no project was open when the imports were due")
+			return false
+		await get_tree().process_frame
+	for entry in _scenario.imports:
+		var params: Dictionary = entry.duplicate(true)
+		if params.has("path"):
+			params["path"] = _resolve_path(String(params["path"]))
+		if params.has("paths"):
+			var resolved: Array = []
+			for path: Variant in params["paths"]:
+				resolved.append(_resolve_path(String(path)))
+			params["paths"] = resolved
+		var inspect_params := {}
+		for key: String in ["path", "paths", "kind", "format_id"]:
+			if params.has(key):
+				inspect_params[key] = params[key]
+		var inspected := await Backend.request("import.inspect", inspect_params)
+		if inspected.type != "res":
+			_errors.append("import of %s: import.inspect failed: %s" % [str(params.get("kind", "?")), str(inspected.error.get("message", ""))])
+			return false
+		var settings: Dictionary = (inspected.result.get("suggested_settings", {}) as Dictionary).duplicate()
+		settings.merge(params.get("settings", {}), true)
+		params["settings"] = settings
+		var ran := await Backend.request("import.run", params)
+		if ran.type != "res":
+			_errors.append("import of %s: import.run failed: %s" % [str(params.get("kind", "?")), str(ran.error.get("message", ""))])
+			return false
+		print("capture: imported %s as %s" % [str(params.get("kind", "?")), str(ran.result.get("name", ""))])
+	var got := await Backend.request("project.get", {})
+	if got.type == "res":
+		Session.set_project_info(got.result)
+	return true
+
+
+## A repository-relative path made absolute under the repository root; an absolute path stays as it is.
+func _resolve_path(path: String) -> String:
+	if path.is_absolute_path():
+		return path
+	return _repository_root().path_join(path).simplify_path()
 
 
 ## True once `scene_ready` has fired; records why not otherwise (timeout, or the backend gave up).
@@ -156,6 +216,7 @@ func _capture_shot(shot: Dictionary, timeline: TimelineState, playback: Playback
 	if shot.has("orbit_zoom_notches") or shot.has("orbit_drag_px"):
 		await _drive_orbit(shot.get("orbit_zoom_notches", 0), shot.get("orbit_drag_px", Vector2.ZERO))
 	await _frames(shot["settle_frames"])
+	await _wait_for_terrain(shot["name"])
 	await RenderingServer.frame_post_draw
 
 	var entry := {
@@ -165,6 +226,8 @@ func _capture_shot(shot: Dictionary, timeline: TimelineState, playback: Playback
 		"time_s": timeline.time() if timeline != null else null,
 		"lead_station_m": playback.lead_station() if playback != null else null,
 		"ui": shot["ui"],
+		"source_boundaries": _shell.source_boundaries(),
+		"attribution": _shell.attribution_text(),
 	}
 	var image := get_viewport().get_texture().get_image()
 	var saved: int = ERR_CANT_CREATE if image == null else image.save_png(_out_dir.path_join(entry["file"]))
@@ -202,6 +265,11 @@ func _capture_shot(shot: Dictionary, timeline: TimelineState, playback: Playback
 	var problem := Scenario.frame_problem(stats.x, stats.y, fraction)
 	if not problem.is_empty():
 		_errors.append("shot '%s': %s" % [shot["name"], problem])
+	if shot.has("scene_fraction_max"):
+		entry["scene_fraction_max"] = shot["scene_fraction_max"]
+		var too_full := Scenario.scene_fraction_problem(fraction, float(shot["scene_fraction_max"]))
+		if not too_full.is_empty():
+			_errors.append("shot '%s': %s" % [shot["name"], too_full])
 	print(
 		"capture: %s  scene_fraction=%.4f luma_mean=%.3f luma_std=%.3f"
 		% [entry["file"], fraction, stats.x, stats.y]
@@ -220,6 +288,31 @@ func _record_perf(block: Dictionary, timeline: TimelineState) -> void:
 		_manifest_perf["panel_opacity"] = _shell.panel_opacity()
 
 
+## T-135 Part B: a shot of a scene that imports terrain waits until the terrain field has settled, every selected tile
+## attached and draped with the current imagery. Records a failure after [constant TERRAIN_SETTLE_TIMEOUT_S].
+func _wait_for_terrain(shot_name: String) -> void:
+	if _scenario.imports.is_empty():
+		return
+	var field := _terrain_field()
+	if field == null:
+		_errors.append("shot '%s': the scene has no terrain field to wait for" % shot_name)
+		return
+	var deadline := Time.get_ticks_msec() + int(TERRAIN_SETTLE_TIMEOUT_S * 1000.0)
+	while not field.settled():
+		if Time.get_ticks_msec() > deadline:
+			_errors.append("shot '%s': the terrain did not settle within %.0f s" % [shot_name, TERRAIN_SETTLE_TIMEOUT_S])
+			return
+		await get_tree().process_frame
+	await _frames(3)
+
+
+func _terrain_field() -> TerrainField:
+	for node: Node in _main.find_children("*", "Node3D", true, false):
+		if node is TerrainField:
+			return node as TerrainField
+	return null
+
+
 ## Plays the perf block once and returns its frame-time statistics.
 func _measure_perf(block: Dictionary, timeline: TimelineState, label: String) -> Dictionary:
 	var camera_manager: CameraManager = _main.camera_manager()
@@ -228,6 +321,9 @@ func _measure_perf(block: Dictionary, timeline: TimelineState, label: String) ->
 	timeline.seek(block["time_s"])
 	timeline.set_rate(block["rate"])
 	await _frames(30)
+	var field := _terrain_field()
+	var builds_before := int(field.build_stats()["count"]) if field != null else 0
+	var drapes_before := field.imagery_drapes() if field != null else 0
 
 	var vsync_before := DisplayServer.window_get_vsync_mode()
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
@@ -245,9 +341,12 @@ func _measure_perf(block: Dictionary, timeline: TimelineState, label: String) ->
 	DisplayServer.window_set_vsync_mode(vsync_before)
 
 	var stats := frame_stats(_frame_ms)
+	# T-135 Part B: the terrain tiles the field built while the frames were timed, so a figure says whether tiles streamed.
+	stats["terrain_builds"] = (int(field.build_stats()["count"]) - builds_before) if field != null else 0
+	stats["imagery_drapes"] = (field.imagery_drapes() - drapes_before) if field != null else 0
 	print(
-		"capture: %s %d frames  p50=%.2f p95=%.2f p99=%.2f max=%.2f ms"
-		% [label, stats["frames"], stats["p50_ms"], stats["p95_ms"], stats["p99_ms"], stats["max_ms"]]
+		"capture: %s %d frames  p50=%.2f p95=%.2f p99=%.2f max=%.2f ms  terrain builds %d  imagery drapes %d"
+		% [label, stats["frames"], stats["p50_ms"], stats["p95_ms"], stats["p99_ms"], stats["max_ms"], stats["terrain_builds"], stats["imagery_drapes"]]
 	)
 	if int(stats["frames"]) == 0:
 		_errors.append("%s recorded no frames" % label)
@@ -255,10 +354,12 @@ func _measure_perf(block: Dictionary, timeline: TimelineState, label: String) ->
 
 
 ## Poses the shell for a shot or perf block: `ui` "hidden" hides the chrome; "visible" applies `preset` and
-## `panel_opacity` (the preset's own default when absent) and opens or closes the named `dialog`.
+## `panel_opacity` (the preset's own default when absent) and opens or closes the named `dialog`. The terrain's
+## source boundaries are set for every block: off unless its `source_boundaries` is true.
 func _pose_ui(block: Dictionary) -> void:
 	_shell.close_dialogs()
 	_shell.show_capture_text("")
+	_shell.set_source_boundaries(bool(block.get("source_boundaries", false)))
 	if block["ui"] != "visible":
 		_shell.set_chrome_visible(false)
 		await _frames(2)
@@ -392,8 +493,12 @@ static func _godot_version() -> String:
 static func _default_out_dir(scenario_name: String) -> String:
 	var now := Time.get_datetime_dict_from_system()
 	var stamp := "%04d%02d%02d-%02d%02d%02d" % [now["year"], now["month"], now["day"], now["hour"], now["minute"], now["second"]]
-	var repo_root := ProjectSettings.globalize_path("res://").path_join("..").simplify_path()
-	return repo_root.path_join("captures").path_join("%s-%s" % [stamp, scenario_name])
+	return _repository_root().path_join("captures").path_join("%s-%s" % [stamp, scenario_name])
+
+
+## The repository root: the folder above `client/`, as an absolute path with forward slashes.
+static func _repository_root() -> String:
+	return ProjectSettings.globalize_path("res://").path_join("..").simplify_path()
 
 
 ## Mean and standard deviation of the Rec. 709 luma of the image's (gamma-encoded) 8-bit values, scaled to

@@ -140,7 +140,7 @@ func test_ribbon_holds_only_commands_that_exist() -> void:
 	var ids := ribbon.command_ids()
 	assert_array(ids).contains_exactly_in_any_order([
 		Ribbon.CMD_EXPORT_ENVELOPE, Ribbon.CMD_CAMERA_ORBIT, Ribbon.CMD_CAMERA_WAYSIDE, Ribbon.CMD_CAMERA_CAB,
-		Ribbon.CMD_SETTINGS,
+		Ribbon.CMD_SOURCE_BOUNDARIES, Ribbon.CMD_SETTINGS,
 	])
 	for id in ids:
 		var command_button := ribbon.button(id)
@@ -325,3 +325,204 @@ func test_chrome_rects_cover_the_visible_chrome_and_nothing_when_hidden() -> voi
 	assert_int(shell.chrome_rects().size()).is_greater_equal(5)
 	shell.set_chrome_visible(false)
 	assert_int(shell.chrome_rects().size()).is_equal(0)
+
+
+## Part B: the popover closes with Escape and with its Close button, and Close has the focus when it opens.
+func test_popover_closes_on_escape_and_close() -> void:
+	var shell := await _make_shell()
+	shell.show_data_sources()
+	await get_tree().process_frame
+	var popover := shell.data_sources_popover()
+	assert_bool(popover.visible).is_true()
+	var close := popover.find_child("Close", true, false) as Button
+	assert_object(close).is_not_null()
+	assert_bool(close.has_focus()).append_failure_message("Close does not have the initial focus").is_true()
+
+	# A real Escape key through the viewport, as the user sends it: the popover's own ui_cancel handling must close it.
+	var escape := InputEventKey.new()
+	escape.keycode = KEY_ESCAPE
+	escape.physical_keycode = KEY_ESCAPE
+	escape.pressed = true
+	assert_bool(escape.is_action_pressed("ui_cancel")).append_failure_message("Escape is not ui_cancel").is_true()
+	shell.get_viewport().push_input(escape)
+	await get_tree().process_frame
+	assert_bool(popover.visible).append_failure_message("Escape did not close the popover").is_false()
+
+	shell.show_data_sources()
+	await get_tree().process_frame
+	close.pressed.emit()
+	assert_bool(popover.visible).append_failure_message("Close did not close the popover").is_false()
+
+
+## T-135 Part B, review round: the press that dismisses the popover (its light-dismiss hides it) is followed at once by the
+## button's pressed on the release, which must not reopen it. A press later than the guard does open it.
+func test_pressing_the_attribution_just_after_the_popover_hid_does_not_reopen_it() -> void:
+	var shell := await _make_shell()
+	var entries: Array[Dictionary] = [{"source_id": "a", "kind": "terrain", "name": "T", "attribution": "A", "notices": PackedStringArray()}]
+	Session.set_data_sources(entries)
+	await get_tree().process_frame
+	shell.show_data_sources()
+	await get_tree().process_frame
+	var popover := shell.data_sources_popover()
+	assert_bool(popover.visible).is_true()
+
+	popover.hide()
+	shell.attribution_button().pressed.emit()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	assert_bool(popover.visible).append_failure_message("the press after the dismissal reopened the popover").is_false()
+
+	await get_tree().create_timer(0.25).timeout
+	shell.attribution_button().pressed.emit()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	assert_bool(popover.visible).append_failure_message("a press after the guard did not open the popover").is_true()
+	shell.close_data_sources()
+	Session.set_data_sources([] as Array[Dictionary])
+
+
+## T-135 Part B, review round: the status message takes the room the attribution leaves, so with a long message and three
+## sources the message is wider than the attribution button.
+func test_status_message_is_wider_than_the_attribution_with_three_sources() -> void:
+	var shell := await _make_shell()
+	shell.show_message("Envelope written: a long file name in a long folder, 12.50 km² | 321 vertices | Kralupy corridor")
+	var entries: Array[Dictionary] = [
+		{"source_id": "a", "kind": "terrain", "name": "T", "attribution": "A", "notices": PackedStringArray()},
+		{"source_id": "b", "kind": "imagery", "name": "I", "attribution": "B", "notices": PackedStringArray()},
+		{"source_id": "c", "kind": "imagery", "name": "J", "attribution": "C", "notices": PackedStringArray()},
+	]
+	Session.set_data_sources(entries)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var button := shell.attribution_button()
+	assert_bool(button.visible).is_true()
+	var message := shell.status_message_label()
+	assert_float(message.size.x).append_failure_message(
+		"the message is %f px wide, the attribution button %f px" % [message.size.x, button.size.x]
+	).is_greater(button.size.x)
+	Session.set_data_sources([] as Array[Dictionary])
+
+
+## T-135 Part B, review round: the attribution button has the status label's metrics, so the status bar keeps its height
+## when the button appears.
+func test_status_bar_keeps_its_height_with_the_attribution_button() -> void:
+	var shell := await _make_shell()
+	Session.set_data_sources([] as Array[Dictionary])
+	await get_tree().process_frame
+	var without := shell.status_bar().get_combined_minimum_size().y
+	var entries: Array[Dictionary] = [{"source_id": "a", "kind": "terrain", "name": "T", "attribution": "Survey office", "notices": PackedStringArray()}]
+	Session.set_data_sources(entries)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	assert_bool(shell.attribution_button().visible).is_true()
+	assert_float(shell.status_bar().get_combined_minimum_size().y).append_failure_message(
+		"the status bar is %f px with the button and %f px without" % [shell.status_bar().get_combined_minimum_size().y, without]
+	).is_equal(without)
+	assert_float(shell.status_bar().size.y).is_equal(without)
+	Session.set_data_sources([] as Array[Dictionary])
+
+
+## Part B: the attribution is a flat button that Tab reaches and Enter presses, which opens the popover.
+func test_status_attribution_is_keyboard_reachable() -> void:
+	var shell := await _make_shell()
+	var entries: Array[Dictionary] = [{
+		"source_id": "a", "kind": "imagery", "name": "Ortho", "attribution": "Survey office", "notices": PackedStringArray(),
+	}]
+	Session.set_data_sources(entries)
+	await get_tree().process_frame
+	var button := shell.attribution_button()
+	assert_bool(button.visible).is_true()
+	assert_bool(button.flat).is_true()
+	assert_int(button.focus_mode).is_equal(Control.FOCUS_ALL)
+	assert_str(button.tooltip_text).is_equal("Click to see where the terrain and imagery come from.")
+	button.grab_focus()
+	await get_tree().process_frame
+	assert_bool(button.has_focus()).append_failure_message("the attribution button cannot take the focus").is_true()
+	var enter := InputEventKey.new()
+	enter.keycode = KEY_ENTER
+	enter.physical_keycode = KEY_ENTER
+	enter.pressed = true
+	shell.get_viewport().push_input(enter)
+	var released := enter.duplicate() as InputEventKey
+	released.pressed = false
+	shell.get_viewport().push_input(released)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	assert_bool(shell.data_sources_popover().visible).append_failure_message("Enter did not open the popover").is_true()
+	shell.close_data_sources()
+
+
+## Part B: the ribbon's Source boundaries toggle reaches the terrain and the user's settings file.
+func test_ribbon_source_boundaries_toggle_persists() -> void:
+	var path := "user://t135b_shell_%d.cfg" % Time.get_ticks_usec()
+	var shell := await _make_shell()
+	shell.use_settings(UserSettings.new(path))
+	var button := shell.ribbon().button(Ribbon.CMD_SOURCE_BOUNDARIES)
+	assert_object(button).is_not_null()
+	button.set_pressed(true)
+	assert_bool(Session.source_boundaries()).is_true()
+	assert_bool(UserSettings.new(path).terrain_source_boundaries()).is_true()
+	button.set_pressed(false)
+	assert_bool(Session.source_boundaries()).is_false()
+	assert_bool(UserSettings.new(path).terrain_source_boundaries()).is_false()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	Session.set_source_boundaries(false)
+
+
+## Part B: the status bar names only real texts, and the popover shows each entry's heading, attribution and notices.
+func test_popover_shows_attribution_notices_and_headings() -> void:
+	var shell := await _make_shell()
+	var entries: Array[Dictionary] = [
+		{"source_id": "a", "kind": "imagery", "name": "Ortho", "attribution": "Survey office",
+			"notices": PackedStringArray(["Keep this notice."])},
+		{"source_id": "b", "kind": "terrain", "name": "Tin", "attribution": "", "notices": PackedStringArray()},
+	]
+	Session.set_data_sources(entries)
+	await get_tree().process_frame
+	assert_str(shell.attribution_text()).is_equal("Survey office")
+	var texts := []
+	for child in shell.data_sources_popover().find_children("*", "Label", true, false):
+		texts.append((child as Label).text)
+	assert_array(texts).contains(["Imagery · Ortho", "Survey office", "Keep this notice.", "Terrain · Tin"])
+	assert_array(texts).contains(["No attribution recorded for this file."])
+	Session.set_data_sources([] as Array[Dictionary])
+
+
+func test_status_summary_counts_sources_when_none_has_a_text() -> void:
+	var none := [{"source_id": "a", "kind": "terrain", "attribution": ""}, {"source_id": "b", "kind": "imagery", "attribution": " "}]
+	assert_str(UiShell.attribution_summary(none)).is_equal("2 data sources")
+	assert_str(UiShell.attribution_summary([{"source_id": "a", "kind": "terrain", "attribution": ""}])).is_equal("1 data source")
+	assert_str(UiShell.attribution_summary([])).is_empty()
+	var repeated := [{"attribution": "X"}, {"attribution": "X"}, {"attribution": "Y"}]
+	assert_str(UiShell.attribution_summary(repeated)).is_equal("X · Y")
+
+
+## T-135 Part B, review round: the attribution button is a keyboard stop that shows focus in both presets: its effective
+## focus style is the theme's, not an empty one.
+func test_attribution_button_shows_keyboard_focus() -> void:
+	var shell := await _make_shell()
+	var entries: Array[Dictionary] = [{"source_id": "a", "kind": "terrain", "name": "T", "attribution": "A", "notices": PackedStringArray()}]
+	Session.set_data_sources(entries)
+	await get_tree().process_frame
+	for preset_id: StringName in [UiPreset.ENGINEERING, UiPreset.SANDBOX]:
+		shell.apply_preset(preset_id)
+		await get_tree().process_frame
+		var focus := shell.attribution_button().get_theme_stylebox(&"focus")
+		assert_bool(focus != null).append_failure_message("no focus style in %s" % preset_id).is_true()
+		assert_bool(focus is StyleBoxEmpty).append_failure_message("the focus style is empty in %s" % preset_id).is_false()
+	Session.set_data_sources([] as Array[Dictionary])
+
+
+## T-135 Part B, review round: the popover separates each entry from the next, with the theme's separator, and not before the first.
+func test_popover_separates_each_entry_from_the_next() -> void:
+	var shell := await _make_shell()
+	var entries: Array[Dictionary] = [
+		{"source_id": "a", "kind": "terrain", "name": "T", "attribution": "A", "notices": PackedStringArray()},
+		{"source_id": "b", "kind": "imagery", "name": "I", "attribution": "B", "notices": PackedStringArray(["N"])},
+		{"source_id": "c", "kind": "imagery", "name": "J", "attribution": "C", "notices": PackedStringArray()},
+	]
+	Session.set_data_sources(entries)
+	await get_tree().process_frame
+	var separators := shell.data_sources_popover().find_children("*", "HSeparator", true, false)
+	assert_int(separators.size()).is_equal(2)
+	Session.set_data_sources([] as Array[Dictionary])

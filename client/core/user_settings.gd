@@ -19,6 +19,7 @@ signal changed()
 var _path := ""
 var _preset_id: StringName = UiPreset.DEFAULT_ID
 var _opacity := -1.0  # < 0: not chosen
+var _source_boundaries := false  # View > Source boundaries (T-135 Part B)
 
 
 ## `path` is the file to read now and to write on [method save]; empty means memory-only.
@@ -68,6 +69,18 @@ func set_panel_opacity(x: float) -> void:
 	changed.emit()
 
 
+## Whether the terrain's source boundaries are drawn (View > Source boundaries, T-135 Part B). Off until chosen.
+func terrain_source_boundaries() -> bool:
+	return _source_boundaries
+
+
+func set_terrain_source_boundaries(on: bool) -> void:
+	if on == _source_boundaries:
+		return
+	_source_boundaries = on
+	changed.emit()
+
+
 ## Writes the file. False when memory-only or when the write fails (the caller may carry on: a preference
 ## that cannot be stored is not worth interrupting the user for).
 func save() -> bool:
@@ -77,6 +90,7 @@ func save() -> bool:
 	config.set_value(SECTION, "preset", String(_preset_id))
 	if _opacity >= 0.0:
 		config.set_value(SECTION, "panel_opacity", _opacity)
+	config.set_value(SECTION, "terrain_source_boundaries", _source_boundaries)
 	var err := config.save(_path)
 	if err != OK:
 		push_warning("UserSettings: could not write %s (%s)" % [_path, error_string(err)])
@@ -110,3 +124,5 @@ func _load() -> void:
 			var number := value.to_float()
 			if is_finite(number):
 				_opacity = UiPreset.clamp_opacity(number)
+		elif key == "terrain_source_boundaries" and (value == "true" or value == "false"):
+			_source_boundaries = value == "true"

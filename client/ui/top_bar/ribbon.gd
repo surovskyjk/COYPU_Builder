@@ -27,6 +27,7 @@ const CMD_EXPORT_ENVELOPE := &"corridor.export_envelope"
 const CMD_CAMERA_ORBIT := &"view.camera_orbit"
 const CMD_CAMERA_WAYSIDE := &"view.camera_wayside"
 const CMD_CAMERA_CAB := &"view.camera_cab"
+const CMD_SOURCE_BOUNDARIES := &"view.source_boundaries"
 const CMD_SETTINGS := &"app.settings"
 
 ## camera command id -> CameraManager.Mode value
@@ -69,6 +70,11 @@ static func default_commands() -> Array[Dictionary]:
 			"id": CMD_CAMERA_CAB, "group": &"view", "label": "Cab", "short": "Cab", "icon": "camera_cab",
 			"action": "camera_mode_cab", "toggle": true,
 			"tip": "Cab camera: the driver's view from the lead car.",
+		},
+		{
+			"id": CMD_SOURCE_BOUNDARIES, "group": &"view", "label": "Source boundaries", "short": "Sources",
+			"icon": "source_boundaries", "action": "shell_source_boundaries", "check": true,
+			"tip": "Tint each terrain source (ČÚZK DMR 5G, Copernicus, imported files) and draw its edges on the imagery.",
 		},
 		{
 			"id": CMD_SETTINGS, "group": &"app", "label": "Settings…", "short": "Settings", "icon": "settings",
@@ -163,6 +169,17 @@ func set_camera_mode(mode: int) -> void:
 			(_buttons[id] as Button).set_pressed_no_signal(CAMERA_COMMANDS[id] == mode)
 
 
+## Shows a check command (such as [constant CMD_SOURCE_BOUNDARIES]) as on or off, without emitting a command.
+func set_checked(id: StringName, on: bool) -> void:
+	if _buttons.has(id):
+		(_buttons[id] as Button).set_pressed_no_signal(on)
+
+
+## Whether a check command is shown as on.
+func is_checked(id: StringName) -> bool:
+	return _buttons.has(id) and (_buttons[id] as Button).button_pressed
+
+
 ## Compact: one row of icon and short label, no group captions (the Sandbox top bar).
 func set_compact(compact: bool) -> void:
 	_compact = compact
@@ -230,6 +247,9 @@ func _build_button(command: Dictionary) -> Button:
 		command_button.toggle_mode = true
 		command_button.button_group = _camera_group
 		command_button.toggled.connect(_on_toggled.bind(command["id"]))
+	elif command.get("check", false):
+		command_button.toggle_mode = true
+		command_button.toggled.connect(_on_checked.bind(command["id"]))
 	else:
 		command_button.pressed.connect(_on_pressed.bind(command["id"]))
 	return command_button
@@ -242,6 +262,11 @@ func _on_pressed(id: StringName) -> void:
 func _on_toggled(is_pressed: bool, id: StringName) -> void:
 	if is_pressed:
 		command_invoked.emit(id)
+
+
+## A check button (not in the camera group) reports both states: the shell flips its setting on each press.
+func _on_checked(_is_pressed: bool, id: StringName) -> void:
+	command_invoked.emit(id)
 
 
 func _apply_compact() -> void:

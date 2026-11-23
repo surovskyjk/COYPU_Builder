@@ -13,7 +13,7 @@ const CAMERAS: Array[String] = ["orbit", "wayside", "cab"]
 ## T-125 captured it) or "visible"; `preset` and `panel_opacity` pose the visible shell; `dialog` opens one.
 const UI_MODES: Array[String] = ["hidden", "visible"]
 const PRESETS: Array[String] = ["engineering", "sandbox"]
-const DIALOGS: Array[String] = ["envelope_export", "settings"]
+const DIALOGS: Array[String] = ["envelope_export", "settings", "data_sources"]
 const DEFAULT_UI := "hidden"
 const DEFAULT_PRESET := "engineering"
 
@@ -37,14 +37,18 @@ const LUMA_STD_MIN := 0.005
 const LUMA_MEAN_MIN := 0.05
 const LUMA_MEAN_MAX := 0.95
 
-const _TOP_KEYS: Array[String] = ["project", "resolution", "ready_timeout_s", "shots", "perf"]
+const _TOP_KEYS: Array[String] = ["project", "resolution", "ready_timeout_s", "imports", "shots", "perf"]
 const _SHOT_KEYS: Array[String] = [
 	"name", "camera", "time_s", "focus_station_m", "settle_frames", "orbit_zoom_notches", "orbit_drag_px",
-	"ui", "preset", "panel_opacity", "dialog", "dialog_offset_px", "overlay_text",
+	"ui", "preset", "panel_opacity", "dialog", "dialog_offset_px", "overlay_text", "source_boundaries",
+	"scene_fraction_max",
 ]
 ## `baseline: true` makes the driver record the same run once with the UI hidden first (manifest `perf_baseline`),
 ## so the cost of the visible shell is a difference within one run.
-const _PERF_KEYS: Array[String] = ["camera", "time_s", "rate", "duration_s", "ui", "preset", "panel_opacity", "baseline"]
+## `first: true` runs the perf block before the shots (T-135 Part B), so it can stream terrain the shots would load.
+const _PERF_KEYS: Array[String] = [
+	"camera", "time_s", "rate", "duration_s", "ui", "preset", "panel_opacity", "baseline", "first",
+]
 
 ## Basename of the scenario file; set by the caller (the text itself carries no name).
 var scenario_name := ""
@@ -58,6 +62,9 @@ var shots: Array[Dictionary] = []
 ## Empty when the file has no `perf` block; otherwise `camera`, `time_s`, `rate`, `duration_s`, `ui`, `preset`,
 ## `baseline` and, when given, `panel_opacity`.
 var perf: Dictionary = {}
+## T-135 Part B: the `import.run` parameter objects the driver issues after the project loads and before the scene
+## is ready (each is inspected first). Paths are relative to the repository. Empty when the file has none.
+var imports: Array[Dictionary] = []
 
 var _errors := PackedStringArray()
 
@@ -125,6 +132,14 @@ static func frame_problem(mean: float, std: float, scene_fraction: float) -> Str
 	return ""
 
 
+## Empty when a shot's `scene_fraction` is within its `scene_fraction_max` key, otherwise how much it exceeds it. A shot
+## with the terrain culled fills little of the frame; one that shows the whole terrain fills more.
+static func scene_fraction_problem(fraction: float, maximum: float) -> String:
+	if fraction > maximum:
+		return "scene fills more of the frame than scene_fraction_max allows (scene_fraction %.4f > %.4f)" % [fraction, maximum]
+	return ""
+
+
 func _run_problems(label: String, entry: Dictionary, has_run: bool, duration_s: float) -> PackedStringArray:
 	var found := PackedStringArray()
 	if entry.has("time_s"):
@@ -168,11 +183,27 @@ func _read(root: Dictionary) -> void:
 	else:
 		_read_shots(root["shots"] as Array)
 
+	if root.has("imports"):
+		_read_imports(root["imports"])
+
 	if root.has("perf"):
 		if root["perf"] is Dictionary:
 			_read_perf(root["perf"] as Dictionary)
 		else:
 			_errors.append("perf must be an object")
+
+
+## Each entry is one `import.run` parameter object; anything else is an error that names its position.
+func _read_imports(value: Variant) -> void:
+	if not (value is Array):
+		_errors.append("imports must be an array of import.run parameter objects")
+		return
+	var entries: Array = value
+	for i in entries.size():
+		if not (entries[i] is Dictionary):
+			_errors.append("imports[%d] must be an object (an import.run parameter set)" % i)
+			continue
+		imports.append((entries[i] as Dictionary).duplicate(true))
 
 
 func _read_resolution(value: Variant) -> void:
@@ -221,6 +252,15 @@ func _read_shots(raw_shots: Array) -> void:
 			var time_s: Variant = _non_negative(label + ": time_s", raw["time_s"])
 			if time_s != null:
 				shot["time_s"] = time_s
+		if raw.has("source_boundaries"):
+			if raw["source_boundaries"] is bool:
+				shot["source_boundaries"] = raw["source_boundaries"]
+			else:
+				_errors.append("%s: source_boundaries must be true or false, got %s" % [label, JSON.stringify(raw["source_boundaries"])])
+		if raw.has("scene_fraction_max"):
+			var maximum: Variant = _fraction(label + ": scene_fraction_max", raw["scene_fraction_max"])
+			if maximum != null:
+				shot["scene_fraction_max"] = maximum
 		if raw.has("focus_station_m"):
 			var station: Variant = _non_negative(label + ": focus_station_m", raw["focus_station_m"])
 			if station != null:
@@ -311,6 +351,12 @@ func _read_perf(raw: Dictionary) -> void:
 			block["baseline"] = raw["baseline"]
 		else:
 			_errors.append("perf: baseline must be true or false, got %s" % JSON.stringify(raw["baseline"]))
+	block["first"] = false
+	if raw.has("first"):
+		if raw["first"] is bool:
+			block["first"] = raw["first"]
+		else:
+			_errors.append("perf: first must be true or false, got %s" % JSON.stringify(raw["first"]))
 	var camera := _read_camera("perf", raw)
 	if camera != "":
 		block["camera"] = camera
@@ -371,6 +417,17 @@ func _non_negative(label: String, value: Variant) -> Variant:
 	var number: Variant = _number(label, value)
 	if number != null and number < 0.0:
 		_errors.append("%s must not be negative, got %s" % [label, str(value)])
+		return null
+	return number
+
+
+## A number from 0 to 1 inclusive, or null after recording why it is not one.
+func _fraction(label: String, value: Variant) -> Variant:
+	var number: Variant = _number(label, value)
+	if number == null:
+		return null
+	if number < 0.0 or number > 1.0:
+		_errors.append("%s must be between 0 and 1, got %s" % [label, str(value)])
 		return null
 	return number
 

@@ -39,6 +39,12 @@ var _trainsets: Dictionary = {}
 ## request go to the backend. Nothing in the application sets it.
 var _terrain_request_override := Callable()
 
+## Whether the terrain's source boundaries are drawn (T-135 Part B): set by the shell from the user's setting, read
+## by [TerrainField].
+var _source_boundaries := false
+## The data sources of the terrain and imagery in view, published by [TerrainField] (T-135 Part B).
+var _data_sources: Array[Dictionary] = []
+
 var _entities := EntityRegistry.new()
 var _layers := LayerState.new()
 
@@ -263,6 +269,65 @@ func _report_terrain_failure(envelope: IpcEnvelope) -> void:
 	if code == "E_BUSY" or code == "E_NOT_FOUND" or code == "E_NO_PROJECT" or code == "E_NO_SESSION":
 		return
 	EventBus.backend_error.emit(code, envelope.error.get("message", ""))
+
+
+## Coroutine. `imagery.tiles` for one level (0 to 4): the `IpcEnvelope` as the backend answered it, so the caller can
+## read `result` (`revision`, `terrain_revision`, `tiles`, `attributions`, `notices`) on `res`. The error rules are
+## those of [method fetch_terrain_tiles]. Always resolves.
+func fetch_imagery_tiles(level: int) -> IpcEnvelope:
+	var envelope := await _terrain_request("imagery.tiles", {"level": level})
+	_report_terrain_failure(envelope)
+	return envelope
+
+
+## Coroutine. `source.list` (T-135 Part B): the `IpcEnvelope` as the backend answered it; on `res`, `result.sources`
+## holds each source's `id`, `kind`, `name` and `attribution`. The terrain field reads it once per listing, to name the
+## sources in view. Error reporting is as for [method fetch_terrain_tiles].
+func fetch_source_list() -> IpcEnvelope:
+	var envelope := await _terrain_request("source.list", {})
+	_report_terrain_failure(envelope)
+	return envelope
+
+
+## Coroutine. `imagery.tile` for one listed tile of `revision` (T-135 Part B): on `res`, `result` holds `has_alpha` and
+## `source_ids`, and `blobs` holds `image` (the JPEG) and, only when `has_alpha`, `alpha`. Error reporting is as for
+## [method fetch_terrain_tile].
+func fetch_imagery_tile(level: int, ix: int, iy: int, revision: int) -> IpcEnvelope:
+	var params := {"level": level, "ix": ix, "iy": iy, "revision": revision}
+	var envelope := await _terrain_request("imagery.tile", params)
+	_report_terrain_failure(envelope)
+	return envelope
+
+
+## Whether the terrain's source boundaries are drawn (T-135 Part B).
+func source_boundaries() -> bool:
+	return _source_boundaries
+
+
+## Records the boundary overlay state and tells the terrain scene. Emits only on a change.
+func set_source_boundaries(on: bool) -> void:
+	if on == _source_boundaries:
+		return
+	_source_boundaries = on
+	EventBus.source_boundaries_changed.emit(on)
+
+
+## The data sources of the terrain and imagery in view: dictionaries of `source_id`, `attribution` (which may be
+## empty) and `notices`, sorted by source id.
+func data_sources() -> Array[Dictionary]:
+	return _data_sources
+
+
+## Replaces the data sources in view (called by [TerrainField]) and emits [signal EventBus.data_sources_changed]
+## when they differ from the ones held.
+func set_data_sources(entries: Array[Dictionary]) -> void:
+	if entries == _data_sources:
+		return
+	var copy: Array[Dictionary] = []
+	for entry: Dictionary in entries:
+		copy.append(entry.duplicate(true))
+	_data_sources = copy
+	EventBus.data_sources_changed.emit()
 
 
 ## Coroutine. Replaces [method vehicle_catalogue] from `catalogue.vehicles`. Leaves the previous

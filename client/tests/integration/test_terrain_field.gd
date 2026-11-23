@@ -16,6 +16,10 @@ const _POLL_STEP_SEC := 0.05
 const _SPACING_M := 20.0
 const _FILE_A := "user://coypu_terrain_field_a.xml"
 const _FILE_B := "user://coypu_terrain_field_b.xml"
+## Part B: a synthetic orthophoto over the same box (a PNG with a world file) and a second one, for the re-drape test.
+const _FILE_IMAGE := "user://coypu_terrain_field_image.png"
+const _FILE_IMAGE_B := "user://coypu_terrain_field_image_b.png"
+const _IMAGE_PIXEL_M := 4.0
 ## KRAV82_BBOX of terrain.py: min_e, min_n, max_e, max_n.
 const _BOX := [-747650.0, -1026200.0, -744850.0, -1023800.0]
 const _PATCH := [-746800.0, -1025200.0, -746600.0, -1025000.0]
@@ -51,12 +55,18 @@ func before() -> void:
 
 func after() -> void:
 	Backend.shutdown()
-	for path in [_FILE_A, _FILE_B]:
+	for path in [_FILE_A, _FILE_B, _FILE_IMAGE, _FILE_IMAGE_B]:
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path.get_basename() + ".pgw"))
 
 
 func after_test() -> void:
 	Session.set_terrain_request_override(Callable())
+	var none: Array[Dictionary] = []
+	Session.set_data_sources(none)
+	Session.set_source_boundaries(false)
+	Session.layers().set_visible(TerrainField.IMAGERY_LAYER_ID, true)
+	Session.layers().set_visible(TerrainField.LAYER_ID, true)
 	if _field != null:
 		_field.queue_free()
 		_field = null
@@ -598,3 +608,491 @@ static func _surface(e: float, n: float) -> float:
 	var py := n - (_RIDGE_START.y + t * dy)
 	var ridge := _RIDGE_AMPLITUDE * exp(-(px * px + py * py) / (2.0 * _RIDGE_WIDTH * _RIDGE_WIDTH))
 	return plane + hill + ridge
+
+
+## Part B: the imagery. Each test imports the terrain of `_FILE_A` and a synthetic orthophoto over the same box.
+
+
+func test_imagery_replaces_the_placeholder() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	_field = _start_field(_CAMERA_A)
+	var draped := await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)
+	assert_bool(draped).append_failure_message("the selected tiles were never draped").is_true()
+	if not draped:
+		return
+	var selected := TerrainLod.select_tiles(_camera.global_position, _field.lists())
+	var draped_count := 0
+	for key in selected:
+		var tile := _field.tile_at(key)
+		if tile.shown_material() is TerrainMaterial:
+			draped_count += 1
+	assert_int(draped_count).append_failure_message(
+		"%d of %d selected tiles show the placeholder" % [selected.size() - draped_count, selected.size()]
+	).is_equal(selected.size())
+	print("TERRAIN_IMAGERY draped %d of %d selected tiles, imagery revision %d" % [
+		draped_count, selected.size(), _field.imagery_revision()
+	])
+
+
+func test_hiding_imagery_shows_the_neutral_material() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	var selected := TerrainLod.select_tiles(_camera.global_position, _field.lists())
+
+	Session.layers().set_visible(TerrainField.IMAGERY_LAYER_ID, false)
+	await get_tree().process_frame
+	var neutral := TerrainTile.neutral_material()
+	for key in selected:
+		var tile := _field.tile_at(key)
+		assert_bool(tile.shown_material() == neutral).append_failure_message(
+			"tile %s still shows its imagery with the layer hidden" % key
+		).is_true()
+
+	# With the boundaries on and the imagery hidden, a tile shows the flat boundary material, not the placeholder.
+	Session.set_source_boundaries(true)
+	Session.layers().set_visible(TerrainField.IMAGERY_LAYER_ID, false)
+	await get_tree().process_frame
+	for key in selected:
+		var boundary_shown := _field.tile_at(key).shown_material()
+		assert_bool(boundary_shown is TerrainMaterial and (boundary_shown as TerrainMaterial).boundaries_on()).append_failure_message(
+			"tile %s shows neither imagery nor its boundaries with the layer hidden" % key
+		).is_true()
+	Session.set_source_boundaries(false)
+
+	Session.layers().set_visible(TerrainField.IMAGERY_LAYER_ID, true)
+	await get_tree().process_frame
+	for key in selected:
+		assert_bool(_field.tile_at(key).shown_material() is TerrainMaterial).append_failure_message(
+			"tile %s did not get its imagery back" % key
+		).is_true()
+
+
+func test_attribution_lists_exactly_the_sources_in_view() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+
+	# The sources of the tiles in view: each shown tile's terrain sources, and its imagery sources except relief.
+	var expected := {}
+	for key in _field.attached_keys():
+		var tile := _field.tile_at(key)
+		if not tile.visible:
+			continue
+		for source_id in tile.terrain_source_ids():
+			expected[String(source_id)] = true
+		if tile.has_imagery():
+			for source_id in tile.imagery_source_ids:
+				if String(source_id) != "relief":
+					expected[String(source_id)] = true
+	var expected_ids := _sorted_keys(expected.keys())
+	assert_int(expected_ids.size()).is_greater(0)
+	var published := await _wait_until(func() -> bool: return _entry_ids() == expected_ids, 5.0)
+	assert_bool(published).append_failure_message(
+		"the data sources in view are %s, expected %s" % [str(_entry_ids()), str(expected_ids)]
+	).is_true()
+	for entry in Session.data_sources():
+		var source_id := String(entry["source_id"])
+		assert_str(String(entry["attribution"])).append_failure_message(
+			"source %s carries another attribution than imagery.tiles gave" % source_id
+		).is_equal(String(_field.attributions().get(source_id, "")))
+
+
+func test_an_imagery_only_import_does_not_rebuild_meshes() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	var selected := TerrainLod.select_tiles(_camera.global_position, _field.lists())
+	var meshes := {}
+	for key in selected:
+		meshes[key] = _field.tile_at(key).mesh_instance().mesh
+	var terrain_revision := _field.revision()
+	var imagery_before := _field.imagery_revision()
+	var built := int(_field.build_stats()["count"])
+
+	assert_bool(await _import_imagery(_FILE_IMAGE_B, Color(0.6, 0.5, 0.3), "Second image")).is_true()
+	_field.relist()
+	var redraped := await _wait_until(
+		func() -> bool: return _field.imagery_revision() != imagery_before and _imagery_settled(), _FIELD_TIMEOUT_SEC
+	)
+	assert_bool(redraped).append_failure_message("the imagery never moved to its new revision").is_true()
+	assert_int(_field.revision()).append_failure_message("an imagery-only import changed the terrain revision").is_equal(
+		terrain_revision
+	)
+	assert_int(int(_field.build_stats()["count"])).append_failure_message(
+		"%d terrain meshes were rebuilt by an imagery-only import" % (int(_field.build_stats()["count"]) - built)
+	).is_equal(built)
+	for key in meshes.keys():
+		assert_bool(_field.tile_at(key).mesh_instance().mesh == meshes[key]).append_failure_message(
+			"tile %s got a new mesh" % key
+		).is_true()
+
+
+## True once the field is settled and every selected tile is draped with the current imagery revision.
+func _imagery_settled() -> bool:
+	if _field == null or _camera == null or not _field.settled():
+		return false
+	for key in TerrainLod.select_tiles(_camera.global_position, _field.lists()):
+		var tile := _field.tile_at(key)
+		if tile == null or not tile.has_imagery() or tile.imagery_revision != _field.imagery_revision():
+			return false
+	return true
+
+
+## The source ids the Session holds for the data sources in view, sorted.
+func _entry_ids() -> Array:
+	var ids := []
+	for entry in Session.data_sources():
+		ids.append(String(entry["source_id"]))
+	ids.sort()
+	return ids
+
+
+## Writes a synthetic orthophoto over the box, 4 m a pixel, with a white "F" near its north-west corner, and its world
+## file. The world file gives the box in EPSG:5514 (negative magnitudes) and carries no CRS, so the import names it.
+func _import_imagery(path: String, tint: Color, label: String) -> bool:
+	_write_imagery(path, tint)
+	var imported := await Backend.request(
+		"import.run", {"path": _global(path), "kind": "imagery", "settings": _settings(), "name": label}
+	)
+	if imported.type != "res":
+		fail("imagery import failed: %s" % str(imported.error))
+		return false
+	return true
+
+
+static func _write_imagery(path: String, tint: Color) -> void:
+	var width := int((_BOX[2] - _BOX[0]) / _IMAGE_PIXEL_M)
+	var height := int((_BOX[3] - _BOX[1]) / _IMAGE_PIXEL_M)
+	var image := Image.create_empty(width, height, false, Image.FORMAT_RGB8)
+	image.fill(tint)
+	image.fill_rect(Rect2i(20, 20, 12, 60), Color(1.0, 1.0, 1.0))
+	image.fill_rect(Rect2i(20, 20, 40, 10), Color(1.0, 1.0, 1.0))
+	image.save_png(ProjectSettings.globalize_path(path))
+	var centre_e: float = _BOX[0] + _IMAGE_PIXEL_M / 2.0
+	var centre_n: float = _BOX[3] - _IMAGE_PIXEL_M / 2.0
+	var world := "%s\n0\n0\n-%s\n%s\n%s\n" % [str(_IMAGE_PIXEL_M), str(_IMAGE_PIXEL_M), str(centre_e), str(centre_n)]
+	_write_file(path.get_basename() + ".pgw", world)
+
+
+## Part B, review round: the boundaries, the attribution and the re-listing of imagery, each checked live.
+
+
+func test_boundaries_show_without_imagery() -> void:
+	if not _require_ready():
+		return
+	# No imagery is imported, so the backend shades every tile with relief: each one is draped, and hiding the imagery
+	# layer is what leaves a tile with no imagery shown.
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	Session.set_source_boundaries(true)
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	Session.layers().set_visible(TerrainField.IMAGERY_LAYER_ID, false)
+	await get_tree().process_frame
+	var visible_count := 0
+	for key in _field.attached_keys():
+		var tile := _field.tile_at(key)
+		if not tile.visible:
+			continue
+		visible_count += 1
+		var shown := tile.shown_material()
+		assert_bool(shown is TerrainMaterial and (shown as TerrainMaterial).boundaries_on()).append_failure_message(
+			"tile %s has no boundary material with the imagery hidden" % key
+		).is_true()
+	assert_int(visible_count).is_greater(0)
+	Session.set_source_boundaries(false)
+	await get_tree().process_frame
+	for key in _field.attached_keys():
+		var tile := _field.tile_at(key)
+		if tile.visible:
+			assert_bool(tile.shown_material() == TerrainTile.neutral_material()).append_failure_message(
+				"tile %s keeps a boundary material with the toggle off" % key
+			).is_true()
+
+
+func test_boundary_toggle_reaches_every_tile() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	# On before the field exists: every tile it installs must already carry the overlay.
+	Session.set_source_boundaries(true)
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	assert_bool(_all_visible_overlays(true)).append_failure_message("tiles installed with the toggle on lack the overlay").is_true()
+	Session.set_source_boundaries(false)
+	await get_tree().process_frame
+	assert_bool(_all_visible_overlays(false)).append_failure_message("the toggle off did not reach every tile").is_true()
+	Session.set_source_boundaries(true)
+	await get_tree().process_frame
+	assert_bool(_all_visible_overlays(true)).append_failure_message("the toggle on did not reach every tile").is_true()
+
+
+func test_attribution_names_the_sources_and_skips_relief() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	var listed := await Backend.request("source.list", {})
+	assert_str(listed.type).append_failure_message("source.list failed: %s" % str(listed.error)).is_equal("res")
+	var known := {}
+	for source in listed.result.get("sources", []):
+		known[String(source["id"])] = source
+
+	# Phase 1, terrain and no imagery source: every tile is shaded with relief, and relief must be in the tiles' sources
+	# yet credited to nothing. From afar the field selects level-4 tiles, which hold terrain with no imagery over it.
+	_field = _start_field(_CAMERA_FAR)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	var relief_in_view := false
+	for key in _field.attached_keys():
+		var tile := _field.tile_at(key)
+		if tile.visible and tile.imagery_source_ids.has("relief"):
+			relief_in_view = true
+	assert_bool(relief_in_view).append_failure_message("no tile in view is shaded with relief").is_true()
+	assert_bool(await _wait_until(func() -> bool: return not Session.data_sources().is_empty(), 5.0)).is_true()
+	_assert_named_and_no_relief(known, "terrain only")
+
+	# Phase 2, terrain with the orthophoto over all of it: the credits name the terrain and the imagery, by source.list.
+	_field.queue_free()
+	_field = null
+	_camera.queue_free()
+	_camera = null
+	Session.set_data_sources([] as Array[Dictionary])
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	var listed_again := await Backend.request("source.list", {})
+	known = {}
+	for source in listed_again.result.get("sources", []):
+		known[String(source["id"])] = source
+	_field = _start_field(_CAMERA_FAR)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	assert_bool(await _wait_until(func() -> bool: return not Session.data_sources().is_empty(), 5.0)).is_true()
+	_assert_named_and_no_relief(known, "terrain with imagery")
+
+
+## Every credited source is a real source of source.list, named and kinded as it is there, and relief is never credited.
+func _assert_named_and_no_relief(known: Dictionary, phase: String) -> void:
+	assert_bool(Session.data_sources().size() > 0).append_failure_message("%s: nothing is credited" % phase).is_true()
+	for entry in Session.data_sources():
+		var source_id := String(entry["source_id"])
+		assert_bool(source_id != "relief").append_failure_message("%s: relief was credited as a source" % phase).is_true()
+		assert_bool(known.has(source_id)).append_failure_message("%s: source %s is not in source.list" % [phase, source_id]).is_true()
+		if known.has(source_id):
+			assert_str(String(entry["name"])).append_failure_message("%s: wrong name" % phase).is_equal(String(known[source_id]["name"]))
+			assert_str(String(entry["kind"])).append_failure_message("%s: wrong kind" % phase).is_equal(String(known[source_id]["kind"]))
+
+
+func test_imagery_not_found_relists_imagery_only() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	# The first imagery.tile answers E_NOT_FOUND, as a stale imagery revision does; the rest reach the backend.
+	var calls: Array = []
+	var answered := [false]
+	var seam := func(method: String, _params: Dictionary) -> IpcEnvelope:
+		calls.append(method)
+		if method == "imagery.tile" and not answered[0]:
+			answered[0] = true
+			var stale := IpcEnvelope.new()
+			stale.type = "err"
+			stale.method = method
+			stale.error = {"code": "E_NOT_FOUND", "message": "imagery revision is out of date (test)"}
+			stale.blobs = {}
+			return stale
+		return null
+	Session.set_terrain_request_override(seam)
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	assert_bool(answered[0]).is_true()
+	assert_int(calls.count("terrain.tiles")).append_failure_message(
+		"the terrain was listed again after an imagery E_NOT_FOUND (%d listings)" % calls.count("terrain.tiles")
+	).is_equal(TerrainLod.MAX_LEVEL + 1)
+	assert_int(calls.count("imagery.tiles")).append_failure_message(
+		"the imagery was not listed again after E_NOT_FOUND"
+	).is_greater(TerrainLod.MAX_LEVEL + 1)
+
+
+func test_hidden_terrain_credits_nothing() -> void:
+	if not _require_ready():
+		return
+	# The terrain layer is defined here, as main.gd defines it in the app.
+	Session.layers().define(TerrainField.LAYER_ID, "Terrain")
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	assert_bool(await _wait_until(func() -> bool: return not Session.data_sources().is_empty(), 5.0)).is_true()
+	Session.layers().set_visible(TerrainField.LAYER_ID, false)
+	var cleared := await _wait_until(func() -> bool: return Session.data_sources().is_empty(), 5.0)
+	assert_bool(cleared).append_failure_message(
+		"%d sources are still credited with the terrain hidden" % Session.data_sources().size()
+	).is_true()
+
+
+## The Session's data source entry for `source_id`, or an empty dictionary.
+func _entry_of(source_id: String) -> Dictionary:
+	for entry in Session.data_sources():
+		if String(entry["source_id"]) == source_id:
+			return entry
+	return {}
+
+
+## T-135 Part B, review round: terrain sources come in the listing's precedence, and an id the listing does not name last.
+func test_terrain_sources_are_ordered_by_precedence() -> void:
+	var precedence := PackedStringArray(["fine", "coarse"])
+	assert_array(TerrainField.terrain_order(["coarse", "other", "fine"], precedence)).is_equal(["fine", "coarse", "other"])
+	assert_array(TerrainField.terrain_order(["zeta", "alpha"], PackedStringArray())).is_equal(["alpha", "zeta"])
+	assert_array(TerrainField.terrain_order([], precedence)).is_empty()
+
+
+## T-135 Part B, review round: the imagery credit comes from the texts `imagery.tiles` gives. The real envelopes for levels 0
+## to 4 are patched with a known attribution and notice for the imagery source and returned by the Session seam, so the
+## field must copy both and credit the imagery source for the text to reach Session.data_sources().
+func test_attribution_pipeline_credits_imagery_from_its_texts() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	var listed := await Backend.request("source.list", {})
+	var imagery_id := ""
+	for source in listed.result.get("sources", []):
+		if String(source["kind"]) == "imagery":
+			imagery_id = String(source["id"])
+	assert_str(imagery_id).is_not_empty()
+
+	var text := "Patched survey text (test)"
+	var notice := "Patched licence notice (test)"
+	var patched := {}
+	for level in range(TerrainLod.MAX_LEVEL + 1):
+		var fetched := await Backend.request("imagery.tiles", {"level": level})
+		assert_str(fetched.type).append_failure_message("imagery.tiles %d failed: %s" % [level, str(fetched.error)]).is_equal("res")
+		var texts: Dictionary = fetched.result.get("attributions", {})
+		texts[imagery_id] = text
+		fetched.result["attributions"] = texts
+		var notices: Dictionary = fetched.result.get("notices", {})
+		notices[imagery_id] = PackedStringArray([notice])
+		fetched.result["notices"] = notices
+		patched[level] = fetched
+	var seam := func(method: String, params: Dictionary) -> IpcEnvelope:
+		if method == "imagery.tiles":
+			return patched[int(params["level"])]
+		return null
+	Session.set_terrain_request_override(seam)
+
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	var credited := await _wait_until(func() -> bool: return not _entry_of(imagery_id).is_empty(), 5.0)
+	assert_bool(credited).append_failure_message("the imagery source %s is not credited" % imagery_id).is_true()
+	if not credited:
+		return
+	var entry := _entry_of(imagery_id)
+	assert_str(String(entry["kind"])).is_equal("imagery")
+	assert_str(String(entry["attribution"])).append_failure_message("the field did not copy the attribution").is_equal(text)
+	assert_bool((entry["notices"] as PackedStringArray).has(notice)).append_failure_message(
+		"the field did not copy the notice"
+	).is_true()
+	# Grouped by kind: no terrain source is listed after an imagery one.
+	var seen_imagery := false
+	for data_entry in Session.data_sources():
+		if String(data_entry["kind"]) == "imagery":
+			seen_imagery = true
+		else:
+			assert_bool(seen_imagery).append_failure_message(
+				"terrain source %s is listed after an imagery source" % String(data_entry["source_id"])
+			).is_false()
+
+
+## T-135 Part B, review round: an imagery job that finishes after the terrain revision has moved is dropped, not draped, and
+## its tile asks for imagery again. At the first imagery fetch the override moves the field's terrain revision, as a re-listing
+## would, so the job in flight is stale when it attaches; a dropped job must leave the tile free to fetch again.
+func test_stale_imagery_job_is_dropped() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	var calls := []
+	var moved := [false]
+	var seam := func(method: String, _params: Dictionary) -> IpcEnvelope:
+		if method == "imagery.tile":
+			calls.append(method)
+			if not moved[0]:
+				moved[0] = true
+				_field._revision += 1
+		return null
+	Session.set_terrain_request_override(seam)
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	assert_bool(moved[0]).is_true()
+	var selected := TerrainLod.select_tiles(_camera.global_position, _field.lists())
+	assert_int(calls.size()).append_failure_message(
+		"%d imagery fetches for %d tiles: the stale job's tile did not fetch again" % [calls.size(), selected.size()]
+	).is_greater(selected.size())
+	for key in selected:
+		var tile := _field.tile_at(key)
+		assert_bool(tile.has_imagery() and tile.imagery_revision == _field.imagery_revision()).append_failure_message(
+			"tile %s is not draped with the current imagery" % key
+		).is_true()
+
+
+## T-135 Part B, review round: an imagery tile that does not decode gives one status message per imagery revision, not one per tile.
+func test_decode_failure_message_once_per_revision() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	# Every imagery tile answers with bytes that are not a JPEG.
+	var seam := func(method: String, _params: Dictionary) -> IpcEnvelope:
+		if method != "imagery.tile":
+			return null
+		var bad := IpcEnvelope.new()
+		bad.type = "res"
+		bad.method = method
+		bad.result = {"has_alpha": false, "source_ids": []}
+		bad.blobs = {"image": PackedByteArray([1, 2, 3, 4])}
+		return bad
+	var messages := []
+	var listener := func(text: String) -> void:
+		if text == "Some imagery could not be shown.":
+			messages.append(text)
+	EventBus.status_message.connect(listener)
+	Session.set_terrain_request_override(seam)
+	_field = _start_field(_CAMERA_A)
+	# The one warning of the revision is expected here; a warning per tile would fail the test as an unexpected error.
+	var reported := []
+	await assert_error(func() -> void:
+		reported.append(await _wait_until(func() -> bool: return not messages.is_empty() and _field.settled(), _FIELD_TIMEOUT_SEC))
+		for _frame in 30:
+			await get_tree().process_frame
+	).is_push_warning("TerrainField: the imagery tile is not a JPEG")
+	EventBus.status_message.disconnect(listener)
+	assert_bool(reported.size() == 1 and reported[0]).append_failure_message("the decode failure was never reported").is_true()
+	var selected := TerrainLod.select_tiles(_camera.global_position, _field.lists())
+	assert_int(selected.size()).append_failure_message("the camera selects one tile, so one tile proves nothing").is_greater(1)
+	assert_int(messages.size()).append_failure_message(
+		"%d status messages for %d undecodable tiles" % [messages.size(), selected.size()]
+	).is_equal(1)
+
+
+## True when every visible attached tile draws imagery whose boundary overlay is `on`.
+func _all_visible_overlays(on: bool) -> bool:
+	var checked := 0
+	for key in _field.attached_keys():
+		var tile := _field.tile_at(key)
+		if not tile.visible:
+			continue
+		var shown := tile.shown_material()
+		if not (shown is TerrainMaterial) or (shown as TerrainMaterial).boundaries_on() != on:
+			return false
+		checked += 1
+	return checked > 0

@@ -417,3 +417,76 @@ func test_overlay_text_and_dialog_offset_are_validated() -> void:
 	_assert_error_mentions(
 		_shot('{"name": "a", "camera": "orbit", "ui": "visible", "dialog": "settings", "dialog_offset_px": [1]}'), "dialog_offset_px"
 	)
+
+
+func test_imports_must_be_a_list_of_dictionaries() -> void:
+	var listed := Scenario.parse('{"project": "p.coypu", "imports": [{"kind": "terrain", "path": "a.xml"}], "shots": [{"name": "a", "camera": "orbit"}]}')
+	assert_array(listed.errors()).is_empty()
+	assert_int(listed.imports.size()).is_equal(1)
+	assert_str(String(listed.imports[0]["kind"])).is_equal("terrain")
+
+	var empty := Scenario.parse('{"project": "p.coypu", "imports": [], "shots": [{"name": "a", "camera": "orbit"}]}')
+	assert_array(empty.errors()).is_empty()
+	assert_bool(empty.imports.is_empty()).is_true()
+
+	_assert_error_mentions(
+		Scenario.parse('{"project": "p.coypu", "imports": "a.xml", "shots": [{"name": "a", "camera": "orbit"}]}'),
+		"imports must be an array"
+	)
+	var mixed := Scenario.parse('{"project": "p.coypu", "imports": [{"kind": "terrain"}, "a.xml"], "shots": [{"name": "a", "camera": "orbit"}]}')
+	_assert_error_mentions(mixed, "imports[1] must be an object")
+	assert_int(mixed.imports.size()).is_equal(1)
+
+
+func test_source_boundaries_must_be_a_boolean() -> void:
+	var on := _shot('{"name": "a", "camera": "orbit", "source_boundaries": true}')
+	assert_array(on.errors()).is_empty()
+	assert_bool(on.shots[0]["source_boundaries"]).is_true()
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "source_boundaries": "yes"}'), "source_boundaries must be true or false")
+
+
+## T-135 Part B, review round: a shot can name the most of the frame its scene may fill, and the driver fails it beyond that.
+func test_scene_fraction_max_is_a_fraction_and_bounds_the_shot() -> void:
+	var bounded := _shot('{"name": "a", "camera": "orbit", "scene_fraction_max": 0.15}')
+	assert_array(bounded.errors()).is_empty()
+	assert_float(float(bounded.shots[0]["scene_fraction_max"])).is_equal_approx(0.15, 1e-9)
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "scene_fraction_max": 1.5}'), "scene_fraction_max must be between 0 and 1")
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "scene_fraction_max": -0.1}'), "scene_fraction_max must be between 0 and 1")
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "scene_fraction_max": "low"}'), "scene_fraction_max must be a number")
+	assert_bool(_shot('{"name": "a", "camera": "orbit"}').shots[0].has("scene_fraction_max")).is_false()
+
+	assert_str(Scenario.scene_fraction_problem(0.03, 0.15)).is_empty()
+	assert_str(Scenario.scene_fraction_problem(0.15, 0.15)).is_empty()
+	assert_bool(Scenario.scene_fraction_problem(0.51, 0.15).contains("scene fills more of the frame")).is_true()
+
+
+func test_the_synthetic_scenario_bounds_its_from_below_shot() -> void:
+	var text := FileAccess.get_file_as_string("res://tools/capture/scenarios/terrain_synthetic.json")
+	var scenario := Scenario.parse(text)
+	assert_array(scenario.errors()).is_empty()
+	var found := false
+	for shot in scenario.shots:
+		if shot["name"] == "synthetic_from_below":
+			found = true
+			assert_float(float(shot["scene_fraction_max"])).is_equal_approx(0.15, 1e-9)
+	assert_bool(found).is_true()
+
+
+func test_the_data_sources_popover_is_a_dialog_name() -> void:
+	var scenario := _shot('{"name": "a", "camera": "orbit", "ui": "visible", "dialog": "data_sources"}')
+	assert_array(scenario.errors()).is_empty()
+	assert_str(scenario.shots[0]["dialog"]).is_equal("data_sources")
+
+
+func test_perf_first_must_be_boolean() -> void:
+	var first := Scenario.parse(
+		'{"project": "p.coypu", "shots": [{"name": "a", "camera": "orbit"}], "perf": {"camera": "cab", "time_s": 1.0, "duration_s": 2.0, "first": true}}'
+	)
+	assert_array(first.errors()).is_empty()
+	assert_bool(first.perf["first"]).is_true()
+	_assert_error_mentions(
+		Scenario.parse(
+			'{"project": "p.coypu", "shots": [{"name": "a", "camera": "orbit"}], "perf": {"camera": "cab", "time_s": 1.0, "duration_s": 2.0, "first": "yes"}}'
+		),
+		"perf: first must be true or false"
+	)

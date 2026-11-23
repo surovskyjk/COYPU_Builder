@@ -122,3 +122,22 @@ func test_file_with_crlf_line_endings_loads() -> void:
 	var settings := UserSettings.new(path)
 	assert_str(String(settings.preset_id())).is_equal("sandbox")
 	assert_float(settings.panel_opacity()).is_equal_approx(0.5, 1e-6)
+
+
+func test_source_boundary_toggle_persists() -> void:
+	var path := _temp_path()
+	var settings := UserSettings.new(path)
+	assert_bool(settings.terrain_source_boundaries()).is_false()
+	settings.set_terrain_source_boundaries(true)
+	assert_bool(settings.save()).is_true()
+	assert_bool(UserSettings.new(path).terrain_source_boundaries()).is_true()
+	settings = UserSettings.new(path)
+	settings.set_terrain_source_boundaries(false)
+	settings.save()
+	assert_bool(UserSettings.new(path).terrain_source_boundaries()).is_false()
+
+
+func test_a_damaged_boundary_value_falls_back_to_off() -> void:
+	var path := _temp_path()
+	_write_raw(path, "[interface]\nterrain_source_boundaries=yes please\n")
+	assert_bool(UserSettings.new(path).terrain_source_boundaries()).is_false()

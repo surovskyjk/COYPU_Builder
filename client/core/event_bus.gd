@@ -17,3 +17,6 @@ signal track_mesh_ready(alignment_id: String)
 signal playback_state_changed()                   # PlaybackController: TimelineState.is_playing() flipped
 signal playback_time_changed(t: float)             # PlaybackController: TimelineState.time() changed
 signal camera_changed(mode: int)                  # CameraManager.Mode
+signal source_boundaries_changed(on: bool)        # Session.set_source_boundaries: the terrain's boundary overlay (T-135 B)
+signal data_sources_changed()                     # Session.set_data_sources: the terrain and imagery sources in view (T-135 B)
+signal status_message(text: String)               # a plain sentence for the status bar, from any scene object (T-135 B)

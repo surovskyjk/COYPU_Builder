@@ -33,6 +33,27 @@ const _STATE_OK_COLOR := Color("16A34A")
 const _STATE_BAD_COLOR := Color("DC2626")
 const _STATE_PENDING_COLOR := Color("D97706")
 
+const DATA_POPOVER_SIZE := Vector2i(480, 300)
+const POPOVER_PADDING_PX := 12.0
+## The width the popover's text wraps at: the popover less its padding and the scroll bar.
+const POPOVER_WRAP_PX := 440
+const ATTRIBUTION_JOIN := " · "
+## The muted line an entry with no attribution text shows in the popover.
+const NO_ATTRIBUTION_TEXT := "No attribution recorded for this file."
+const POPOVER_INTRO := "Where the terrain and imagery on screen come from."
+const POPOVER_EMPTY := "No terrain or imagery is shown, so there are no sources to list."
+const SOURCES_TOOLTIP := "Click to see where the terrain and imagery come from."
+## The heading of each entry of the popover, by the kind of source [TerrainField] reports.
+const KIND_TITLES := {"terrain": "Terrain", "imagery": "Imagery"}
+## The attribution button is as wide as its text plus this padding, within [constant ATTRIBUTION_MIN_PX] and
+## [constant ATTRIBUTION_MAX_SHARE] of the status bar, so the status message keeps the rest of the bar.
+const ATTRIBUTION_PAD_PX := 8.0
+const ATTRIBUTION_MIN_PX := 120.0
+const ATTRIBUTION_MAX_SHARE := 0.4
+## A press on the attribution button within this many milliseconds of the popover hiding is the press that dismissed
+## it (the popover's light-dismiss hides it on the mouse press), so it does not reopen the popover.
+const REOPEN_GUARD_MSEC := 200
+
 @onready var _view_container: SubViewportContainer = %ViewContainer
 @onready var _sub_viewport: SubViewport = %SubViewport
 @onready var _chrome: Control = %Chrome
@@ -60,6 +81,12 @@ var _status_project: Label
 var _status_crs: Label
 var _status_alignments: Label
 var _status_message: Label
+var _status_sources_separator: VSeparator
+var _status_sources: Button
+var _data_popover: PopupPanel
+var _popover_entries: VBoxContainer
+var _popover_close: Button
+var _popover_hidden_msec := -REOPEN_GUARD_MSEC  # Time.get_ticks_msec() when the popover last hid
 
 var _export_dialog: EnvelopeExportDialog
 var _settings_dialog: SettingsDialog
@@ -67,6 +94,7 @@ var _settings_dialog: SettingsDialog
 
 func _ready() -> void:
 	_build_status_bar()
+	_build_data_popover()
 	_ribbon = Ribbon.new()
 	_ribbon.name = "Ribbon"
 	_ribbon.command_invoked.connect(_on_command)
@@ -103,9 +131,13 @@ func _ready() -> void:
 	EventBus.project_changed.connect(_refresh_status)
 	EventBus.alignments_changed.connect(_refresh_status)
 	EventBus.camera_changed.connect(_on_camera_changed)
+	EventBus.data_sources_changed.connect(_on_data_sources_changed)
+	EventBus.status_message.connect(show_message)
 	resized.connect(_queue_relayout)
 
 	apply_preset(_settings.preset_id(), _settings.panel_opacity())
+	set_source_boundaries(_settings.terrain_source_boundaries())
+	_on_data_sources_changed()
 	_refresh_status()
 
 
@@ -167,6 +199,19 @@ func is_chrome_visible() -> bool:
 func use_settings(settings: UserSettings) -> void:
 	_settings = settings
 	apply_preset(_settings.preset_id(), _settings.panel_opacity())
+	set_source_boundaries(_settings.terrain_source_boundaries())
+
+
+## Shows or hides the terrain's source boundaries (T-135 Part B) in the terrain scene and on the ribbon. Writes no
+## settings: [method _on_command] stores the user's choice, the capture driver poses a shot with this.
+func set_source_boundaries(on: bool) -> void:
+	Session.set_source_boundaries(on)
+	if _ribbon != null:
+		_ribbon.set_checked(Ribbon.CMD_SOURCE_BOUNDARIES, on)
+
+
+func source_boundaries() -> bool:
+	return Session.source_boundaries()
 
 
 ## Lets the camera buttons drive `manager` and show its mode.
@@ -188,6 +233,9 @@ func apply_preset(id: StringName, opacity: float = -1.0) -> void:
 		_opacity = next.panel_opacity
 	_preset = next
 	theme = _preset.theme
+	# The attribution button copies the status label's theme tokens, so it is restyled with each theme.
+	if _status_sources != null:
+		_apply_status_label_metrics(_status_sources, _status_message)
 
 	var floating := _preset.panel_mode == UiPreset.PanelMode.FLOATING
 	_place(_ribbon, _ribbon_slot, floating)
@@ -238,6 +286,11 @@ func status_message_text() -> String:
 	return _status_message.text
 
 
+## The status bar's message label, which takes the room the attribution button leaves.
+func status_message_label() -> Label:
+	return _status_message
+
+
 func show_message(text: String) -> void:
 	_status_message.text = text
 	_status_message.tooltip_text = text
@@ -270,6 +323,9 @@ func show_dialog(dialog_name: StringName, offset: Vector2i = Vector2i.ZERO) -> b
 		&"settings":
 			open_settings()
 			window = _settings_dialog
+		&"data_sources":
+			show_data_sources(offset)
+			return true
 		_:
 			return false
 	window.position += offset
@@ -279,6 +335,64 @@ func show_dialog(dialog_name: StringName, offset: Vector2i = Vector2i.ZERO) -> b
 func close_dialogs() -> void:
 	_export_dialog.hide()
 	_settings_dialog.hide()
+	close_data_sources()
+
+
+## The Data sources popover (T-135 Part B): one entry per source in view with its full attribution and notices.
+func data_sources_popover() -> PopupPanel:
+	return _data_popover
+
+
+## Opens the popover above the right end of the status bar, moved by `offset` (capture use, as for the dialogs).
+func show_data_sources(offset: Vector2i = Vector2i.ZERO) -> void:
+	var anchor := _status_bar.get_global_rect()
+	var box := DATA_POPOVER_SIZE
+	var at := Vector2i(int(anchor.end.x) - box.x - int(FLOAT_MARGIN), int(anchor.position.y) - box.y - 8) + offset
+	# Deferred: a popover closed in the same frame (see close_dialogs) would otherwise be hidden again.
+	_open_popover.call_deferred(Rect2i(at, box))
+
+
+func _open_popover(rect: Rect2i) -> void:
+	_data_popover.popup(rect)
+	_popover_close.grab_focus()
+
+
+func close_data_sources() -> void:
+	if _data_popover != null:
+		_data_popover.hide()
+
+
+## The attribution the status bar shows, or "" when no source is in view.
+func attribution_text() -> String:
+	return _status_sources.text if _status_sources.visible else ""
+
+
+## The status bar's attribution button, which opens the popover (a flat button, reachable with Tab).
+func attribution_button() -> Button:
+	return _status_sources
+
+
+## What the status bar shows for `entries` (dictionaries of `source_id`, `attribution` and `notices`, as
+## `Session.data_sources()` holds them): each distinct real attribution text once, joined with " · ". When sources
+## are in view but none has a text, "N data sources" (or "1 data source"). Empty when there are no entries.
+static func attribution_summary(entries: Array) -> String:
+	if entries.is_empty():
+		return ""
+	var lines := PackedStringArray()
+	for entry: Variant in entries:
+		var text := String((entry as Dictionary).get("attribution", "")).strip_edges()
+		if not text.is_empty() and not lines.has(text):
+			lines.append(text)
+	if lines.is_empty():
+		return "%d data source%s" % [entries.size(), "" if entries.size() == 1 else "s"]
+	return ATTRIBUTION_JOIN.join(lines)
+
+
+## The popover's heading for one entry: "Kind · name", or the kind alone when the source has no name.
+static func source_heading(entry: Dictionary) -> String:
+	var kind: String = KIND_TITLES.get(String(entry.get("kind", "")), "Data")
+	var name := String(entry.get("name", "")).strip_edges()
+	return kind if name.is_empty() else "%s · %s" % [kind, name]
 
 
 ## Window rectangles (in window coordinates) of everything that is chrome: the visible ribbon, panels, status
@@ -296,6 +410,8 @@ func chrome_rects() -> Array[Rect2]:
 	for window: Window in [_export_dialog, _settings_dialog]:
 		if window.visible:
 			rects.append(Rect2(Vector2(window.position) - Vector2(1.0, 36.0), Vector2(window.size) + Vector2(2.0, 37.0)))
+	if _data_popover != null and _data_popover.visible:
+		rects.append(Rect2(Vector2(_data_popover.position), Vector2(_data_popover.size)))
 	return rects
 
 
@@ -388,9 +504,124 @@ func _on_command(id: StringName) -> void:
 			open_envelope_export()
 		Ribbon.CMD_SETTINGS:
 			open_settings()
+		Ribbon.CMD_SOURCE_BOUNDARIES:
+			var on := not _settings.terrain_source_boundaries()
+			_settings.set_terrain_source_boundaries(on)
+			_settings.save()
+			set_source_boundaries(on)
 		_:
 			if Ribbon.CAMERA_COMMANDS.has(id) and _camera_manager != null:
 				_camera_manager.set_mode(Ribbon.CAMERA_COMMANDS[id])
+
+
+## Keeps the attribution button and the popover in step with the sources in view.
+func _on_data_sources_changed() -> void:
+	if _status_sources == null:
+		return
+	var entries := Session.data_sources()
+	var summary := attribution_summary(entries)
+	var shown := not entries.is_empty()
+	_status_sources_separator.visible = shown
+	_status_sources.visible = shown
+	_status_sources.text = summary
+	_status_sources.tooltip_text = SOURCES_TOOLTIP
+	_fit_attribution_button()
+	_refresh_data_popover()
+
+
+## The attribution button opens the popover, or closes it when it is open. A flat button, so Tab reaches it and
+## Enter presses it. A press just after the popover hid (its light-dismiss) does not reopen it.
+func _on_sources_pressed() -> void:
+	if _data_popover.visible:
+		close_data_sources()
+		return
+	if Time.get_ticks_msec() - _popover_hidden_msec < REOPEN_GUARD_MSEC:
+		return
+	show_data_sources()
+
+
+func _on_popover_hidden() -> void:
+	_popover_hidden_msec = Time.get_ticks_msec()
+
+
+func _build_data_popover() -> void:
+	_data_popover = PopupPanel.new()
+	_data_popover.name = "DataSources"
+	_data_popover.popup_hide.connect(_on_popover_hidden)
+	add_child(_data_popover)
+
+	# A fixed width before the first layout: autowrapping labels in a zero-width column report a huge height, and the
+	# popover would open far too tall.
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override(&"separation", 10)
+	column.custom_minimum_size = Vector2(DATA_POPOVER_SIZE.x - 2 * int(POPOVER_PADDING_PX), 0)
+	_data_popover.add_child(column)
+
+	var title := Label.new()
+	title.text = "Data sources"
+	column.add_child(title)
+
+	var hint := Label.new()
+	hint.theme_type_variation = &"HintLabel"
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.custom_minimum_size = Vector2(POPOVER_WRAP_PX, 0)
+	hint.text = POPOVER_INTRO
+	column.add_child(hint)
+
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.custom_minimum_size = Vector2(DATA_POPOVER_SIZE.x - 2 * POPOVER_PADDING_PX, 160)
+	column.add_child(scroll)
+	_popover_entries = VBoxContainer.new()
+	_popover_entries.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_popover_entries.add_theme_constant_override(&"separation", 8)
+	_popover_entries.custom_minimum_size = Vector2(POPOVER_WRAP_PX, 0)
+	scroll.add_child(_popover_entries)
+
+	_popover_close = Button.new()
+	_popover_close.name = "Close"
+	_popover_close.text = "Close"
+	_popover_close.size_flags_horizontal = Control.SIZE_SHRINK_END
+	_popover_close.pressed.connect(close_data_sources)
+	column.add_child(_popover_close)
+
+
+## A label that wraps at [constant POPOVER_WRAP_PX]: the width is fixed, so the popover's first layout is already right.
+func _wrapped_label(text: String, variation: StringName) -> Label:
+	var label := Label.new()
+	if variation != &"":
+		label.theme_type_variation = variation
+	label.text = text
+	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	label.custom_minimum_size = Vector2(POPOVER_WRAP_PX, 0)
+	return label
+
+
+## Rebuilds the popover's entries from `Session.data_sources()`: the full attribution of each source, then its notices.
+func _refresh_data_popover() -> void:
+	if _popover_entries == null:
+		return
+	for child in _popover_entries.get_children():
+		_popover_entries.remove_child(child)
+		child.queue_free()
+	var entries := Session.data_sources()
+	if entries.is_empty():
+		_popover_entries.add_child(_wrapped_label(POPOVER_EMPTY, &"HintLabel"))
+		return
+	for entry: Variant in entries:
+		var source := entry as Dictionary
+		if _popover_entries.get_child_count() > 0:
+			_popover_entries.add_child(HSeparator.new())
+		var heading := _wrapped_label(source_heading(source), &"HintLabel")
+		_popover_entries.add_child(heading)
+		var text := String(source.get("attribution", "")).strip_edges()
+		if text.is_empty():
+			_popover_entries.add_child(_wrapped_label(NO_ATTRIBUTION_TEXT, &"HintLabel"))
+		else:
+			_popover_entries.add_child(_wrapped_label(text, &""))
+		var notices: PackedStringArray = source.get("notices", PackedStringArray())
+		for notice in notices:
+			_popover_entries.add_child(_wrapped_label(notice, &"HintLabel"))
 
 
 func _on_camera_changed(mode: int) -> void:
@@ -434,6 +665,25 @@ func _build_status_bar() -> void:
 	_status_message.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_segments.add_child(_status_message)
 
+	# The attribution of the sources in view, on the right; a click opens the Data sources popover (T-135 B). The
+	# message takes the room the attribution leaves, and the attribution is only as wide as its text (see
+	# _fit_attribution_button), so a status or export message is not cut to a fraction of the bar.
+	_status_sources_separator = VSeparator.new()
+	_status_sources_separator.visible = false
+	_segments.add_child(_status_sources_separator)
+	_status_sources = Button.new()
+	_status_sources.flat = true
+	_status_sources.focus_mode = Control.FOCUS_ALL
+	_status_sources.alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_status_sources.clip_text = true
+	_status_sources.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_status_sources.size_flags_horizontal = Control.SIZE_SHRINK_END
+	_status_sources.custom_minimum_size = Vector2(0, 0)
+	_status_sources.visible = false
+	_status_sources.pressed.connect(_on_sources_pressed)
+	_segments.add_child(_status_sources)
+	_status_bar.resized.connect(_fit_attribution_button)
+
 
 func _status_label(expand: bool) -> Label:
 	var label := Label.new()
@@ -444,6 +694,48 @@ func _status_label(expand: bool) -> Label:
 		label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		label.clip_text = true
 	return label
+
+
+## Gives `button` the metrics of the status `label`: its font, font size and colour from the label's theme tokens, no
+## content margins and empty flat style boxes for the normal, hover, pressed and disabled states, so the button is no
+## taller than the label and the status bar keeps its height when the button appears. The focus style is the theme's own,
+## so keyboard focus shows; a focus style does not change the minimum size. On hover the text takes the accent the ribbon's
+## active buttons use (`RibbonButton`'s pressed font colour), since the theme gives no separate hover colour to them.
+static func _apply_status_label_metrics(button: Button, label: Label) -> void:
+	button.add_theme_font_override(&"font", label.get_theme_font(&"font"))
+	button.add_theme_font_size_override(&"font_size", label.get_theme_font_size(&"font_size"))
+	var colour := label.get_theme_color(&"font_color")
+	var accent := label.get_theme_color(&"font_pressed_color", &"RibbonButton")
+	button.add_theme_color_override(&"font_color", colour)
+	button.add_theme_color_override(&"font_pressed_color", colour)
+	button.add_theme_color_override(&"font_focus_color", colour)
+	button.add_theme_color_override(&"font_disabled_color", colour)
+	button.add_theme_color_override(&"font_hover_color", accent)
+	button.add_theme_color_override(&"font_hover_pressed_color", accent)
+	for style_name: StringName in [&"normal", &"hover", &"pressed", &"hover_pressed", &"disabled"]:
+		button.add_theme_stylebox_override(style_name, _flat_empty_style())
+
+
+static func _flat_empty_style() -> StyleBoxEmpty:
+	var style := StyleBoxEmpty.new()
+	style.content_margin_left = 0.0
+	style.content_margin_top = 0.0
+	style.content_margin_right = 0.0
+	style.content_margin_bottom = 0.0
+	return style
+
+
+## Sizes the attribution button to its text plus [constant ATTRIBUTION_PAD_PX], between [constant ATTRIBUTION_MIN_PX]
+## and [constant ATTRIBUTION_MAX_SHARE] of the status bar's width. Called when the text changes and when the bar is
+## resized.
+func _fit_attribution_button() -> void:
+	if _status_sources == null:
+		return
+	var font := _status_sources.get_theme_font(&"font")
+	var font_px := _status_sources.get_theme_font_size(&"font_size")
+	var text_px := font.get_string_size(_status_sources.text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_px).x
+	var widest := maxf(ATTRIBUTION_MIN_PX, _status_bar.size.x * ATTRIBUTION_MAX_SHARE)
+	_status_sources.custom_minimum_size.x = clampf(text_px + ATTRIBUTION_PAD_PX, ATTRIBUTION_MIN_PX, widest)
 
 
 func _state_color(state: Backend.State) -> Color:

@@ -1,0 +1,35 @@
+{
+  "project": "backend/tests/fixtures/kralupy/kralupy_neratovice_092.coypu",
+  "resolution": [1600, 900],
+  "ready_timeout_s": 120,
+  "imports": [
+    {
+      "kind": "terrain",
+      "path": "client/tests/fixtures/terrain/synthetic_tin_coarse.xml",
+      "name": "Synthetic coarse surface",
+      "settings": {"horizontal_crs": "EPSG:5514"}
+    },
+    {
+      "kind": "terrain",
+      "path": "client/tests/fixtures/terrain/synthetic_tin.xml",
+      "name": "Synthetic cutting",
+      "settings": {"horizontal_crs": "EPSG:5514"}
+    },
+    {
+      "kind": "imagery",
+      "path": "client/tests/fixtures/terrain/synthetic_ortho.png",
+      "name": "Synthetic orthophoto",
+      "settings": {"horizontal_crs": "EPSG:5514"}
+    }
+  ],
+  "shots": [
+    {"name": "synthetic_above", "camera": "orbit", "time_s": 900.0, "orbit_zoom_notches": 22, "orbit_drag_px": [0, -60], "settle_frames": 60},
+    {"name": "synthetic_low_oblique", "camera": "orbit", "time_s": 900.0, "orbit_zoom_notches": -10, "orbit_drag_px": [0, 100], "settle_frames": 60},
+    {"name": "synthetic_from_below", "camera": "orbit", "time_s": 950.0, "orbit_zoom_notches": -11, "orbit_drag_px": [0, 500], "settle_frames": 60, "scene_fraction_max": 0.15},
+    {"name": "synthetic_boundaries", "camera": "orbit", "time_s": 900.0, "orbit_zoom_notches": 22, "orbit_drag_px": [0, -126], "settle_frames": 60, "source_boundaries": true},
+    {"name": "synthetic_f_from_above", "camera": "orbit", "time_s": 873.0, "orbit_zoom_notches": -9, "orbit_drag_px": [0, -300], "settle_frames": 60},
+    {"name": "synthetic_data_sources", "camera": "orbit", "time_s": 873.0, "settle_frames": 60, "source_boundaries": true, "ui": "visible", "preset": "engineering", "dialog": "data_sources"},
+    {"name": "synthetic_data_sources_sandbox", "camera": "orbit", "time_s": 873.0, "settle_frames": 60, "source_boundaries": true, "ui": "visible", "preset": "sandbox", "dialog": "data_sources"}
+  ],
+  "perf": {"camera": "cab", "time_s": 776.0, "rate": 4.0, "duration_s": 30.0, "first": true}
+}
