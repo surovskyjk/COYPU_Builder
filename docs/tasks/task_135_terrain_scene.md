@@ -217,6 +217,81 @@ Read before starting:
   - clicking it opens a **Data sources** popover that lists each source's full attribution and its
     `notices` (the Copernicus liability notice, for one), with a Close button and Escape to close.
 
+### Review decisions (Part B, 2026-11-23)
+
+The first review failed Part B on one blocker and found the synthetic scene too small to prove what it
+was for. These decisions are now part of the contract:
+
+- **Orientation:**
+  - `source_index` follows the heights convention: row 0 is south. Its `Image` is flipped with
+    `flip_y()` right after `create_from_data`, in the worker task, so the shader samples it with the same
+    UV as the albedo.
+  - A test pins this. One non-zero byte at data row r, column c must be read back at the texel of vertex
+    (r, c) of a mesh from `HeightfieldMesh.build`.
+- **Boundaries without imagery:**
+  - While the toggle is on, a tile without draped imagery (imagery layer hidden, imagery not yet arrived,
+    or a decode failure) gets a `TerrainMaterial` with a flat neutral albedo and its own `source_tex`.
+  - While the toggle is off, it keeps the shared neutral `StandardMaterial3D`.
+- **The synthetic scene** (`tools/make_synthetic_terrain.py`):
+  - **A second, coarse terrain source**, `synthetic_tin_coarse.xml`:
+    - about 150 m point spacing, so its resolution band differs from the fine TIN's (about 50 m);
+    - wider than the fine TIN by about 1 km on each side;
+    - slightly below the fine plateau, so the seam is visible;
+    - imported before the fine TIN.
+  - **The orthophoto** is widened to the coarse extent.
+  - **A hill** about 16 m high over the line where the train dwells, so the orbit camera, at its clamped
+    pitch, sits under the ground for the from-below shot.
+  - **The "F" marker** lies inside the fine TIN's hull, at a plan position the generator computes.
+  - **Triangulation** splits each grid cell along a fixed diagonal instead of calling Delaunay, so the
+    fixtures do not depend on the qhull version.
+  - Every fixture stays under 100 kB.
+- **Shots:**
+  - a close top-down view of the "F", which must read upright and unmirrored;
+  - the from-below shot under the hill, where the terrain must be culled;
+  - the boundaries from above, where the seam must follow the fine TIN's outline;
+  - the Data sources popover in both presets;
+  - in `ui_shell`, the popover's empty state in both presets.
+- **Perf:**
+  - The perf block runs first, over the two-TIN scene, so tiles stream inside the window.
+  - The manifest counts imagery drapes as well as terrain builds.
+- **Attribution and the popover:**
+  - **No credit when the terrain is hidden:** with the Terrain layer hidden, nothing is credited.
+  - **Popover entries:** each entry shows `Kind · name`, from `source.list`, as a muted heading, then the
+    attribution and the notices. An empty attribution reads, muted, "No attribution recorded for this
+    file."
+  - **Popover intro and empty state:** the intro reads "Where the terrain and imagery on screen come
+    from." The empty state reads "No terrain or imagery is shown, so there are no sources to list."
+  - **Status bar text:** it shows only real attribution texts, joined with " · ". When sources are in
+    view but none has a text, it reads "N data sources".
+  - **Status bar control:** it is a flat button, so Tab reaches it and Enter opens the popover. Its
+    tooltip reads "Click to see where the terrain and imagery come from."
+  - **Focus:** the popover gives its Close button the initial focus.
+- **Errors:** an imagery decode failure shows a status message once per imagery revision, not only a
+  warning in the log.
+
+**Re-review (2026-11-23).** The fix round passed. The re-review proved the overlay is no longer mirrored on
+the GPU, against a negative control, and that the from-below shot discriminates, against a culling-off
+control. These decisions follow from it:
+
+- **One flip.** A single helper builds the source `Image` and flips it, for the draped material and for
+  the boundary-only material alike. Each material has its own texel-of-vertex test.
+- **Status bar:**
+  - The status message has priority. The attribution button shrinks to its text, between 120 px and 40 %
+    of the bar, so a status or export message is never cut to a fraction of the bar.
+  - The button has the status label's metrics, so the bar does not change height when it appears.
+  - Clicking it while the popover is open closes the popover.
+- **Popover order:**
+  - Entries are grouped by kind, terrain first, then imagery. Within each kind they follow precedence,
+    highest first: terrain by the order of `source_ids`, imagery by the first-seen order across the
+    visible tiles' `source_ids`.
+  - The status line uses the same order, so elision drops the least important text first.
+  - Entries are separated visibly.
+- **Escape:** the popover relies on `Popup`'s own `ui_cancel` handling, tested with a key pushed through
+  the viewport. No shell handler that never sees the key.
+- **Tooltip:** the static tooltip above replaces the earlier "full list in the tooltip".
+- **The from-below shot checks itself:** a per-shot `scene_fraction_max` capture key fails the scenario if
+  the culled view fills more of the frame than it should.
+
 ### Acceptance criteria (Part B)
 
 1. **Material** (`test_terrain_material.gd`):
@@ -236,7 +311,17 @@ Read before starting:
    - p95 stays under 16.7 ms while tiles stream.
    - The reviewer judges the shots, and a `ui_shell` capture with the Data sources popover open.
 5. **`imports` key:** `test_imports_must_be_a_list_of_dictionaries`, in `test_capture_scenario.gd`.
-6. **No regressions:** as Part A.
+6. **From the review:**
+   - `test_source_map_texel_matches_its_vertex`;
+   - `test_boundaries_show_without_imagery`;
+   - `test_boundary_toggle_reaches_every_tile`;
+   - `test_attribution_names_the_sources_and_skips_relief`, checking known source ids against
+     `source.list`, a relief tile, and a non-empty attribution with a notice;
+   - `test_imagery_not_found_relists_imagery_only`, driven through the `Session` request override;
+   - `test_hidden_terrain_credits_nothing`;
+   - `test_popover_closes_on_escape_and_close`;
+   - `test_status_attribution_is_keyboard_reachable`.
+7. **No regressions:** as Part A.
 
 ## Part C — capture
 
@@ -311,6 +396,7 @@ tools\godot\Godot_v4.7.2-stable_win64_console.exe --headless --path client --edi
 tools\godot\Godot_v4.7.2-stable_win64_console.exe --headless --path client -s addons/gdUnit4/bin/GdUnitCmdTool.gd -a tests --ignoreHeadlessMode
 powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Scenario kralupy_m2
 powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Scenario ui_shell
+powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Scenario terrain_synthetic   # Part B, on the GPU
 powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Scenario terrain_kralupy   # Part C, with COYPU_DATA set
 ```
 
