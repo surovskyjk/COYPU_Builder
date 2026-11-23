@@ -35,31 +35,48 @@ class TrackFrames:
         return len(self.station)
 
 
+_CANDIDATE_CHUNK = 200_000
+"""Candidate stations evaluated per vectorised `h.curvature` call (about 1.6 MB of float64 per chunk)."""
+
+
 def curvature_side(
     alignment: Alignment, s: np.ndarray, search_m: float = 250.0, step_m: float = 5.0
 ) -> np.ndarray:
     """sign(κ) at s; on straights, the sign of the nearest curved station within ±search_m (0 if none).
 
     Cant ramps that run onto a straight need to know which side is 'inside'; the adjacent curve tells us.
+    Candidates are tried in the order +step, −step, +2·step, −2·step, …, so a tie goes to the forward one.
+    Candidates outside the alignment are skipped, not clamped. A station with a curvature below
+    CURVATURE_EPS but not zero keeps sign(κ) unless the first ±step candidate is curved.
     """
     h = alignment.horizontal
+    s = s_array(s)
     k = h.curvature(s)
     side = np.sign(k)
-    flat = np.abs(k) < CURVATURE_EPS
-    if not np.any(flat):
-        return side
+    flat = np.flatnonzero(np.abs(k) < CURVATURE_EPS)
     offsets = np.arange(step_m, search_m + step_m, step_m)
-    for i in np.flatnonzero(flat):
-        si = s[i]
-        for d in offsets:
-            for cand in (si + d, si - d):
-                if h.stations[0] <= cand <= h.stations[-1]:
-                    kc = h.curvature(cand)[0]
-                    if abs(kc) >= CURVATURE_EPS:
-                        side[i] = np.sign(kc)
-                        break
-            if side[i] != 0:
-                break
+    if flat.size == 0 or offsets.size == 0:
+        return side
+    width = 2 * offsets.size
+    columns = np.arange(width)
+    rows_per_chunk = max(1, _CANDIDATE_CHUNK // width)
+    for start in range(0, flat.size, rows_per_chunk):
+        idx = flat[start : start + rows_per_chunk]
+        si = s[idx]
+        cands = np.empty((idx.size, width))
+        cands[:, 0::2] = si[:, None] + offsets
+        cands[:, 1::2] = si[:, None] - offsets
+        kc = h.curvature(cands.ravel()).reshape(cands.shape)
+        reach = np.where(k[idx] != 0.0, 2, width)
+        usable = (
+            (cands >= h.stations[0])
+            & (cands <= h.stations[-1])
+            & (np.abs(kc) >= CURVATURE_EPS)
+            & (columns < reach[:, None])
+        )
+        rows = np.flatnonzero(usable.any(axis=1))
+        first = usable[rows].argmax(axis=1)
+        side[idx[rows]] = np.sign(kc[rows, first])
     return side
 
 
