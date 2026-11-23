@@ -52,9 +52,9 @@ def read_envelope_file(path: Path):
     from pyproj import CRS
 
     from coypu_builder.domain.crs import ProjectCRS
-    from coypu_builder.io.gis.envelope import GEOJSON_SUFFIXES, SHAPEFILE_SUFFIX, _require
+    from coypu_builder.io.gis.envelope import GEOJSON_SUFFIXES, SHAPEFILE_SUFFIX, require
 
-    shapely = _require("shapely")
+    shapely = require("shapely")
     suffix = path.suffix.lower()
     if suffix in GEOJSON_SUFFIXES:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -64,7 +64,7 @@ def read_envelope_file(path: Path):
         raw = [item.get("geometry") if item.get("type") == "Feature" else item for item in items]
         geometries = [shapely.geometry.shape(g) for g in raw if g]
     elif suffix == SHAPEFILE_SUFFIX:
-        shapefile = _require("shapefile")
+        shapefile = require("shapefile")
         prj = path.with_suffix(".prj")
         if not prj.is_file():
             raise ValueError(f"{prj.name} is missing; the Shapefile carries no CRS")

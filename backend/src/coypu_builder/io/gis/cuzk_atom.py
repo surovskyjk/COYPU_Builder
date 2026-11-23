@@ -31,7 +31,7 @@ from uuid import uuid4
 import numpy as np
 
 from coypu_builder import __version__
-from coypu_builder.io.gis.envelope import _require
+from coypu_builder.io.gis.envelope import require
 
 if TYPE_CHECKING:
     from coypu_builder.domain.crs import ProjectCRS
@@ -166,7 +166,7 @@ def user_agent() -> str:
 
 
 def _session():
-    requests = _require("requests")
+    requests = require("requests")
     session = requests.Session()
     session.headers["User-Agent"] = user_agent()
     return session
@@ -175,7 +175,7 @@ def _session():
 def _request(session, method: str, url: str, *, headers=None, stream: bool = False, ok=(200,)):
     """One request with redirects followed by hand, each hop checked before it is sent. Statuses in `ok`
     are returned; 5xx and transport failures raise `_Retryable`; any other status is final."""
-    requests = _require("requests")
+    requests = require("requests")
     transient = (
         requests.Timeout,
         requests.ConnectionError,
@@ -329,7 +329,7 @@ def _parse_entry(entry, dataset: CuzkDataset) -> SheetEntry:
 def _iter_entries(content: bytes, what: str):
     """Yield every Atom `entry` of a feed, parsed safely: DTDs, entity expansion and external references
     are refused."""
-    defused = _require("defusedxml")
+    defused = require("defusedxml")
     from defusedxml import ElementTree as safe_et
 
     try:
@@ -451,7 +451,7 @@ def select_sheets(index: Sequence[SheetEntry], envelope, project_crs: ProjectCRS
     """The sheets whose outline overlaps `envelope` (a shapely geometry in `project_crs`), in index order.
     Outlines are stored (longitude, latitude) and transformed with x = longitude first; sheets that merely
     touch the envelope's boundary are not selected."""
-    shapely = _require("shapely")
+    shapely = require("shapely")
     entries = list(index)
     if not entries or envelope.is_empty:
         return []
@@ -636,7 +636,7 @@ def _prepare_part(part: Path, probe: _Probe, expected: int) -> int:
 
 def _transfer(session, f: SheetFile, part: Path, probe: _Probe, progress, name: str):
     """One attempt to fill `part`, resuming from what is already there. Returns the response headers."""
-    requests = _require("requests")
+    requests = require("requests")
     expected = f.length
     have = _prepare_part(part, probe, expected)
     headers: dict[str, str] = {}

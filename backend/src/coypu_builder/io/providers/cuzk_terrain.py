@@ -40,7 +40,7 @@ MAX_SHEETS = 200  # a clip that selects more sheets is refused before any sheet 
 
 
 @contextmanager
-def _service_errors() -> Iterator[None]:
+def service_errors() -> Iterator[None]:
     """What the ATOM client raises, as the exceptions the import handlers know: a limit the user can raise is
     a `ValueError`, a service or network failure an `OSError`."""
     try:
@@ -89,7 +89,7 @@ class CuzkTerrainProvider:
         context = provider_context()
         clip = clip_from_query(query, DEFAULT_BUFFER_M)
         polygon = context.clip_polygon(clip)
-        with _service_errors():
+        with service_errors():
             index = cuzk_atom.load_sheet_index(self._dataset, directory)
             sheets = cuzk_atom.select_sheets(index, polygon, context.project_crs)
         if len(sheets) > MAX_SHEETS:
@@ -109,7 +109,7 @@ class CuzkTerrainProvider:
         extent = None
         total = 0
         if sheets:
-            with _service_errors():
+            with service_errors():
                 files = cuzk_atom.resolve_files(sheets, directory)
             total = sum(f.length for f in files)
             lon = np.array([p[0] for s in sheets for p in s.outline_lonlat])
@@ -145,9 +145,9 @@ class CuzkTerrainProvider:
         if not sheets:
             raise ValueError("no ČÚZK sheet overlaps the clip region")
         cache = provider_cache.ProviderCache(directory)
-        with _service_errors():
+        with service_errors():
             files = cuzk_atom.resolve_files(sheets, directory)
-            _discard_corrupted(files, directory)
+            discard_corrupted(files, directory)
             records = cuzk_atom.download(
                 files,
                 directory,
@@ -168,7 +168,7 @@ class CuzkTerrainProvider:
         return [cache.path(name) for name in names]
 
 
-def _discard_corrupted(files: list[cuzk_atom.SheetFile], directory: Path) -> None:
+def discard_corrupted(files: list[cuzk_atom.SheetFile], directory: Path) -> None:
     """Delete a cached ZIP whose SHA-256 is no longer the one its manifest record holds, so that the download
     fetches it again. A ZIP without a record, or one that is missing, is left to the download."""
     recorded = {record.file: record.sha256 for record in cuzk_atom.read_manifest(directory)}

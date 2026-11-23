@@ -70,7 +70,7 @@ from coypu_builder.io.gis.envelope import (
     export_corridor_envelope,
     validate_output_crs,
 )
-from coypu_builder.io.imagery import layer_for_payload, register_imagery_readers
+from coypu_builder.io.imagery import layer_for_payload, register_imagery_readers, tile_report
 from coypu_builder.io.landxml import LandXmlAlignment, read_landxml, to_alignment
 from coypu_builder.io.mesh.imagery_tiles import ImageryTile, compose_tile, height_range
 from coypu_builder.io.mesh.terrain_tiles import (
@@ -1676,12 +1676,13 @@ async def _range_into(session: Session, imagery: ImageryCache, stack) -> None:
 
 async def _compose(
     session: Session, imagery: ImageryCache, terrain: TerrainCache, level: int, ix: int, iy: int
-) -> ImageryTile:
-    """The imagery tile, from the cache or composed in a worker thread. Concurrent requests for one tile of
-    one revision share one composition, as `_bake` does for terrain."""
+) -> tuple[ImageryTile, bool]:
+    """The imagery tile and whether it is complete, from the cache or composed in a worker thread. Concurrent
+    requests for one tile of one revision share one composition, as `_bake` does for terrain. A tile is
+    complete unless a streamed layer could not load one of its tiles; only complete tiles are cached."""
     tile = imagery.get_tile(level, ix, iy)
     if tile is not None:
-        return tile
+        return tile, True
     key = (level, ix, iy)
     future = imagery.composing.get(key)
     if future is None:
@@ -1691,17 +1692,27 @@ async def _compose(
     return await asyncio.shield(future)
 
 
+def _compose_blocking(
+    layers: tuple[ImageryLayer, ...] | None, stack, heights_range, level: int, ix: int, iy: int
+) -> tuple[ImageryTile, bool]:
+    """Runs in a worker thread: the tile, and whether every streamed tile of it was loaded."""
+    with tile_report() as report:
+        tile = compose_tile(layers, stack, heights_range, level, ix, iy)
+    return tile, report.missing == 0
+
+
 async def _compose_into(
     session: Session, imagery: ImageryCache, terrain: TerrainCache, level: int, ix: int, iy: int
-) -> ImageryTile:
+) -> tuple[ImageryTile, bool]:
     key = (level, ix, iy)
     try:
         async with session.gate:
-            tile = await asyncio.to_thread(
-                compose_tile, imagery.layers, terrain.stack, imagery.heights_range, level, ix, iy
+            tile, complete = await asyncio.to_thread(
+                _compose_blocking, imagery.layers, terrain.stack, imagery.heights_range, level, ix, iy
             )
-        imagery.put_tile(tile)
-        return tile
+        if complete:  # a degraded composition is answered, but not kept: the next request tries again
+            imagery.put_tile(tile)
+        return tile, complete
     finally:
         imagery.composing.pop(key, None)
 
@@ -1736,9 +1747,19 @@ async def handle_imagery_tiles(session: Session, params: dict[str, Any] | None) 
         tiles=tuple(tiles),
         attributions=dict(imagery.attributions),
         notices=dict(imagery.notices),
-        warnings=imagery.warnings,
+        warnings=(*imagery.warnings, *_layer_warnings(imagery.layers)),
     )
     return msgspec.to_builtins(result), {}
+
+
+def _layer_warnings(layers: tuple[ImageryLayer, ...] | None) -> tuple[str, ...]:
+    """What the layers have reported while they rendered: a streamed tile that could not be loaded (T-134)."""
+    found: list[str] = []
+    for layer in layers or ():
+        collect = getattr(layer, "warning_messages", None)
+        if callable(collect):
+            found.extend(collect())
+    return tuple(found)
 
 
 async def handle_imagery_tile(session: Session, params: dict[str, Any] | None) -> HandlerResult:
@@ -1755,7 +1776,7 @@ async def handle_imagery_tile(session: Session, params: dict[str, Any] | None) -
     if (req.ix, req.iy) not in set(_level_keys(terrain, level)):
         raise ProtocolError(ErrorCode.NOT_FOUND, f"no terrain tile {level}/{req.ix}/{req.iy}")
     imagery = await _ensure_imagery(session, imagery, terrain)
-    tile = await _compose(session, imagery, terrain, level, req.ix, req.iy)
+    tile, complete = await _compose(session, imagery, terrain, level, req.ix, req.iy)
     result = ImageryTileResult(
         level=tile.level,
         ix=tile.ix,
@@ -1764,6 +1785,7 @@ async def handle_imagery_tile(session: Session, params: dict[str, Any] | None) -
         revision=imagery.revision,
         has_alpha=tile.alpha is not None,
         source_ids=tile.source_ids,
+        complete=complete,
     )
     blobs: dict[str, np.ndarray] = {"image": np.frombuffer(tile.jpeg, dtype=np.uint8)}
     if tile.alpha is not None:

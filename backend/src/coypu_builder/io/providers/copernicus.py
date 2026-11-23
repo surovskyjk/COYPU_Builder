@@ -35,7 +35,7 @@ import numpy as np
 
 from coypu_builder import __version__
 from coypu_builder.domain.sources import ImportSettings, SourceKind
-from coypu_builder.io.gis.envelope import _require
+from coypu_builder.io.gis.envelope import require
 from coypu_builder.io.providers import cache as provider_cache
 from coypu_builder.io.providers import (
     check_keys,
@@ -150,7 +150,7 @@ class _Http:
     """Range reads over `requests`, with every hop checked and every byte counted."""
 
     def __init__(self) -> None:
-        requests = _require("requests")
+        requests = require("requests")
         self._requests = requests
         self._session = requests.Session()
         self._session.headers["User-Agent"] = f"COYPU-Builder/{__version__} (Copernicus DEM client)"
@@ -502,7 +502,7 @@ class CopernicusGlo30Provider:
         cache: provider_cache.ProviderCache,
         key: str,
     ) -> None:
-        rasterio = _require("rasterio")
+        rasterio = require("rasterio")
         from rasterio.windows import Window
 
         from coypu_builder.io.terrain.raster import clip_window

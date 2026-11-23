@@ -496,6 +496,7 @@ class ImageryTileResult(msgspec.Struct, frozen=True):
     height: int = 512
     has_alpha: bool = False  # true when the `alpha` blob is present
     source_ids: tuple[str, ...] = ()  # imagery sources that won a pixel, then "relief" if relief filled any
+    complete: bool = True  # false when a streamed tile was missing: the tile is not kept, ask again
 
 
 # --- alignment.envelope ----------------------------------------------------------------------------------

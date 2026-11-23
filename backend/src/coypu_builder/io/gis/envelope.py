@@ -44,7 +44,7 @@ class GisExtraMissing(RuntimeError):
     """An optional GIS dependency is not installed; the message names the command that installs it."""
 
 
-def _require(module: str) -> Any:
+def require(module: str) -> Any:
     try:
         return import_module(module)
     except ImportError as exc:
@@ -118,7 +118,7 @@ class EnvelopeResult:
 
 def corridor_envelope(alignments: Sequence[Alignment], options: EnvelopeOptions):
     """Shapely Polygon or MultiPolygon in the project CRS: the union of each alignment's buffer."""
-    shapely = _require("shapely")
+    shapely = require("shapely")
     if not alignments:
         raise ValueError("at least one alignment is required")
     ranged = options.station_from is not None or options.station_to is not None
@@ -186,7 +186,7 @@ def write_envelope(
     overwrite: bool = True,
 ) -> EnvelopeResult:
     """Write `geometry` (project CRS) to `path`; the suffix picks GeoJSON (.geojson, .json) or Shapefile."""
-    shapely = _require("shapely")
+    shapely = require("shapely")
     path = Path(path)
     suffix = path.suffix.lower()
     is_geojson = suffix in GEOJSON_SUFFIXES
@@ -201,7 +201,7 @@ def write_envelope(
     check_overwrite(path, overwrite)
     prj_wkt = None
     if not is_geojson:
-        _require("shapefile")
+        require("shapefile")
         prj_wkt = _esri_wkt(target)
 
     try:
@@ -304,7 +304,7 @@ def _dbf_value(value: str | float | None) -> str | float | None:
 
 def _write_shapefile(polygons, shp: Path, prj_wkt: str, attributes) -> None:
     """Build the .shp/.shx/.dbf in memory so a failure never leaves an open or half-written file."""
-    shapefile = _require("shapefile")
+    shapefile = require("shapefile")
     rings = [list(map(tuple, _ring(r))) for p in polygons for r in (p.exterior, *p.interiors)]
     names = list(attributes)
     streams = {ext: BytesIO() for ext in (".shp", ".shx", ".dbf")}

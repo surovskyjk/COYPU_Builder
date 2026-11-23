@@ -663,6 +663,7 @@ Fetch one imagery display tile listed by `imagery.tiles`: a 512 x 512 RGB JPEG o
 | `height` | `int` | `512` |
 | `has_alpha` | `bool` | `False` |
 | `source_ids` | `tuple[str, ...]` | `()` |
+| `complete` | `bool` | `True` |
 
 **Blobs**
 

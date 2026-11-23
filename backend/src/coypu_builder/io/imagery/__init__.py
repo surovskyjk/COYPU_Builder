@@ -1,11 +1,12 @@
 """Imagery sources (T-134): readers of imagery files, and the factories that turn their payloads into the
 layers `domain/imagery.py` composes.
 
-`register_imagery_readers()` puts `RasterImageReader` on the reader registry of `io/sources`; it is
-idempotent, and the server calls it at start-up next to `register_builtin_readers()`. A payload type is turned
-into a layer by `layer_for_payload`, through the factory registered for its type. Part A registers
-`ImageryRaster`; a provider (T-134 Part B) registers its own payload type the same way. Importing this package
-imports no GIS library: Pillow and rasterio are imported by the modules that use them.
+`register_imagery_readers()` puts `RasterImageReader`, the WMTS descriptor reader and the ČÚZK sheet reader on
+the reader registry of `io/sources`, and the two ČÚZK orthophoto providers (T-134 Part B) on its provider
+registry. It is idempotent, and the server calls it at start-up next to `register_builtin_readers()`. A
+payload type is turned into a layer by `layer_for_payload`, through the factory registered for its type:
+Part A registers `ImageryRaster`, Part B registers `WmtsSource`. Importing this package imports no GIS
+library: Pillow, requests and rasterio are imported by the modules that use them.
 """
 
 from __future__ import annotations
@@ -14,7 +15,10 @@ from collections.abc import Callable
 from typing import Any
 
 from coypu_builder.domain.imagery import ImageryLayer, ImageryRaster, RasterLayer
+from coypu_builder.io.imagery.cuzk_wmts import WmtsLayer, WmtsSource, tile_report
 from coypu_builder.io.sources import registry
+
+__all__ = ["layer_for_payload", "register_imagery_readers", "register_layer_factory", "tile_report"]
 
 LayerFactory = Callable[[str, Any], ImageryLayer]
 
@@ -36,12 +40,20 @@ def layer_for_payload(source_id: str, payload: object) -> ImageryLayer:
 
 
 def register_imagery_readers() -> None:
-    """Register the built-in imagery readers that are not registered yet."""
+    """Register the built-in imagery readers and providers that are not registered yet."""
+    from coypu_builder.io.imagery.cuzk_bulk import CuzkOrthoSheetsProvider, CuzkSheetReader
+    from coypu_builder.io.imagery.cuzk_wmts import CuzkWmtsProvider, WmtsDescriptorReader
     from coypu_builder.io.imagery.raster_image import RasterImageReader
 
-    known = {reader.format_id for reader in registry.readers()}
-    if RasterImageReader.format_id not in known:
-        registry.register_reader(RasterImageReader())
+    known_readers = {reader.format_id for reader in registry.readers()}
+    for reader in (RasterImageReader(), WmtsDescriptorReader(), CuzkSheetReader()):
+        if reader.format_id not in known_readers:
+            registry.register_reader(reader)
+    known_providers = {provider.provider_id for provider in registry.providers()}
+    for provider in (CuzkWmtsProvider(), CuzkOrthoSheetsProvider()):
+        if provider.provider_id not in known_providers:
+            registry.register_provider(provider)
 
 
 register_layer_factory(ImageryRaster, lambda source_id, raster: RasterLayer(source_id, raster))
+register_layer_factory(WmtsSource, lambda source_id, source: WmtsLayer(source_id, source))
