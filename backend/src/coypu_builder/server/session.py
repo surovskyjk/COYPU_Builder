@@ -28,6 +28,7 @@ _REVISIONS = itertools.count(1)  # process-wide, so a revision is never reused a
 class AlignmentEntry:
     alignment: Alignment
     warnings: tuple[str, ...] = ()
+    profile_idealised: bool = False  # the import marked the vertical profile as idealised (T-137)
 
 
 @dataclass

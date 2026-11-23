@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import math
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -21,6 +22,12 @@ from coypu_builder.domain.crs import (
     basis_to_godot,
     points_to_godot,
     quaternion_from_matrix,
+)
+from coypu_builder.domain.earthworks import (
+    FormationTemplate,
+    check_work_budget,
+    ground_profile,
+    station_grid,
 )
 from coypu_builder.domain.geometry.cant import RotationPivot
 from coypu_builder.domain.imagery import ImageryLayer, bounds_meet
@@ -112,6 +119,9 @@ from coypu_builder.protocol.messages import (
     CrsSearchResult,
     ErrorCode,
     FileOriginDTO,
+    FormationTemplateDTO,
+    GroundProfileParams,
+    GroundProfileResult,
     ImageryTileInfo,
     ImageryTileParams,
     ImageryTileResult,
@@ -238,6 +248,7 @@ def _project_info(project: ProjectState) -> ProjectInfoResult:
             station_end=entry.alignment.station_end,
             length=entry.alignment.length,
             warnings=entry.warnings,
+            profile_idealised=entry.profile_idealised,
         )
         for alignment_id, entry in project.alignments.items()
     )
@@ -306,11 +317,15 @@ def handle_project_get(session: Session, params: dict[str, Any] | None) -> Handl
 
 
 def _import_alignments(
-    project: ProjectState, raws: list[LandXmlAlignment], crs_override: str | None
+    project: ProjectState,
+    raws: list[LandXmlAlignment],
+    crs_override: str | None,
+    profile_idealised: bool = False,
 ) -> tuple[list[AlignmentSummary], list[str]]:
     """Shared by `import.landxml` and `import.coypu`: resolve the CRS, convert each raw alignment, register
     it on `project` and pick the project base point from the first one imported. `raws` must be non-empty;
-    callers raise `E_EMPTY` themselves so the message can name the file vs. the archive asset."""
+    callers raise `E_EMPTY` themselves so the message can name the file vs. the archive asset. The flag says
+    whether the vertical profile is idealised (T-137) and is stored on each alignment."""
     crs = ProjectCRS(crs_override) if crs_override else project.crs
     if crs is None:
         epsg = raws[0].epsg
@@ -326,7 +341,9 @@ def _import_alignments(
         conversion = to_alignment(raw, crs)
         aln = conversion.alignment
         alignment_id = str(uuid4())
-        project.alignments[alignment_id] = AlignmentEntry(aln, tuple(conversion.report.warnings))
+        project.alignments[alignment_id] = AlignmentEntry(
+            aln, tuple(conversion.report.warnings), profile_idealised
+        )
         alignment_ids.append(alignment_id)
         if project.base_point is None:
             start_en = aln.horizontal.point(np.array([aln.station_start]))[0]
@@ -341,6 +358,7 @@ def _import_alignments(
                 station_end=aln.station_end,
                 length=aln.length,
                 warnings=tuple(conversion.report.warnings),
+                profile_idealised=profile_idealised,
             )
         )
     return summaries, alignment_ids
@@ -500,7 +518,7 @@ async def handle_import_landxml(session: Session, params: dict[str, Any] | None)
     raws = await _offload(session, read_landxml, path)
     if not raws:
         raise ProtocolError(ErrorCode.EMPTY, "file carries no <Alignment> elements")
-    summaries, _alignment_ids = _import_alignments(project, raws, req.crs)
+    summaries, _alignment_ids = _import_alignments(project, raws, req.crs, req.profile_idealised)
     return msgspec.to_builtins(ImportLandxmlResult(tuple(summaries))), {}
 
 
@@ -563,7 +581,7 @@ async def handle_import_coypu(session: Session, params: dict[str, Any] | None) -
     raws, stops, bundle, (format_version, line, archive_warnings) = await _offload(
         session, _read_coypu_bundle, path
     )
-    alignment_summaries, alignment_ids = _import_alignments(project, raws, req.crs)
+    alignment_summaries, alignment_ids = _import_alignments(project, raws, req.crs, req.profile_idealised)
     sole_alignment_id = alignment_ids[0] if len(alignment_ids) == 1 else None
 
     project.stops = stops
@@ -1154,6 +1172,125 @@ async def handle_alignment_track_mesh(session: Session, params: dict[str, Any] |
             blobs[f"indices_{suffix}"] = chunk.indices
 
         result = AlignmentTrackMeshResult(alignment_id=req.alignment_id, chunks=tuple(infos))
+        return msgspec.to_builtins(result), blobs
+
+    return await _offload(session, work)
+
+
+# --- alignment.ground_profile (T-137, Part A) ------------------------------------------------------------
+
+GROUND_PROFILE_MIN_SPACING_M = 1.0
+GROUND_PROFILE_MAX_SPACING_M = 100.0
+
+
+def _formation_template(dto: FormationTemplateDTO | None) -> FormationTemplate:
+    if dto is None:
+        return FormationTemplate()
+    try:
+        return FormationTemplate(
+            formation_width_m=dto.formation_width_m,
+            formation_depth_m=dto.formation_depth_m,
+            cut_slope=dto.cut_slope,
+            fill_slope=dto.fill_slope,
+            sample_spacing_m=dto.sample_spacing_m,
+            max_half_width_m=dto.max_half_width_m,
+        )
+    except ValueError as exc:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
+
+
+def _template_dto(template: FormationTemplate) -> FormationTemplateDTO:
+    """The effective template as the wire struct, defaults included (echoed in the result)."""
+    return FormationTemplateDTO(
+        formation_width_m=template.formation_width_m,
+        formation_depth_m=template.formation_depth_m,
+        cut_slope=template.cut_slope,
+        fill_slope=template.fill_slope,
+        sample_spacing_m=template.sample_spacing_m,
+        max_half_width_m=template.max_half_width_m,
+    )
+
+
+def _profile_stations(alignment, req: GroundProfileParams) -> np.ndarray:
+    """The round-chainage stations from `station_from` to `station_to` at `spacing_m`, from the domain
+    `station_grid`."""
+    if not (
+        math.isfinite(req.spacing_m)
+        and GROUND_PROFILE_MIN_SPACING_M <= req.spacing_m <= GROUND_PROFILE_MAX_SPACING_M
+    ):
+        raise ProtocolError(
+            ErrorCode.BAD_PARAMS,
+            f"spacing_m must be between {GROUND_PROFILE_MIN_SPACING_M:g} and "
+            f"{GROUND_PROFILE_MAX_SPACING_M:g} m, got {req.spacing_m}",
+        )
+    start = alignment.station_start if req.station_from is None else req.station_from
+    end = alignment.station_end if req.station_to is None else req.station_to
+    if not (math.isfinite(start) and math.isfinite(end) and start < end):
+        raise ProtocolError(
+            ErrorCode.BAD_PARAMS, f"station_from must be below station_to, got {start} and {end}"
+        )
+    if start < alignment.station_start or end > alignment.station_end:
+        raise ProtocolError(
+            ErrorCode.BAD_PARAMS,
+            f"stations must lie in the alignment, from {alignment.station_start} to {alignment.station_end}",
+        )
+    return station_grid(start, end, req.spacing_m)
+
+
+async def handle_alignment_ground_profile(session: Session, params: dict[str, Any] | None) -> HandlerResult:
+    """Read-only, off the event loop. The terrain stack is the analysis surface of the revision current when
+    the request was ordered (`_ensure_terrain`); the sampling runs in a worker thread (ADR 0003 addendum). The
+    work budget is checked before the terrain is built or queried."""
+    project = _require_project(session)
+    req = _convert(params, GroundProfileParams)
+    entry = project.alignments.get(req.alignment_id)
+    if entry is None:
+        raise ProtocolError(ErrorCode.NOT_FOUND, f"unknown alignment_id '{req.alignment_id}'")
+    alignment = entry.alignment
+    stations = _profile_stations(alignment, req)
+    template = _formation_template(req.template)
+    try:
+        check_work_budget(len(stations), template)
+    except ValueError as exc:
+        raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
+    cache = await _ensure_terrain(session, project)
+    stack = cache.stack
+    attributions = {
+        source_id: project.sources[source_id].dataset.attribution
+        for source_id in cache.source_ids
+        if source_id in project.sources
+    }
+    source_names = tuple(
+        project.sources[source_id].dataset.name if source_id in project.sources else source_id
+        for source_id in cache.source_ids
+    )
+
+    def work() -> HandlerResult:
+        profile = ground_profile(alignment, stack.heights_and_source, stations, template)
+        blobs = {
+            "station": profile.station,
+            "rail_h": profile.rail_h,
+            "ground_h": profile.ground_h,
+            "source": np.where(profile.source < 0, 255, profile.source).astype(np.uint8),
+            "cut_area": profile.cut_area,
+            "fill_area": profile.fill_area,
+            "flags": profile.flags,
+        }
+        result = GroundProfileResult(
+            alignment_id=req.alignment_id,
+            row_count=len(stations),
+            station_start=float(stations[0]),
+            station_end=float(stations[-1]),
+            cut_volume_m3=profile.cut_volume_m3,
+            fill_volume_m3=profile.fill_volume_m3,
+            no_ground_spans=profile.no_ground_spans,
+            terrain_revision=cache.revision,
+            template=_template_dto(template),
+            source_ids=cache.source_ids,
+            source_names=source_names,
+            attributions=attributions,
+            warnings=cache.warnings,
+        )
         return msgspec.to_builtins(result), blobs
 
     return await _offload(session, work)
@@ -1797,6 +1934,7 @@ DISPATCH: dict[str, Handler] = {
     "import.formats": handle_import_formats,
     "alignment.frame_table": handle_alignment_frame_table,
     "alignment.track_mesh": handle_alignment_track_mesh,
+    "alignment.ground_profile": handle_alignment_ground_profile,
     "terrain.tiles": handle_terrain_tiles,
     "terrain.tile": handle_terrain_tile,
     "imagery.tiles": handle_imagery_tiles,

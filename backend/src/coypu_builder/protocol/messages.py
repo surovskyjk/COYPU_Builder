@@ -97,6 +97,7 @@ class AlignmentSummary(msgspec.Struct, frozen=True):
     station_end: float
     length: float
     warnings: tuple[str, ...] = ()
+    profile_idealised: bool = False  # the import said so (T-137): the vertical profile is not measured
 
 
 class ProjectNewParams(msgspec.Struct, frozen=True):
@@ -117,6 +118,7 @@ class ProjectInfoResult(msgspec.Struct, frozen=True):
 class ImportLandxmlParams(msgspec.Struct, frozen=True):
     path: str
     crs: str | None = None
+    profile_idealised: bool = False  # True marks the vertical profile as idealised, not measured (T-137)
 
 
 class ImportLandxmlResult(msgspec.Struct, frozen=True):
@@ -358,6 +360,47 @@ class TrackMeshChunkInfo(msgspec.Struct, frozen=True):
 class AlignmentTrackMeshResult(msgspec.Struct, frozen=True):
     alignment_id: str
     chunks: tuple[TrackMeshChunkInfo, ...]
+
+
+# --- alignment.ground_profile ----------------------------------------------------------------------------
+# The ground line under the centreline, cut and fill per station from a formation template, and the volumes
+# and no-ground spans between stations (T-137). The blobs carry one row per station; see
+# docs/data-contracts/earthworks.md for the template, the sign rules and the flags.
+
+
+class FormationTemplateDTO(msgspec.Struct, frozen=True):
+    formation_width_m: float = 6.0  # at formation level, centred on the track axis
+    formation_depth_m: float = 0.8  # rail top to formation level
+    cut_slope: float = 1.5  # horizontal : vertical
+    fill_slope: float = 1.5
+    sample_spacing_m: float = 0.5  # across-track sampling for the areas
+    max_half_width_m: float = 60.0  # how far a side looks for its daylight point
+
+
+class GroundProfileParams(msgspec.Struct, frozen=True):
+    alignment_id: str
+    spacing_m: float = 10.0  # 1 m to 100 m
+    station_from: float | None = None  # None = the alignment's start
+    station_to: float | None = None  # None = the alignment's end
+    template: FormationTemplateDTO | None = None  # None = the defaults
+
+
+class GroundProfileResult(msgspec.Struct, frozen=True):
+    alignment_id: str
+    row_count: int
+    station_start: float
+    station_end: float
+    cut_volume_m3: float  # by average end area, never across a station with no ground
+    fill_volume_m3: float
+    no_ground_spans: tuple[
+        tuple[float, float], ...
+    ]  # [first, last] flag-1 station of each run with no ground
+    terrain_revision: int  # the revision of the terrain the profile was computed on: the client's cache key
+    template: FormationTemplateDTO  # the effective template, defaults included
+    source_ids: tuple[str, ...]  # the terrain sources in precedence order: what `source` indexes
+    source_names: tuple[str, ...]  # the dataset names, in the same order as `source_ids`
+    attributions: dict[str, str]  # source id -> attribution, for each of `source_ids` that is in the project
+    warnings: tuple[str, ...] = ()  # the terrain build's warnings, as `terrain.tiles` reports them
 
 
 # --- terrain.tiles / terrain.tile ------------------------------------------------------------------------
@@ -616,6 +659,7 @@ class RunGetResult(msgspec.Struct, frozen=True):
 class ImportCoypuParams(msgspec.Struct, frozen=True):
     path: str
     crs: str | None = None
+    profile_idealised: bool = False  # True marks the vertical profile as idealised, not measured (T-137)
 
 
 class CoypuLineDTO(msgspec.Struct, frozen=True):
@@ -987,6 +1031,61 @@ METHODS: tuple[MethodSpec, ...] = (
             ErrorCode.NO_SESSION,
             ErrorCode.NO_PROJECT,
             ErrorCode.NOT_FOUND,
+            ErrorCode.BUSY,
+        ),
+    ),
+    MethodSpec(
+        name="alignment.ground_profile",
+        summary=(
+            "Sample the terrain analysis surface under one alignment: the ground line under the centreline "
+            "beside the rail profile, and the cut and fill area per station from a formation template "
+            "(level across, 1.5:1 slopes by default). Stations are `station_from`, every round chainage (a "
+            "multiple of `spacing_m`) strictly between, and `station_to` (the extent by default); "
+            "they must lie inside the alignment. A request over the work budget (12 000 000 terrain samples "
+            "or "
+            "100 000 stations) is `E_BAD_PARAMS`. Volumes are by average end area and never bridge a station "
+            "with no ground; `no_ground_spans` reports the first and last such station of each run (water, a "
+            "bridge). Read-only, and it runs off the event loop."
+        ),
+        stability=Stability.EXPERIMENTAL,
+        mutates=False,
+        params=GroundProfileParams,
+        result=GroundProfileResult,
+        blobs=(
+            BlobSpec("station", "<f8", "(n,)", "Absolute station along the alignment [m]."),
+            BlobSpec("rail_h", "<f8", "(n,)", "Profile elevation at the centreline (the rail) [m]."),
+            BlobSpec(
+                "ground_h",
+                "<f8",
+                "(n,)",
+                "Ground under the centreline [m]; NaN where there is none (flag 1).",
+            ),
+            BlobSpec(
+                "source",
+                "<u1",
+                "(n,)",
+                "Index into `source_ids` of the source that gave the centreline ground; 255 where none did.",
+            ),
+            BlobSpec("cut_area", "<f8", "(n,)", "Cut area of the section [m^2]; 0 where there is no ground."),
+            BlobSpec(
+                "fill_area", "<f8", "(n,)", "Fill area of the section [m^2]; 0 where there is no ground."
+            ),
+            BlobSpec(
+                "flags",
+                "<u1",
+                "(n,)",
+                "Bits: 1 = no ground under the centreline (alone); 2 = no daylight point in the ground that "
+                "exists on a side, which also holds where the ground ends before the section's limit (with "
+                "4); "
+                "4 = ground missing somewhere across the section (the areas use only the ground there is).",
+            ),
+        ),
+        errors=(
+            ErrorCode.BAD_PARAMS,
+            ErrorCode.NO_SESSION,
+            ErrorCode.NO_PROJECT,
+            ErrorCode.NOT_FOUND,
+            ErrorCode.INTERNAL,
             ErrorCode.BUSY,
         ),
     ),
