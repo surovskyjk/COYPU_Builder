@@ -110,8 +110,11 @@ def no_ground_spans(stations: np.ndarray, no_ground: np.ndarray) -> tuple[tuple[
 ```
 
 - **The section line:**
-  - the centre is the horizontal alignment point at s: `frames(alignment, s, pivot=RotationPivot.CENTERLINE)`,
-    taking `origin` E and N;
+  - the centre is the horizontal alignment point at s, and the rail height is the vertical profile's
+    elevation at s. Read them from `alignment.horizontal` and `alignment.vertical` directly, not through
+    `frames()`. `frames()` gives the same values with `pivot=RotationPivot.CENTERLINE`, and a test asserts
+    the equality. But on any alignment with cant, `frames()` runs a per-station Python search (F46), which
+    costs seconds on a 1 m profile, and earthworks ignore cant anyway;
   - the across direction is horizontal, `(-sin heading, cos heading)`, with positive offsets to the left;
   - cant is ignored.
 - **Template per side:**
@@ -120,7 +123,9 @@ def no_ground_spans(stations: np.ndarray, no_ground: np.ndarray) -> tuple[tuple[
     the template rises at `1 / cut_slope`. Otherwise it is in fill, and the template falls at
     `1 / fill_slope`;
   - the daylight point is where the side's template meets the ground, found by linear interpolation between
-    samples. A side with none within `max_half_width_m` sets flag 2 and ends there.
+    samples. A side with none within `max_half_width_m` sets flag 2 and ends there;
+  - the search for the daylight point starts after the formation edge sample. Ground exactly at formation
+    level at the edge, rising beyond it, is a cut side that daylights further out, not a zero-width one.
 - **Areas:**
   - integrate `max(0, ground − template)` (cut) and `max(0, template − ground)` (fill) piecewise linearly
     between samples, from daylight to daylight;
@@ -143,16 +148,39 @@ class GroundProfileParams(msgspec.Struct, frozen=True):
     template: FormationTemplateDTO | None = None   # None = the defaults above
 ```
 
+**Stations fall on round chainages:** `station_from`, then every multiple of `spacing_m` strictly between,
+then `station_to`. Compute them as integer multiples, `k · spacing_m`, so there is no drift. A multiple
+within 1e-6 m of either end is not repeated. A 10 m profile reads 12 700, 12 710, … whatever the alignment's
+start station; only the last row may be closer than `spacing_m` to its neighbour.
+
+**Work budget:** before computing anything, the request is refused with `E_BAD_PARAMS` when
+`rows × samples per section > 12 000 000` (about 20 s of terrain queries) or `rows > 100 000`. The message
+says what to change: a coarser `spacing_m`, a shorter station range, or a coarser `sample_spacing_m`. The
+Kralupy line at 1 m with the default template is 4.4 M points, so it fits.
+
 The result carries scalars and blobs, one row per station:
 
 - **Blobs:** `station` `<f8`, `rail_h` `<f8`, `ground_h` `<f8` (NaN = no ground), `source` `<u1`
   (255 = none), `cut_area` `<f8`, `fill_area` `<f8`, `flags` `<u1`. Flag bits: 1 = no ground under the
   centreline, 2 = open side, 4 = partial ground across the section.
+  - Flag 1 comes alone.
+  - Flag 2 means "no daylight point in the ground that exists". It also appears where the ground ends
+    before `max_half_width_m`, for example at a clip edge, together with flag 4. It does not mean steep
+    terrain.
+- **Echoes:**
+  - `terrain_revision`, the revision of the terrain the profile was computed on, so the client caches it
+    under the right key;
+  - `template`, the effective `FormationTemplateDTO`, defaults included, so the client can draw the
+    formation level `rail_h − formation_depth_m`.
 - **Totals:** `cut_volume_m3` and `fill_volume_m3`, by average end area between consecutive valid stations,
   never across a no-ground station.
-- **Spans:** `no_ground_spans`, a list of `[from, to]`. For Kralupy this includes about
-  `[16 660, 16 810]`, the bridge.
-- **Sources:** the ordered source ids, and the sources' attribution.
+- **Spans:** `no_ground_spans`, a list of `[from, to]`: the first and the last flag-1 station of each run,
+  so a single flag-1 station is `[s, s]`. The ground is unknown from the valid station before a span to the
+  valid station after it, and volumes skip both of those intervals. The panel hatches from the previous
+  valid station to the next one. For Kralupy at 10 m this is about `[16 660, 16 800]`; at 1 m the gap runs
+  from about 16 659 to 16 802. That is the bridge.
+- **Sources:** the ordered `source_ids`, their `source_names` in the same order (the dataset names, for the
+  readout), and the sources' attributions.
 
 The request runs off the event loop (ADR 0003), and is `mutates: false`.
 
@@ -206,18 +234,38 @@ The request runs off the event loop (ADR 0003), and is `mutates: false`.
 
    They check: `source` matches the stack; a section with ground on only one side is
    flagged 4 and its area is computed only where ground exists.
-4. **Live (Kralupy with the 15 DMR 5G sheets via `${COYPU_DATA}` or the provider; Verification only):**
+4. **From the review** (Part A):
+   - `test_sloping_plane_through_ground_profile`, with ground `F − 0.2 + 0.1·(offset to the left)` on a
+     straight alignment heading east, one heading north and one at 45°. Every station gives cut 1/17 and
+     fill 25/17. This test fails if the section is sampled along the track instead of across it;
+   - `test_asymmetric_slopes`: with `cut_slope = 2` and `fill_slope = 1`, flat ground 2 m above formation
+     gives 20 m² of cut, and 2 m below gives 16 m² of fill;
+   - `test_edge_tie_daylights_beyond_the_edge`: ground exactly at formation level at the edge, rising 1:1
+     beyond it, gives the same cut as ground 1e-9 m higher;
+   - `test_stations_fall_on_round_chainages`: from 3.7 to 47.2 at 10 m gives 3.7, 10, 20, 30, 40, 47.2;
+     from 10 to 40 gives 10, 20, 30, 40, with no near-duplicate rows;
+   - `test_work_budget_is_refused_before_computing`: both limits, with a heights callable that fails if
+     it is ever called;
+   - `test_section_line_equals_frames_centreline`;
+   - over the wire: `attributions[source_id]` equals the dataset's attribution, `source_names` holds the
+     dataset name, `terrain_revision` equals the terrain cache's, the echoed `template` equals the domain
+     defaults when none is sent, and `profile_idealised` round-trips through `import.landxml` and
+     `import.coypu`;
+   - `FormationTemplateDTO`'s defaults equal `FormationTemplate`'s, by a test.
+5. **Live (Kralupy with the 15 DMR 5G sheets via `${COYPU_DATA}` or the provider; Verification only):**
    - report the profile from 12.7 to 17.5 km at 10 m;
-   - the ground-minus-rail figures at km 13.0, 14.0 and 16.0 match T-132's centreline table within 0.1 m;
+   - the ground-minus-rail figures at km 13.0, 14.0 and 16.0 agree with F32, where T-132 measured about
+     +17 m at km 13.0, falling smoothly to about 0–2 m by km 16 (within 1 m). They also equal
+     `TerrainStack.heights` sampled directly at the same centreline points, to 1e-6 m;
    - the bridge span is reported as no ground;
    - report the total cut and fill volumes, noting they are nominal because the profile is idealised.
-5. **Client:**
+6. **Client:**
    - the Profile tab draws all elements with the cursor following playback (unit tests with a fake
      profile);
    - a capture shot of the Profile tab at km 13 shows the large nominal cut and the idealised-profile
      note, and one at km 16.7 shows the hatched bridge span;
    - performance is unchanged.
-6. **No regressions:** both suites are green on Windows and on Linux CI, with no previously passing test
+7. **No regressions:** both suites are green on Windows and on Linux CI, with no previously passing test
    removed, skipped or weakened, and `gen_protocol_docs.py --check` exits 0.
 
 ## Out of scope
@@ -246,6 +294,6 @@ powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Scenario terrain_kra
 
 State:
 - the analytic results, with the formulas used;
-- the Kralupy profile figures, totals and bridge span from criterion 4;
+- the Kralupy profile figures, totals and bridge span from criterion 5;
 - the capture shots of the Profile tab, described;
 - whether M3's exit criteria are now met end to end. This task closes M3: assess each criterion.
