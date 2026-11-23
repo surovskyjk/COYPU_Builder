@@ -188,6 +188,7 @@ Read before starting:
 | `client/tests/integration/test_terrain_field.gd` | imagery cases |
 | `client/tools/capture/scenario.gd`, `capture_driver.gd` | the `imports` key (moved here from Part C, so every later review sees terrain on the GPU) |
 | `client/tests/fixtures/terrain/synthetic_tin.xml` | new — a small synthetic LandXML TIN (a few hundred points, analytic surface, EPSG:5514, under 100 kB), written by a script under `tools/` that is committed with it |
+| `client/tests/fixtures/terrain/synthetic_ortho.png`, `synthetic_ortho.pgw` | new — the synthetic image source: a PNG with a world file over the same extent, under 100 kB, with an asymmetric marker (for example an "F" near the north-west corner) so a flipped or mirrored drape shows. The same script writes it. A PNG with a world file declares no CRS, so the scenario's import sends `horizontal_crs: "EPSG:5514"` |
 | `client/tools/capture/scenarios/terrain_synthetic.json` | new — the Kralupy project plus the synthetic TIN and a synthetic image source; shots from above, low oblique, from below (the terrain must be culled) and with the boundary overlay |
 
 ### Contract (Part B)
@@ -209,7 +210,9 @@ Read before starting:
   - the status bar shows, on the right, the de-duplicated attribution texts of every source contributing to
     the tiles currently attached;
   - imagery sources come from each imagery tile's `source_ids`, terrain sources from the unique values of
-    each tile's `source_index`;
+    each tile's `source_index` (an index into that terrain tile's `source_ids`, 255 = none);
+  - the texts come from `imagery.tiles`' `attributions` mapping, which covers both kinds. The pseudo-source
+    `"relief"`, which `imagery.tile` lists when shaded relief filled a pixel, has no entry and adds nothing;
   - the texts are joined with " · " and elided to the space available, with the full list in the tooltip;
   - clicking it opens a **Data sources** popover that lists each source's full attribution and its
     `notices` (the Copernicus liability notice, for one), with a Close button and Escape to close.
@@ -233,7 +236,7 @@ Read before starting:
    - p95 stays under 16.7 ms while tiles stream.
    - The reviewer judges the shots, and a `ui_shell` capture with the Data sources popover open.
 5. **`imports` key:** `test_imports_must_be_a_list_of_dictionaries`, in `test_capture_scenario.gd`.
-5. **No regressions:** as Part A.
+6. **No regressions:** as Part A.
 
 ## Part C — capture
 
