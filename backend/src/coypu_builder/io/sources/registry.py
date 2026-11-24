@@ -78,6 +78,9 @@ class InspectReport:
     suggested: ImportSettings
     licence_hint: str | None
     warnings: tuple[str, ...]
+    # A raster's sample type, when the reader has one (F51): a confirmed nodata is cast to it before it is
+    # compared and recorded. None for every other source.
+    nodata_dtype: str | None = None
 
 
 @dataclass(frozen=True)

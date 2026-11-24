@@ -9,10 +9,14 @@ Format-specific readers are separate tasks; this framework only fixes the seams 
 ## The flow
 
 1. **Inspect** (`import.inspect`). A reader reports what the source holds: format, declared CRS, extent,
-   counts, a proposed `ImportSettings`, a licence hint and warnings. A source that declares no CRS is reported
+   counts, a proposed `ImportSettings`, a licence hint and warnings. For files, the file-name hints of F53 add an
+   `attribution_hint` (see "File attribution and licence hints" below). A source that declares no CRS is reported
    with `declared_crs: null` and a warning, whatever the reader says.
 2. **Confirm.** The caller keeps or overrides the proposed settings.
-3. **Import** (`import.run`) with exactly those settings. They are stored verbatim in the `SourceDataset`.
+3. **Import** (`import.run`) with exactly those settings. They are stored in the `SourceDataset` as confirmed, with
+   one exception: a raster's confirmed `nodata` is recorded as cast to the raster's sample type (F51, ADR 0009).
+   For file attribution and licence (F53), an empty string (or one of spaces only, which is stripped) means "not
+   sent", not a value to record.
 
 A source with no declared CRS and no `settings.horizontal_crs` is refused with `E_CRS_REQUIRED`; it is never
 guessed. The project must also have a CRS (open it with one, or import an alignment first), otherwise
@@ -87,8 +91,22 @@ absolute paths and SHA-256 of every input file, or `ProviderOrigin` with provide
 (`coypu-builder <version>`) and `objects`. The server also keeps the import's `warnings` with the source, and
 `source.get` returns them.
 
-For a file, `licence` is the reader's `licence_hint` (or `"unknown"`) and `attribution` is empty; a provider
-supplies both.
+For a file, `licence` and `attribution` are the `licence` and `attribution` that `import.run` was sent when they
+are non-empty (F53). Otherwise `licence` is the reader's `licence_hint` (or `"unknown"`) and `attribution` is
+empty, and a re-import (`reimport_of`) that sends neither keeps the previous dataset's values. A provider
+supplies both and refuses these two fields with `E_BAD_PARAMS`.
+
+A confirmed `nodata` of a floating-point raster is recorded as cast to the raster's sample type (F51, ADR 0009).
+
+### File attribution and licence hints (F53)
+
+`import.inspect` on files (`path` / `paths`) returns `attribution_hint`, and fills `licence_hint` only where the
+reader gave none. `io/sources/hints.py: product_hints(paths, kind)` recognises a ČÚZK SM5 map sheet: every file name
+starts with four upper-case ASCII letters and two digits, followed by `.`, `_` or the end of the name
+(`SM5_SHEET_CODE`; `krav82.tif`, `KRAV82-x.laz`, `data01.tif` and `site02.laz` are not codes), and
+the kind is `terrain` or `imagery`. Then the hint is `licence` `"CC BY 4.0"` and `attribution` `"© ČÚZK"`. Otherwise
+both are absent. The hint is a guess: the client shows it prefilled and editable, and the backend records nothing
+from it unless `import.run` sends the values back in `attribution` and `licence`. Providers never get a hint.
 
 Each `ObjectRecord` is `(key, id, content_hash)`:
 
@@ -158,7 +176,8 @@ All five methods are `experimental` (`docs/protocol/ipc.md`): `import.inspect`, 
 `source.get`, `plugins.list`. Paths must be absolute; `import.inspect` and `import.run` take either `path` or `paths` (several files of one
 format are one source, one object per file; see `terrain-payloads.md`). `ImportSettingsDTO.clip` is a tagged union on `type`:
 `{"type": "corridor", ...}` or `{"type": "bbox", ...}`, or `null`. `SourceDatasetDTO.origin` is tagged
-`"file"` or `"provider"`.
+`"file"` or `"provider"`. `import.run` takes optional `attribution` and `licence` for file imports only; with
+`provider` either one is `E_BAD_PARAMS`.
 
 | Condition | Error |
 |---|---|

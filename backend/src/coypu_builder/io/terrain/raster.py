@@ -24,7 +24,7 @@ from coypu_builder.domain.sources import ImportSettings, SourceKind
 from coypu_builder.domain.terrain import TerrainGrid
 from coypu_builder.io.gis.envelope import GisExtraMissing
 from coypu_builder.io.sources.registry import CrsTransform, ImportedObject, InspectReport
-from coypu_builder.io.sources.runner import note, sha256_file
+from coypu_builder.io.sources.runner import cast_nodata, note, sha256_file
 from coypu_builder.io.terrain.archive import open_source, peek
 
 FORMAT_ID = "geotiff"
@@ -89,6 +89,7 @@ class GeoTiffReader:
                     extent = (extent[0], extent[1], extent[2], extent[3])
                     counts = {"width": int(ds.width), "height": int(ds.height), "bands": int(ds.count)}
                     nodata = ds.nodata
+                    nodata_dtype = str(ds.dtypes[0])
                     t = ds.transform
                     georeferenced = not t.is_identity
                     rotated = t.b != 0.0 or t.d != 0.0
@@ -117,6 +118,7 @@ class GeoTiffReader:
             ),
             licence_hint=None,
             warnings=tuple(warnings),
+            nodata_dtype=nodata_dtype,
         )
 
     def read(
@@ -179,7 +181,7 @@ def _raw_heights(ds: Any, window: Any, settings: ImportSettings) -> np.ndarray:
     masked = ds.read(1, window=window, masked=True)
     heights = np.ma.filled(masked.astype(np.float64), np.nan)
     if settings.nodata is not None:
-        heights[heights == settings.nodata] = np.nan
+        heights[heights == cast_nodata(settings.nodata, str(ds.dtypes[0]))] = np.nan
     heights[~np.isfinite(heights)] = np.nan
     return heights
 

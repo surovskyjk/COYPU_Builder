@@ -84,10 +84,12 @@ from coypu_builder.io.mesh.terrain_tiles import (
 from coypu_builder.io.mesh.track import bake_track_mesh
 from coypu_builder.io.providers import cache as provider_cache
 from coypu_builder.io.providers import register_builtin_providers
+from coypu_builder.io.sources.hints import ProductHints, product_hints
 from coypu_builder.io.sources.registry import InspectReport, plugin_report
 from coypu_builder.io.sources.registry import providers as registered_providers
 from coypu_builder.io.sources.registry import readers as registered_readers
 from coypu_builder.io.sources.runner import (
+    UNKNOWN_LICENCE,
     CrsRequired,
     NoAlignments,
     ReaderFailure,
@@ -754,7 +756,12 @@ def _source_kind(raw: str) -> SourceKind:
         raise ProtocolError(ErrorCode.BAD_PARAMS, f"unknown kind '{raw}' (one of: {known})") from exc
 
 
-def _inspect_result(report: InspectReport) -> ImportInspectResult:
+def _inspect_result(report: InspectReport, hints: ProductHints | None = None) -> ImportInspectResult:
+    """The wire answer. `hints` are the file-name guesses of F53: they fill `licence_hint` only where the
+    reader gave none, and they are the only source of `attribution_hint`."""
+    licence_hint = report.licence_hint
+    if licence_hint is None and hints is not None:
+        licence_hint = hints.licence
     return ImportInspectResult(
         format_id=report.format_id,
         kind=report.kind.value,
@@ -762,8 +769,9 @@ def _inspect_result(report: InspectReport) -> ImportInspectResult:
         extent=None if report.extent is None else tuple(float(v) for v in report.extent),
         counts={str(k): int(v) for k, v in report.counts.items()},
         suggested_settings=_settings_to_dto(report.suggested),
-        licence_hint=report.licence_hint,
+        licence_hint=licence_hint,
         warnings=tuple(report.warnings),
+        attribution_hint=None if hints is None else hints.attribution,
     )
 
 
@@ -833,7 +841,7 @@ async def handle_import_inspect(session: Session, params: dict[str, Any] | None)
     kind = None if req.kind is None else _source_kind(req.kind)
     try:
         _reader, report = await _offload(session, inspect_source, paths, req.format_id, kind)
-        result = _inspect_result(report)
+        result = _inspect_result(report, product_hints(paths, report.kind))
     except (GisExtraMissing, ReaderFailure) as exc:
         raise ProtocolError(ErrorCode.INTERNAL, str(exc)) from exc
     except (ValueError, OSError, ProjError) as exc:
@@ -843,11 +851,22 @@ async def handle_import_inspect(session: Session, params: dict[str, Any] | None)
     return msgspec.to_builtins(result), {}
 
 
-def _run_import_with_coverage(paths, kind, settings, project_crs, alignments, name, format_id, previous):
+def _run_import_with_coverage(
+    paths, kind, settings, project_crs, alignments, name, format_id, previous, licence, attribution
+):
     """Blocking: the import and the clip polygon it used (the source's coverage), from a snapshot of the
     alignments. Touches no project state."""
     outcome = run_import(
-        paths, kind, settings, project_crs, alignments, name=name, format_id=format_id, previous=previous
+        paths,
+        kind,
+        settings,
+        project_crs,
+        alignments,
+        name=name,
+        format_id=format_id,
+        previous=previous,
+        licence=licence,
+        attribution=attribution,
     )
     return outcome, clip_polygon(settings.clip, alignments)
 
@@ -874,6 +893,8 @@ async def handle_import_run(session: Session, params: dict[str, Any] | None) -> 
     project = _require_project(session)
     req = _convert(params, ImportRunParams)
     _check_source_choice(req.path, req.paths, req.provider, req.query)
+    if req.provider is not None and (req.attribution is not None or req.licence is not None):
+        raise ProtocolError(ErrorCode.BAD_PARAMS, "attribution and licence come from the provider")
     paths = [] if req.provider is not None else _source_paths(req.path, req.paths)
     plugin_report()
     kind = _source_kind(req.kind)
@@ -907,6 +928,14 @@ async def handle_import_run(session: Session, params: dict[str, Any] | None) -> 
         except Exception as exc:  # mapped to a wire error, never a dropped connection
             raise _provider_error(exc) from exc
         return _store_import(project, outcome, coverage)
+    # F53: a file's confirmed values are recorded; a re-import without them keeps the previous dataset's.
+    sent_attribution = (req.attribution or "").strip()
+    sent_licence = (req.licence or "").strip()
+    previous_licence = previous.dataset.licence if previous is not None else None
+    attribution = sent_attribution or (previous.dataset.attribution if previous is not None else "")
+    # The unknown placeholder is not a licence to keep: the reader's hint applies again.
+    kept_licence = None if previous_licence in (None, UNKNOWN_LICENCE) else previous_licence
+    licence = sent_licence or kept_licence
     try:
         outcome, coverage = await _offload(
             session,
@@ -919,6 +948,8 @@ async def handle_import_run(session: Session, params: dict[str, Any] | None) -> 
             req.name,
             req.format_id,
             previous.dataset if previous is not None else None,
+            licence,
+            attribution,
         )
     except CrsRequired as exc:
         raise ProtocolError(ErrorCode.CRS_REQUIRED, str(exc)) from exc
@@ -978,6 +1009,7 @@ def handle_source_list(session: Session, params: dict[str, Any] | None) -> Handl
             object_count=len(entry.dataset.objects),
             imported_at=entry.dataset.imported_at,
             attribution=entry.dataset.attribution,
+            licence=entry.dataset.licence,
         )
         for entry in project.sources.values()
     )

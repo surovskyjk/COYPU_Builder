@@ -126,7 +126,7 @@ class SourceDataset:
     name: str
     format_id: str
     origin: FileOrigin | ProviderOrigin
-    settings: ImportSettings  # exactly as confirmed
+    settings: ImportSettings  # exactly as confirmed (a raster nodata is recorded as cast, F51)
     declared_crs: str | None  # what the source itself said
     effective_crs: str  # what was used
     transformation: str  # pyproj's description, or "none" for an identical CRS

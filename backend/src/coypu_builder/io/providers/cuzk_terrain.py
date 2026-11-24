@@ -29,6 +29,7 @@ from coypu_builder.io.providers import (
 )
 from coypu_builder.io.sources.registry import InspectReport
 from coypu_builder.io.sources.runner import provider_context, sha256_file
+from coypu_builder.io.sources.terms import CUZK_ATTRIBUTION, CUZK_LICENCE
 
 HORIZONTAL_CRS = "EPSG:5514"
 VERTICAL_CRS = "EPSG:5705"
@@ -59,8 +60,8 @@ def service_errors() -> Iterator[None]:
 
 class CuzkTerrainProvider:
     kinds = frozenset({SourceKind.TERRAIN})
-    licence = "CC BY 4.0"
-    attribution = "© ČÚZK"
+    licence = CUZK_LICENCE
+    attribution = CUZK_ATTRIBUTION
 
     def __init__(
         self,

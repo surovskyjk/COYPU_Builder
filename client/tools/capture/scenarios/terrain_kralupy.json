@@ -23,6 +23,8 @@
         "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV93.zip"
       ],
       "name": "ČÚZK DMR 5G",
+      "attribution": "© ČÚZK",
+      "licence": "CC BY 4.0",
       "settings": {"horizontal_crs": "EPSG:5514", "clip": {"type": "corridor", "buffer_m": 250}}
     },
     {

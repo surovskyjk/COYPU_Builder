@@ -832,6 +832,7 @@ async def test_inspect_run_list_get_over_the_wire(server_url, tmp_path):
             "object_count": 1,
             "imported_at": summary["imported_at"],
             "attribution": "",
+            "licence": "synthetic (CC0)",
         }
 
         got = await _call(ws, "4", "source.get", {"source_id": run["source_id"]})

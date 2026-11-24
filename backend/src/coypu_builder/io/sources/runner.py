@@ -154,7 +154,7 @@ def inspect_source(
             "it will not be guessed"
         )
         if warning not in report.warnings:
-            report = _replace_warnings(report, (*report.warnings, warning))
+            report = replace(report, warnings=(*report.warnings, warning))
     return reader, report
 
 
@@ -200,6 +200,7 @@ def _merge_reports(paths: Sequence[Path], reports: Sequence[InspectReport]) -> I
     suggested = first.suggested
     if suggested.horizontal_crs != declared_crs:
         suggested = replace(suggested, horizontal_crs=declared_crs)
+    dtypes = {r.nodata_dtype for r in reports}
     return InspectReport(
         first.format_id,
         first.kind,
@@ -209,6 +210,7 @@ def _merge_reports(paths: Sequence[Path], reports: Sequence[InspectReport]) -> I
         suggested,
         first.licence_hint if len(licences) == 1 else None,
         tuple(merged),
+        nodata_dtype=first.nodata_dtype if len(dtypes) == 1 else None,
     )
 
 
@@ -217,19 +219,6 @@ def _inspect(reader: SourceReader, path: Path) -> InspectReport:
     if not isinstance(report, InspectReport) or not isinstance(report.kind, SourceKind):
         raise ReaderFailure(f"reader '{reader.format_id}' returned a malformed inspect report")
     return report
-
-
-def _replace_warnings(report: InspectReport, warnings: tuple[str, ...]) -> InspectReport:
-    return InspectReport(
-        report.format_id,
-        report.kind,
-        report.declared_crs,
-        report.extent,
-        report.counts,
-        report.suggested,
-        report.licence_hint,
-        warnings,
-    )
 
 
 # --- coordinates -------------------------------------------------------------------------------------------
@@ -416,6 +405,24 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def cast_nodata(value: float, dtype: str | None) -> float:
+    """A confirmed nodata as a floating-point raster's own type (F51). Godot reads a float32 nodata as the
+    neighbouring double and sends it back one ulp off, so it is cast to the file's sample type before it is
+    compared with the cells, and recorded as cast. Integer sample types, unknown types and a cast that is not
+    finite keep the value as confirmed."""
+    if dtype is None:
+        return float(value)
+    try:
+        sample = np.dtype(dtype)
+    except TypeError:  # a rasterio type numpy does not know, such as complex_int16
+        return float(value)
+    if not np.issubdtype(sample, np.floating):
+        return float(value)
+    with np.errstate(over="ignore"):
+        cast = float(sample.type(value))
+    return cast if np.isfinite(cast) else float(value)
+
+
 def run_import(
     path: Path | str | Sequence[Path | str],
     kind: SourceKind,
@@ -437,6 +444,9 @@ def run_import(
     and the dataset keeps its id; without it every GUID is new. `previous` must have the same kind and
     format. `provider = (provider_id, canonical query JSON)` records a `ProviderOrigin` (with the file hashes)
     instead of a `FileOrigin`, and `licence` / `attribution` are the provider's; see `run_provider_import`.
+    A confirmed nodata of a floating-point raster is recorded as cast to its sample type when the files share
+    one sample type (F51). Otherwise each file is masked with the value cast to its own type, and the
+    confirmed value is recorded.
     Raises `ValueError` for bad input, `CrsRequired`, `UnknownAlignment`, `NoAlignments`, `GisExtraMissing`,
     `OSError` and `ReaderFailure`.
     """
@@ -456,6 +466,8 @@ def run_import(
     notes: list[str] = []
     with extraction_scope():
         report = _merge_reports(paths, [_inspect(reader, p) for p in paths])
+        if settings.nodata is not None:
+            settings = replace(settings, nodata=cast_nodata(settings.nodata, report.nodata_dtype))
         polygon = clip_polygon(settings.clip, alignments)
         transform = resolve_transform(
             settings,

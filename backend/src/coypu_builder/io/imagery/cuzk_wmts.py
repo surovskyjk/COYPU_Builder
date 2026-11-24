@@ -58,6 +58,7 @@ from coypu_builder.io.providers import cache as provider_cache
 from coypu_builder.io.providers import check_keys, clip_from_query, clip_to_query
 from coypu_builder.io.sources.registry import CrsTransform, ImportedObject, InspectReport
 from coypu_builder.io.sources.runner import fetch_note, provider_context, sha256_file
+from coypu_builder.io.sources.terms import CUZK_ATTRIBUTION, CUZK_LICENCE
 
 PROVIDER_ID = "cuzk-ortho-wmts"
 LAYER = "ORTOFOTO"
@@ -66,8 +67,8 @@ ALLOWED_SCHEMES: tuple[str, ...] = ("https",)
 ALLOWED_HOSTS: tuple[str, ...] = ("ags.cuzk.gov.cz",)  # exactly this host; T-139 keeps its own, wider list
 ALLOWED_PORTS: tuple[int | None, ...] = (None, 443)
 HORIZONTAL_CRS = "EPSG:5514"
-LICENCE = "CC BY 4.0"
-ATTRIBUTION = "© ČÚZK"
+LICENCE = CUZK_LICENCE
+ATTRIBUTION = CUZK_ATTRIBUTION
 TITLE = "ČÚZK ortofoto (WMTS)"
 DESCRIPTION = (
     "Aerial photos of the Czech Republic, streamed tile by tile while you look at them. "

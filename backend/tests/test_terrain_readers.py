@@ -372,6 +372,99 @@ def test_geotiff_nodata_override_and_unit(tmp_path):
     assert np.array_equal(halved.heights, plain.heights * 0.5, equal_nan=True)
 
 
+def test_confirmed_nodata_is_cast_to_the_raster_dtype(tmp_path):
+    """F51: Godot reads a float32 nodata as the neighbouring double and sends it back one ulp off. The file
+    has no nodata tag, so the confirmed value alone masks the cells. Cast to the raster's float32, the exact
+    value and both neighbours mask the same cells and record the same cast value."""
+    marker = float(np.float32(-3.4028234663852886e38))
+    heights = np.full((6, 6), 100.0, dtype=np.float32)
+    heights[1, 2] = np.float32(marker)
+    heights[4, :3] = np.float32(marker)
+    path = tmp_path / "flt_max.tif"
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=6,
+        width=6,
+        count=1,
+        dtype="float32",
+        crs="EPSG:5514",
+        transform=Affine(20.0, 0.0, LOCAL_BBOX[0], 0.0, -20.0, LOCAL_BBOX[3]),
+    ) as ds:
+        ds.write(heights, 1)
+    expected = np.where(heights == np.float32(marker), np.nan, heights.astype(np.float64))
+    assert np.isnan(expected[1, 2]) and np.isnan(expected[4, 0])
+    for confirmed in (marker, float(np.nextafter(marker, 0.0)), float(np.nextafter(marker, -np.inf))):
+        outcome = _import(path, ImportSettings(nodata=confirmed))
+        (payload,) = _payloads(outcome)
+        assert np.array_equal(payload.heights, expected, equal_nan=True), confirmed
+        assert outcome.dataset.settings.nodata == marker, confirmed
+
+
+def _sheet(path: Path, heights: np.ndarray, origin_e: float, dtype: str) -> Path:
+    """A north-up GeoTIFF of one sample type, with no nodata tag, in the project's East-North values."""
+    height, width = heights.shape
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=height,
+        width=width,
+        count=1,
+        dtype=dtype,
+        crs="EPSG:5514",
+        transform=Affine(20.0, 0.0, origin_e, 0.0, -20.0, LOCAL_BBOX[3]),
+    ) as ds:
+        ds.write(heights.astype(dtype), 1)
+    return path
+
+
+def _heights_by_key(outcome) -> dict[str, Any]:
+    return {record.key: outcome.payloads[record.id].heights for record in outcome.dataset.objects}
+
+
+def test_nodata_cast_across_two_float32_sheets(tmp_path):
+    """F51 through a merge: two float32 sheets share one sample type, so the value is recorded as cast, and
+    both sheets mask the same cells."""
+    marker = float(np.float32(-3.4028234663852886e38))
+    confirmed = float(np.nextafter(marker, 0.0))
+    heights = np.full((6, 6), 100.0, dtype=np.float32)
+    heights[1, 2] = np.float32(marker)
+    heights[4, :3] = np.float32(marker)
+    first = _sheet(tmp_path / "sheet_a.tif", heights, LOCAL_BBOX[0], "float32")
+    second = _sheet(tmp_path / "sheet_b.tif", heights, LOCAL_BBOX[0] + 120.0, "float32")
+    outcome = _import([first, second], ImportSettings(nodata=confirmed))
+    expected = np.where(heights == np.float32(marker), np.nan, heights.astype(np.float64))
+    by_key = _heights_by_key(outcome)
+    assert set(by_key) == {"sheet_a", "sheet_b"}
+    for key in ("sheet_a", "sheet_b"):
+        assert np.array_equal(by_key[key], expected, equal_nan=True), key
+    assert outcome.dataset.settings.nodata == marker
+
+
+def test_mixed_sample_types_mask_each_file_with_its_own_cast(tmp_path):
+    """F51 through a merge of two sample types: no single cast applies, so each file is masked with the value
+    cast to its own type, and the confirmed value is recorded as given."""
+    marker = float(np.float32(-3.4028234663852886e38))
+    confirmed = float(np.nextafter(marker, 0.0))
+    single = np.full((6, 6), 100.0, dtype=np.float32)
+    single[1, 2] = np.float32(marker)
+    double = np.full((6, 6), 100.0, dtype=np.float64)
+    double[3, 3] = confirmed
+    f32 = _sheet(tmp_path / "single.tif", single, LOCAL_BBOX[0], "float32")
+    f64 = _sheet(tmp_path / "double.tif", double, LOCAL_BBOX[0] + 120.0, "float64")
+    outcome = _import([f32, f64], ImportSettings(nodata=confirmed))
+    by_key = _heights_by_key(outcome)
+    assert np.array_equal(
+        by_key["single"],
+        np.where(single == np.float32(marker), np.nan, single.astype(np.float64)),
+        equal_nan=True,
+    )
+    assert np.array_equal(by_key["double"], np.where(double == confirmed, np.nan, double), equal_nan=True)
+    assert outcome.dataset.settings.nodata == confirmed
+
+
 def test_geotiff_windowed_read_touches_only_the_clip_window(tmp_path, monkeypatch):
     path, _grid, heights = _surface_raster(tmp_path)
     windows = []

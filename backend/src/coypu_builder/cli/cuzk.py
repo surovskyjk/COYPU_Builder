@@ -10,7 +10,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-ATTRIBUTION = "© ČÚZK (CC BY 4.0)"
+from coypu_builder.io.sources.terms import CUZK_ATTRIBUTION, CUZK_LICENCE
+
+ATTRIBUTION = f"{CUZK_ATTRIBUTION} ({CUZK_LICENCE})"
 
 
 def add_cuzk_parser(sub: Any) -> None:

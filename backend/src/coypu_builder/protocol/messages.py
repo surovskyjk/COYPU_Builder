@@ -175,6 +175,9 @@ class ImportInspectResult(msgspec.Struct, frozen=True):
     suggested_settings: ImportSettingsDTO
     licence_hint: str | None
     warnings: tuple[str, ...] = ()
+    # A guess from the file names (F53): a ČÚZK map-sheet code names its attribution. The client shows it
+    # prefilled and editable; nothing is recorded unless `import.run` sends it back as `attribution`.
+    attribution_hint: str | None = None
 
 
 class ImportRunParams(msgspec.Struct, frozen=True, kw_only=True):
@@ -187,6 +190,10 @@ class ImportRunParams(msgspec.Struct, frozen=True, kw_only=True):
     name: str | None = None
     format_id: str | None = None
     reimport_of: str | None = None  # a source_id of the same kind and format; keeps its GUIDs
+    # File imports only (F53): recorded on the dataset when non-empty, else the reader's licence hint or
+    # "unknown" and an empty attribution. A re-import without them keeps the previous dataset's values.
+    attribution: str | None = None
+    licence: str | None = None
 
 
 class ImportRunResult(msgspec.Struct, frozen=True):
@@ -210,6 +217,7 @@ class SourceSummary(msgspec.Struct, frozen=True):
     object_count: int
     imported_at: str
     attribution: str
+    licence: str = ""
 
 
 class SourceListResult(msgspec.Struct, frozen=True):
@@ -818,7 +826,12 @@ METHODS: tuple[MethodSpec, ...] = (
         summary=(
             "Read a context-data source cheaply (terrain, imagery, later buildings, vegetation, water) and "
             "report its format, declared CRS (null when it has none, with a warning), extent, counts and "
-            "proposed import settings. Step one of ADR 0009's inspect, confirm, import. Give exactly one "
+            "proposed import settings. For files whose names are ČÚZK SM5 map-sheet codes (for example "
+            "`KRAV82.zip`), it also returns `attribution_hint` (`© ČÚZK`) and fills `licence_hint` where "
+            "the reader gave none (`CC BY 4.0`): a guess that the client shows prefilled and editable, "
+            "recorded only if `import.run` sends it back. Providers get no hint. Step one of ADR 0009's "
+            "inspect, confirm, "
+            "import. Give exactly one "
             "of `path` and `paths` (several files of one format, e.g. the sheets of one survey, are one "
             "source: counts are summed, extents united, and differing declared CRSs are warned about and "
             "reported as null); every path must be absolute. `format_id` picks a reader instead of "
@@ -847,13 +860,25 @@ METHODS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="import.run",
         summary=(
-            "Import a context-data source with the confirmed `settings`, exactly as given, and record it as "
-            "a `SourceDataset` with licence, attribution and provenance. A source with no declared CRS "
-            "and no `settings.horizontal_crs` is refused with `E_CRS_REQUIRED`, never guessed; the "
-            "project must have a CRS. Every object gets a GUID. `reimport_of` names an earlier source of "
-            "the same kind and format: objects are matched on their own source key, matched ones keep "
-            "their GUID, and the source keeps its id. Without it the import is a new source with all-new "
-            "GUIDs. Counts report added, changed, unchanged and removed objects. Give exactly one of "
+            "Import a context-data source with the confirmed `settings`, exactly as given except that a "
+            "raster "
+            ""
+            "nodata is recorded as cast to the raster's sample type (F51), and record it as a "
+            "`SourceDataset` "
+            ""
+            "with licence, attribution and provenance. A source with no declared CRS and no "
+            "`settings.horizontal_crs` is refused with `E_CRS_REQUIRED`, never guessed; the project must "
+            "have "
+            ""
+            "a CRS. Every object gets a GUID. `reimport_of` names an earlier source of the same kind and "
+            "format: objects are matched on their own source key, matched ones keep their GUID, and the "
+            "source "
+            ""
+            "keeps its id. Without it the import is a new source with all-new GUIDs. Counts report added, "
+            "changed, unchanged and removed objects. For files, a non-empty `attribution` and `licence` are "
+            "recorded on the dataset; a re-import that sends neither keeps the previous source's values (the "
+            "unknown placeholder is not kept, so the reader's hint applies). With `provider` either one is "
+            "`E_BAD_PARAMS`: attribution and licence come from the provider. Give exactly one of "
             "`path` and `paths`; every path must be absolute. With `paths` all files must resolve to the "
             "same reader (mixed formats are `E_BAD_PARAMS`) and each file yields its own objects. "
             "`provider` (with `query`) is the third alternative: exactly one of `path`, `paths` and "

@@ -32,13 +32,14 @@ from coypu_builder.io.providers import check_keys, clip_from_query, clip_to_quer
 from coypu_builder.io.providers.cuzk_terrain import discard_corrupted, service_errors
 from coypu_builder.io.sources.registry import CrsTransform, ImportedObject, InspectReport
 from coypu_builder.io.sources.runner import fetch_note, provider_context
+from coypu_builder.io.sources.terms import CUZK_ATTRIBUTION, CUZK_LICENCE
 
 PROVIDER_ID = "cuzk-ortho-sheets"
 FORMAT_ID = "cuzk-ortho-sheet"
 _CODE = re.compile(r"[A-Za-z0-9_-]{1,32}\Z")
 HORIZONTAL_CRS = "EPSG:5514"
-LICENCE = "CC BY 4.0"
-ATTRIBUTION = "© ČÚZK"
+LICENCE = CUZK_LICENCE
+ATTRIBUTION = CUZK_ATTRIBUTION
 TITLE = "ČÚZK ortofoto (sheets)"
 DESCRIPTION = (
     "Aerial photos of the Czech Republic, downloaded one map sheet at a time for offline work. "

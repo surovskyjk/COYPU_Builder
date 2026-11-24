@@ -24,7 +24,9 @@ source, save and reopen, and IFC export in Phase 3.
    CRS or datum, coordinate order and sign convention (the Křovák conventions of `io/landxml/dialects.py`
    apply to every format), linear unit, clip region (a corridor buffer in metres or a bounding box), point
    class filter for point clouds, display resolution and nodata handling. Reprojection to the project CRS goes
-   through `domain/crs.py`; the transformation pyproj actually used, and its stated accuracy, are recorded.
+   through `domain/crs.py`; the transformation pyproj actually used, and its stated accuracy, are recorded. A
+   confirmed `nodata` of a floating-point raster is recorded as cast to the raster's sample type (F51), the one
+   allowed difference from running with exactly the confirmed settings.
 3. **Identity.** Every imported object receives an `EntityId` (uuid4, as in ADR 0005 and
    `docs/data-contracts/entity-model.md`) at its first import. Every object belongs to a `SourceDataset`
    record, which has its own `EntityId` and holds the kind (terrain, imagery, buildings, vegetation, water),

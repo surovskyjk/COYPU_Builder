@@ -248,7 +248,7 @@ Import a standalone kinematics CSV (either dialect) attached to an already-impor
 
 **Stability**: `experimental`  ·  **Changes state**: no
 
-Read a context-data source cheaply (terrain, imagery, later buildings, vegetation, water) and report its format, declared CRS (null when it has none, with a warning), extent, counts and proposed import settings. Step one of ADR 0009's inspect, confirm, import. Give exactly one of `path` and `paths` (several files of one format, e.g. the sheets of one survey, are one source: counts are summed, extents united, and differing declared CRSs are warned about and reported as null); every path must be absolute. `format_id` picks a reader instead of sniffing; a ZIP holding a single supported file reads like the bare file. Needs no project. Instead of files, `provider` (with an optional `query`) inspects an online source: the report counts the sheets or tiles the query's clip selects, their size, and proposes the settings (including the clip); it fetches index files only, never the data, and needs a project with a CRS (`E_NO_PROJECT`, `E_CRS_REQUIRED`). An unknown provider or a bad query is `E_BAD_PARAMS`; a service that cannot be reached is `E_BAD_PARAMS` with the reason.
+Read a context-data source cheaply (terrain, imagery, later buildings, vegetation, water) and report its format, declared CRS (null when it has none, with a warning), extent, counts and proposed import settings. For files whose names are ČÚZK SM5 map-sheet codes (for example `KRAV82.zip`), it also returns `attribution_hint` (`© ČÚZK`) and fills `licence_hint` where the reader gave none (`CC BY 4.0`): a guess that the client shows prefilled and editable, recorded only if `import.run` sends it back. Providers get no hint. Step one of ADR 0009's inspect, confirm, import. Give exactly one of `path` and `paths` (several files of one format, e.g. the sheets of one survey, are one source: counts are summed, extents united, and differing declared CRSs are warned about and reported as null); every path must be absolute. `format_id` picks a reader instead of sniffing; a ZIP holding a single supported file reads like the bare file. Needs no project. Instead of files, `provider` (with an optional `query`) inspects an online source: the report counts the sheets or tiles the query's clip selects, their size, and proposes the settings (including the clip); it fetches index files only, never the data, and needs a project with a CRS (`E_NO_PROJECT`, `E_CRS_REQUIRED`). An unknown provider or a bad query is `E_BAD_PARAMS`; a service that cannot be reached is `E_BAD_PARAMS` with the reason.
 
 **Params**
 
@@ -273,6 +273,7 @@ Read a context-data source cheaply (terrain, imagery, later buildings, vegetatio
 | `suggested_settings` | `ImportSettingsDTO` | required |
 | `licence_hint` | `str | None` | required |
 | `warnings` | `tuple[str, ...]` | `()` |
+| `attribution_hint` | `str | None` | `None` |
 
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NOT_FOUND`, `E_INTERNAL`, `E_BUSY`, `E_NO_PROJECT`, `E_CRS_REQUIRED`, `E_EMPTY`
 
@@ -280,7 +281,7 @@ Read a context-data source cheaply (terrain, imagery, later buildings, vegetatio
 
 **Stability**: `experimental`  ·  **Changes state**: yes
 
-Import a context-data source with the confirmed `settings`, exactly as given, and record it as a `SourceDataset` with licence, attribution and provenance. A source with no declared CRS and no `settings.horizontal_crs` is refused with `E_CRS_REQUIRED`, never guessed; the project must have a CRS. Every object gets a GUID. `reimport_of` names an earlier source of the same kind and format: objects are matched on their own source key, matched ones keep their GUID, and the source keeps its id. Without it the import is a new source with all-new GUIDs. Counts report added, changed, unchanged and removed objects. Give exactly one of `path` and `paths`; every path must be absolute. With `paths` all files must resolve to the same reader (mixed formats are `E_BAD_PARAMS`) and each file yields its own objects. `provider` (with `query`) is the third alternative: exactly one of `path`, `paths` and `provider`. The provider's files are fetched into its per-user cache (never the repository or the data folder), read by the ordinary readers, and the source records a provider origin (provider id, canonical query, file hashes), the provider's licence and attribution. A clip left out of `settings` defaults to the query's. `reimport_of` fetches again, reconciles on the object keys (sheet codes, tile names) and keeps the GUIDs. The result shape is the same.
+Import a context-data source with the confirmed `settings`, exactly as given except that a raster nodata is recorded as cast to the raster's sample type (F51), and record it as a `SourceDataset` with licence, attribution and provenance. A source with no declared CRS and no `settings.horizontal_crs` is refused with `E_CRS_REQUIRED`, never guessed; the project must have a CRS. Every object gets a GUID. `reimport_of` names an earlier source of the same kind and format: objects are matched on their own source key, matched ones keep their GUID, and the source keeps its id. Without it the import is a new source with all-new GUIDs. Counts report added, changed, unchanged and removed objects. For files, a non-empty `attribution` and `licence` are recorded on the dataset; a re-import that sends neither keeps the previous source's values (the unknown placeholder is not kept, so the reader's hint applies). With `provider` either one is `E_BAD_PARAMS`: attribution and licence come from the provider. Give exactly one of `path` and `paths`; every path must be absolute. With `paths` all files must resolve to the same reader (mixed formats are `E_BAD_PARAMS`) and each file yields its own objects. `provider` (with `query`) is the third alternative: exactly one of `path`, `paths` and `provider`. The provider's files are fetched into its per-user cache (never the repository or the data folder), read by the ordinary readers, and the source records a provider origin (provider id, canonical query, file hashes), the provider's licence and attribution. A clip left out of `settings` defaults to the query's. `reimport_of` fetches again, reconciles on the object keys (sheet codes, tile names) and keeps the GUIDs. The result shape is the same.
 
 **Params**
 
@@ -295,6 +296,8 @@ Import a context-data source with the confirmed `settings`, exactly as given, an
 | `name` | `str | None` | `None` |
 | `format_id` | `str | None` | `None` |
 | `reimport_of` | `str | None` | `None` |
+| `attribution` | `str | None` | `None` |
+| `licence` | `str | None` | `None` |
 
 **Result**
 
