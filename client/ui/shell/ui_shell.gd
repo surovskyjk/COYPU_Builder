@@ -89,6 +89,7 @@ var _popover_close: Button
 var _popover_hidden_msec := -REOPEN_GUARD_MSEC  # Time.get_ticks_msec() when the popover last hid
 
 var _export_dialog: EnvelopeExportDialog
+var _import_dialog: ImportDialog
 var _settings_dialog: SettingsDialog
 
 
@@ -120,6 +121,8 @@ func _ready() -> void:
 	_export_dialog = EnvelopeExportDialog.new()
 	_export_dialog.exported.connect(_on_exported)
 	add_child(_export_dialog)
+	_import_dialog = ImportDialog.new()
+	add_child(_import_dialog)
 	_settings_dialog = SettingsDialog.new()
 	_settings_dialog.preset_selected.connect(_on_settings_preset_selected)
 	_settings_dialog.opacity_changed.connect(_on_settings_opacity_changed)
@@ -185,6 +188,10 @@ func settings() -> UserSettings:
 
 func export_dialog() -> EnvelopeExportDialog:
 	return _export_dialog
+
+
+func import_dialog() -> ImportDialog:
+	return _import_dialog
 
 
 func settings_dialog() -> SettingsDialog:
@@ -302,6 +309,10 @@ func open_envelope_export() -> void:
 	_export_dialog.open(Session.alignments())
 
 
+func open_import_dialog() -> void:
+	_import_dialog.open(Session.alignments())
+
+
 func open_settings() -> void:
 	var shown_opacity := UiPreset.builtin(UiPreset.SANDBOX).panel_opacity
 	if _preset.panel_mode == UiPreset.PanelMode.FLOATING:
@@ -320,6 +331,9 @@ func show_dialog(dialog_name: StringName, offset: Vector2i = Vector2i.ZERO) -> b
 		&"envelope_export":
 			open_envelope_export()
 			window = _export_dialog
+		&"import":
+			open_import_dialog()
+			window = _import_dialog
 		&"settings":
 			open_settings()
 			window = _settings_dialog
@@ -334,6 +348,7 @@ func show_dialog(dialog_name: StringName, offset: Vector2i = Vector2i.ZERO) -> b
 
 func close_dialogs() -> void:
 	_export_dialog.hide()
+	_import_dialog.hide()
 	_settings_dialog.hide()
 	close_data_sources()
 
@@ -407,7 +422,7 @@ func chrome_rects() -> Array[Rect2]:
 			rects.append((_panels[panel_id] as Control).get_global_rect())
 	if _overlay != null:
 		rects.append(_overlay.get_global_rect())
-	for window: Window in [_export_dialog, _settings_dialog]:
+	for window: Window in [_export_dialog, _import_dialog, _settings_dialog]:
 		if window.visible:
 			rects.append(Rect2(Vector2(window.position) - Vector2(1.0, 36.0), Vector2(window.size) + Vector2(2.0, 37.0)))
 	if _data_popover != null and _data_popover.visible:
@@ -500,6 +515,8 @@ func _set_rect(control: Control, rect: Rect2) -> void:
 
 func _on_command(id: StringName) -> void:
 	match id:
+		Ribbon.CMD_IMPORT_SOURCES:
+			open_import_dialog()
 		Ribbon.CMD_EXPORT_ENVELOPE:
 			open_envelope_export()
 		Ribbon.CMD_SETTINGS:

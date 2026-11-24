@@ -85,6 +85,7 @@ func _ready() -> void:
 	EventBus.project_changed.connect(relist)
 	EventBus.backend_state_changed.connect(_on_backend_state_changed)
 	EventBus.source_boundaries_changed.connect(_on_source_boundaries_changed)
+	EventBus.sources_changed.connect(_on_sources_changed)
 	Session.layers().define(IMAGERY_LAYER_ID, "Imagery")
 	_boundaries = Session.source_boundaries()
 	_on_layers_changed()
@@ -238,6 +239,11 @@ func _on_source_boundaries_changed(on: bool) -> void:
 	_boundaries = on
 	for key: Vector3i in _tiles.keys():
 		(_tiles[key] as TerrainTile).set_boundaries(on)
+
+
+## A source was imported (T-136): list again, so the new source shows without waiting for a stale revision.
+func _on_sources_changed(_kind: String) -> void:
+	relist()
 
 
 func _on_backend_state_changed(state: int) -> void:

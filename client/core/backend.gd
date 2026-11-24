@@ -144,8 +144,8 @@ func shutdown() -> void:
 
 ## Coroutine. Awaits the matching 'res'/'err' envelope. On timeout or a dead connection it returns a
 ## locally synthesised 'err' envelope with code "E_TIMEOUT" / "E_DISCONNECTED" so that callers have
-## exactly one failure shape to handle and never await forever.
-func request(method: String, params: Dictionary = {}) -> IpcEnvelope:
+## exactly one failure shape to handle and never await forever. `timeout_sec` lets a long call (an import) wait longer.
+func request(method: String, params: Dictionary = {}, timeout_sec: float = REQUEST_TIMEOUT_SEC) -> IpcEnvelope:
 	if not _client.is_open():
 		return _error_envelope("", method, "E_DISCONNECTED", "not connected to backend")
 
@@ -154,7 +154,7 @@ func request(method: String, params: Dictionary = {}) -> IpcEnvelope:
 	_pending_requests[request_id] = pending
 
 	var elapsed := 0.0
-	while not bool(pending["resolved"]) and elapsed < REQUEST_TIMEOUT_SEC:
+	while not bool(pending["resolved"]) and elapsed < timeout_sec:
 		await get_tree().create_timer(_POLL_STEP_SEC).timeout
 		elapsed += _POLL_STEP_SEC
 	_pending_requests.erase(request_id)
@@ -162,7 +162,7 @@ func request(method: String, params: Dictionary = {}) -> IpcEnvelope:
 	if pending["resolved"]:
 		return pending["envelope"]
 	return _error_envelope(
-		request_id, method, "E_TIMEOUT", "no reply to '%s' within %.1fs" % [method, REQUEST_TIMEOUT_SEC]
+		request_id, method, "E_TIMEOUT", "no reply to '%s' within %.1fs" % [method, timeout_sec]
 	)
 
 

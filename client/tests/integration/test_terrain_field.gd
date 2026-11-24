@@ -1096,3 +1096,24 @@ func _all_visible_overlays(on: bool) -> bool:
 			return false
 		checked += 1
 	return checked > 0
+
+
+## T-136 Part B: a source imported from the dialog emits `sources_changed`, and the field lists again at once.
+func test_sources_changed_relists() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	var listings: Array = []
+	Session.set_terrain_request_override(func(method: String, _params: Dictionary) -> IpcEnvelope:
+		if method == "terrain.tiles":
+			listings.append(method)
+		return null
+	)
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(
+		func() -> bool: return listings.size() >= 1 and _field.revision() >= 0, _FIELD_TIMEOUT_SEC
+	)).is_true()
+	var before := listings.size()
+	EventBus.sources_changed.emit("terrain")
+	var relisted := await _wait_until(func() -> bool: return listings.size() > before, 10.0)
+	assert_bool(relisted).append_failure_message("sources_changed did not make the field list again").is_true()

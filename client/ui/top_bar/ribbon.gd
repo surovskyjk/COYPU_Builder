@@ -4,9 +4,8 @@ extends PanelContainer
 ## Sandbox style. Both are this one node built from one command list ([method default_commands]); only
 ## [method set_compact] differs (icon beside a short label, no group captions).
 ##
-## A group appears only once a task has put a command in it: Project (open/save, T-145) and Import (T-136)
-## have none yet, so they are absent rather than shown with disabled buttons. Adding a command is adding one
-## dictionary to the list.
+## A group appears only once a task has put a command in it: Project (open/save, T-145) has none yet, so it is
+## absent rather than shown with disabled buttons. Adding a command is adding one dictionary to the list.
 ##
 ## Every command carries a tooltip and a keyboard shortcut taken from an input action in `project.godot`
 ## (rebindable there); the tooltip prints the key. The ribbon owns no behaviour: pressing a button emits
@@ -23,6 +22,7 @@ const GROUP_TITLES := {
 	&"project": "Project", &"import": "Import", &"corridor": "Corridor", &"view": "View", &"app": "Application",
 }
 
+const CMD_IMPORT_SOURCES := &"import.sources"
 const CMD_EXPORT_ENVELOPE := &"corridor.export_envelope"
 const CMD_CAMERA_ORBIT := &"view.camera_orbit"
 const CMD_CAMERA_WAYSIDE := &"view.camera_wayside"
@@ -48,9 +48,14 @@ var _icon_px := 18
 
 
 ## The commands this task ships. `action` is the input action that gives the shortcut; `toggle` marks a
-## state button. Later tasks append their own (Open/Save in `project`, terrain and imagery in `import`, ...).
+## state button. Later tasks append their own (Open/Save in `project`, and the rest of the groups, ...).
 static func default_commands() -> Array[Dictionary]:
 	return [
+		{
+			"id": CMD_IMPORT_SOURCES, "group": &"import", "label": "Import terrain or imagery…", "short": "Import",
+			"icon": "import_sources", "action": "shell_import_sources",
+			"tip": "Import terrain or imagery from files: inspect them, confirm the settings, then import.",
+		},
 		{
 			"id": CMD_EXPORT_ENVELOPE, "group": &"corridor", "label": "Export corridor envelope…",
 			"short": "Envelope", "icon": "export_envelope", "action": "shell_export_envelope",

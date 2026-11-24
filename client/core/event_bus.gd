@@ -20,3 +20,4 @@ signal camera_changed(mode: int)                  # CameraManager.Mode
 signal source_boundaries_changed(on: bool)        # Session.set_source_boundaries: the terrain's boundary overlay (T-135 B)
 signal data_sources_changed()                     # Session.set_data_sources: the terrain and imagery sources in view (T-135 B)
 signal status_message(text: String)               # a plain sentence for the status bar, from any scene object (T-135 B)
+signal sources_changed(kind: String)              # ImportDialog: a source was imported; kind "terrain" | "imagery" (T-136 B)

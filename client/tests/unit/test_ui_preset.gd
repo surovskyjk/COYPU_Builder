@@ -139,8 +139,8 @@ func test_ribbon_holds_only_commands_that_exist() -> void:
 	var ribbon := shell.ribbon()
 	var ids := ribbon.command_ids()
 	assert_array(ids).contains_exactly_in_any_order([
-		Ribbon.CMD_EXPORT_ENVELOPE, Ribbon.CMD_CAMERA_ORBIT, Ribbon.CMD_CAMERA_WAYSIDE, Ribbon.CMD_CAMERA_CAB,
-		Ribbon.CMD_SOURCE_BOUNDARIES, Ribbon.CMD_SETTINGS,
+		Ribbon.CMD_IMPORT_SOURCES, Ribbon.CMD_EXPORT_ENVELOPE, Ribbon.CMD_CAMERA_ORBIT, Ribbon.CMD_CAMERA_WAYSIDE,
+		Ribbon.CMD_CAMERA_CAB, Ribbon.CMD_SOURCE_BOUNDARIES, Ribbon.CMD_SETTINGS,
 	])
 	for id in ids:
 		var command_button := ribbon.button(id)
@@ -149,7 +149,29 @@ func test_ribbon_holds_only_commands_that_exist() -> void:
 		assert_object(command_button.shortcut).is_not_null()
 		assert_object(command_button.icon).is_not_null()
 	assert_object(ribbon.find_child("ProjectGroup", true, false)).is_null()
-	assert_object(ribbon.find_child("ImportGroup", true, false)).is_null()
+	assert_object(ribbon.find_child("ImportGroup", true, false)).is_not_null()
+
+
+## T-136 Part B: the Import command is in the Import group, and pressing it opens the import dialog.
+func test_import_command_opens_the_dialog() -> void:
+	var shell := await _make_shell()
+	var ribbon := shell.ribbon()
+	var button := ribbon.button(Ribbon.CMD_IMPORT_SOURCES)
+	assert_object(button).is_not_null()
+	assert_object(button.get_parent().get_parent()).is_same(ribbon.find_child("ImportGroup", true, false))
+	assert_str(button.tooltip_text).contains("Import terrain or imagery…")
+	assert_bool(shell.import_dialog().visible).is_false()
+
+	button.pressed.emit()
+	await get_tree().process_frame
+	assert_bool(shell.import_dialog().visible).append_failure_message("the command did not open the dialog").is_true()
+	assert_int(shell.import_dialog().step()).is_equal(ImportDialog.STEP_SOURCE)
+
+	shell.close_dialogs()
+	assert_bool(shell.import_dialog().visible).is_false()
+	assert_bool(shell.show_dialog(&"import")).is_true()
+	assert_bool(shell.import_dialog().visible).is_true()
+	shell.close_dialogs()
 
 
 func test_camera_buttons_follow_camera_changes() -> void:

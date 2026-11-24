@@ -267,7 +267,7 @@ T-140: the product frame around the 3D view. `scene/main.tscn` instances `ui/she
   panel exists once; a later task puts content into `DockPanel.body()` without caring where the panel sits.
   Translucency is the card's own fill alpha only (text and icons stay opaque), 0.4 to 1.0, adjustable live.
 - **`Ribbon`** (`ui/top_bar/ribbon.gd`) is built from one command list (`Ribbon.default_commands()`); a group
-  appears only when a task has put a command in it (Project and Import are absent for now, there are no disabled
+  appears only when a task has put a command in it (Project is absent for now, there are no disabled
   placeholders). Every command has a tooltip and a shortcut taken from an input action in `project.godot`
   (`shell_export_envelope` Ctrl+E, `shell_open_settings` Ctrl+,, and the existing `camera_mode_*` keys 1/2/3). The
   camera buttons are a toggle group that follows `EventBus.camera_changed`, so a key press shows up there.
@@ -281,6 +281,43 @@ T-140: the product frame around the 3D view. `scene/main.tscn` instances `ui/she
   `overwrite: true`, and shows every backend error as one plain sentence (`EnvelopeExportDialog.plain_error`,
   including `E_BUSY` and `E_INTERNAL`). A path inside the repository is refused by the backend (ADR 0010) and shown
   as "save outside the project folder".
+- **Import terrain or imagery...** (`ui/dialogs/import_dialog.gd`, Ctrl+I, the Import group; T-136 Part B). Five
+  steps, shown in a strip at the top: 1 Source (Files… opens the native file dialog, filtered by the readers that
+  `import.formats` lists; "Import as" chooses Detect from the files, which is the default, Terrain or Imagery; Online
+  source is coming in the next step of this feature), 2 Inspect (the report of `import.inspect`: format, file count,
+  kind, declared CRS, extent, counts, licence and every warning verbatim, in a scrolling area; a file that declares no
+  CRS gets a notice), 3 Settings (every value of `ImportSettingsDTO`, pre-filled from the suggestion), 4 Import
+  (`import.run` with a busy indicator and elapsed time), 5 Result (a headline with the name, the added, changed,
+  unchanged and removed counts, the effective CRS and the transformation, licence and attribution). Back and Next are
+  the buttons (on the Result step only Close shows); the primary one reads Next, Import or Close, and when it is disabled a hint line under the buttons and
+  its tooltip say why. Escape closes. Enter in the name field, or in a CRS field once a code is chosen, presses the
+  enabled primary button; Enter in a number field only confirms the number and never starts the import. In a CRS field,
+  while no code is chosen and results are listed, Enter chooses the first result, and Down opens the list. The
+  horizontal CRS is required; the vertical CRS is recorded only. Each
+  step's fields are described in the dialog's doc comments.
+  - The window fits the screen. After every step change it is resized to its contents and centred, never taller than
+    90 % of the screen, so the buttons stay on screen at 1280 × 720.
+  - The settings are sent as entered. A field the user did not touch keeps the backend's suggestion, `null`
+    included. The dialog never rounds or clamps a number: every number is a `NumberField` (`ui/widgets/number_field.gd`) that
+    keeps the exact float and shows the shortest text that reads back as it, so 18184.9717 shows as written and the
+    float32 minimum as `-3.4028234663852890e+38`. Text that is not a number, or lies outside its bounds (a linear
+    unit, a buffer and a resolution must be above 0, and a buffer at most 5000 m), disables Import with a reason that names the field. Up and Down
+    step a number by its arrow step, rounded to the larger decimal count of the text and the step (0.3048 steps to 0.3148).
+    A point class is kept as suggested while the boxes stay as they were filled; every box ticked sends `null`
+    (every class), and any other choice sends the sorted list of the ticked codes. Each class shows its standard
+    LAS name beside its code; codes 8 and 12 are reserved in LAS 1.4 and show only the number.
+  - Next on step 1 with the same files keeps the inspection and the settings. Choosing other files, or another
+    "Import as", inspects again.
+  - `import.inspect` may take up to 300 s and `import.run` up to 1800 s before it times out. A timed-out import says
+    it may still finish, and the terrain lists its sources again.
+  - `E_BUSY` is retried after 0.5, 1, 2 and then 4 s, at most eight times, and then one sentence says the backend
+    stayed busy. Every other error is one plain sentence (`ImportDialog.plain_error`), and `E_CRS_REQUIRED` returns to
+    Settings with the CRS field focused. Without an open project, Next on step 1 is disabled with the reason.
+  - Closing the window does not stop a running import. Its outcome then goes to the status bar, and a success emits
+    `EventBus.sources_changed(kind)`, which `TerrainField` answers by listing the terrain again.
+  - The CRS fields (`ui/widgets/crs_picker.gd`) search `crs.search` after a 250 ms pause and show only the latest
+    answer. Free text is not a code: a code is chosen from the list. A CRS the file declares as WKT or PROJ text is
+    kept as it is and shown as "As declared in the file".
 - **User settings** (`core/user_settings.gd`): the style and the opacity, in a `ConfigFile` at
   `user://settings.cfg` (on Windows `%APPDATA%\Godot\app_userdata\COYPU Builder\`). A missing or damaged file
   gives the defaults and no error. An instance with an empty path is memory-only; the capture run uses one, so it
