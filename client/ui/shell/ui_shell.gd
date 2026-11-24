@@ -34,6 +34,10 @@ const _STATE_BAD_COLOR := Color("DC2626")
 const _STATE_PENDING_COLOR := Color("D97706")
 
 const DATA_POPOVER_SIZE := Vector2i(480, 300)
+## The popover is as tall as its entries (T-135 Part C review), never taller than this share of the window; past that
+## its list scrolls. The list is at least [constant POPOVER_LIST_MIN_PX] tall.
+const POPOVER_MAX_HEIGHT_FRACTION := 0.8
+const POPOVER_LIST_MIN_PX := 160.0
 const POPOVER_PADDING_PX := 12.0
 ## The width the popover's text wraps at: the popover less its padding and the scroll bar.
 const POPOVER_WRAP_PX := 440
@@ -86,7 +90,11 @@ var _status_sources: Button
 var _data_popover: PopupPanel
 var _popover_entries: VBoxContainer
 var _popover_close: Button
+var _popover_column: VBoxContainer
+var _popover_scroll: ScrollContainer
 var _popover_hidden_msec := -REOPEN_GUARD_MSEC  # Time.get_ticks_msec() when the popover last hid
+## Test seam: the window height the popover is capped against. Zero (the default) uses the viewport's height.
+var popover_window_height := 0.0
 
 var _export_dialog: EnvelopeExportDialog
 var _import_dialog: ImportDialog
@@ -360,16 +368,47 @@ func data_sources_popover() -> PopupPanel:
 
 ## Opens the popover above the right end of the status bar, moved by `offset` (capture use, as for the dialogs).
 func show_data_sources(offset: Vector2i = Vector2i.ZERO) -> void:
+	# Deferred: a popover closed in the same frame (see close_dialogs) would otherwise be hidden again. The size is
+	# worked out when it opens, once the entries have their layout.
+	_open_popover.call_deferred(offset)
+
+
+func _open_popover(offset: Vector2i) -> void:
+	var box := Vector2i(DATA_POPOVER_SIZE.x, _fit_data_popover())
 	var anchor := _status_bar.get_global_rect()
-	var box := DATA_POPOVER_SIZE
 	var at := Vector2i(int(anchor.end.x) - box.x - int(FLOAT_MARGIN), int(anchor.position.y) - box.y - 8) + offset
-	# Deferred: a popover closed in the same frame (see close_dialogs) would otherwise be hidden again.
-	_open_popover.call_deferred(Rect2i(at, box))
-
-
-func _open_popover(rect: Rect2i) -> void:
-	_data_popover.popup(rect)
+	_data_popover.popup(Rect2i(at, box))
 	_popover_close.grab_focus()
+
+
+func _popover_cap() -> int:
+	var height := popover_window_height if popover_window_height > 0.0 else get_viewport_rect().size.y
+	return int(height * POPOVER_MAX_HEIGHT_FRACTION)
+
+
+## Sizes the list to its entries and returns the popover's height. The list is between [constant POPOVER_LIST_MIN_PX]
+## and the room the cap leaves beside the other parts (title, hint, close button, separators) and the panel's frame. The
+## height is built from those parts, not read back from the column, since a minimum size changed here propagates only later.
+func _fit_data_popover() -> int:
+	if _popover_column == null:
+		return int(DATA_POPOVER_SIZE.y)
+	var frame := _popover_frame_px()
+	var rest := 0.0
+	for child: Node in _popover_column.get_children():
+		if child != _popover_scroll and child is Control:
+			rest += (child as Control).get_combined_minimum_size().y
+	rest += float(_popover_column.get_theme_constant(&"separation")) * maxi(_popover_column.get_child_count() - 1, 0)
+	var room := _popover_cap() - frame - rest
+	var list := clampf(_popover_entries.get_combined_minimum_size().y, POPOVER_LIST_MIN_PX, maxf(room, POPOVER_LIST_MIN_PX))
+	_popover_scroll.custom_minimum_size.y = list
+	return mini(int(rest + list + frame), _popover_cap())
+
+
+## The vertical space the popover's panel takes around its column: the top and bottom content margins of the panel's
+## theme stylebox, so the window carries no more blank space above Close than the frame itself.
+func _popover_frame_px() -> float:
+	var style := _data_popover.get_theme_stylebox(&"panel")
+	return style.get_content_margin(SIDE_TOP) + style.get_content_margin(SIDE_BOTTOM)
 
 
 func close_data_sources() -> void:
@@ -573,6 +612,7 @@ func _build_data_popover() -> void:
 	column.add_theme_constant_override(&"separation", 10)
 	column.custom_minimum_size = Vector2(DATA_POPOVER_SIZE.x - 2 * int(POPOVER_PADDING_PX), 0)
 	_data_popover.add_child(column)
+	_popover_column = column
 
 	var title := Label.new()
 	title.text = "Data sources"
@@ -587,8 +627,9 @@ func _build_data_popover() -> void:
 
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	scroll.custom_minimum_size = Vector2(DATA_POPOVER_SIZE.x - 2 * POPOVER_PADDING_PX, 160)
+	scroll.custom_minimum_size = Vector2(DATA_POPOVER_SIZE.x - 2 * POPOVER_PADDING_PX, POPOVER_LIST_MIN_PX)
 	column.add_child(scroll)
+	_popover_scroll = scroll
 	_popover_entries = VBoxContainer.new()
 	_popover_entries.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_popover_entries.add_theme_constant_override(&"separation", 8)

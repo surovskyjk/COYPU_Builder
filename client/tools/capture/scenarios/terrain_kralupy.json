@@ -1,0 +1,50 @@
+{
+  "project": "backend/tests/fixtures/kralupy/kralupy_neratovice_092.coypu",
+  "resolution": [1600, 900],
+  "ready_timeout_s": 900,
+  "imports": [
+    {
+      "kind": "terrain",
+      "paths": [
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV31.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV32.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV41.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV42.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV51.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV52.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV61.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV62.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV71.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV72.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV81.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV82.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV83.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV92.zip",
+        "${COYPU_DATA}/Terrain_Samples/cuzk/DMR5G/KRAV93.zip"
+      ],
+      "name": "ČÚZK DMR 5G",
+      "settings": {"horizontal_crs": "EPSG:5514", "clip": {"type": "corridor", "buffer_m": 250}}
+    },
+    {
+      "kind": "terrain",
+      "provider": "copernicus-glo30",
+      "query": {"clip": {"type": "corridor", "buffer_m": 2000}},
+      "name": "Copernicus GLO-30"
+    },
+    {
+      "kind": "imagery",
+      "provider": "cuzk-ortho-wmts",
+      "query": {"clip": {"type": "corridor", "buffer_m": 2000}},
+      "name": "ČÚZK orthophoto"
+    }
+  ],
+  "shots": [
+    {"name": "kralupy_overview", "camera": "orbit", "time_s": 900.0, "orbit_zoom_notches": 22, "orbit_drag_px": [0, -60], "settle_frames": 90},
+    {"name": "kralupy_cutting_km13", "camera": "orbit", "time_s": 800.22, "focus_station_m": 13000.0, "orbit_zoom_notches": -12, "orbit_drag_px": [0, 100], "settle_frames": 90},
+    {"name": "kralupy_cab_bridge", "camera": "cab", "time_s": 1024.18, "settle_frames": 90},
+    {"name": "kralupy_boundaries", "camera": "orbit", "time_s": 900.0, "orbit_zoom_notches": 22, "orbit_drag_px": [0, -126], "settle_frames": 90, "source_boundaries": true},
+    {"name": "kralupy_data_sources", "camera": "orbit", "time_s": 900.0, "settle_frames": 90, "ui": "visible", "preset": "engineering", "dialog": "data_sources"},
+    {"name": "kralupy_corridor", "camera": "orbit", "time_s": 550.0, "orbit_zoom_notches": 16, "orbit_drag_px": [-120, -300], "settle_frames": 90, "source_boundaries": true}
+  ],
+  "perf": {"camera": "cab", "time_s": 761.24, "rate": 4.0, "duration_s": 70.0, "first": true}
+}

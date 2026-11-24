@@ -36,7 +36,9 @@ var _trainsets: Dictionary = {}
 
 ## Test seam (T-135): `(method: String, params: Dictionary) -> IpcEnvelope or null`. When valid, it is asked
 ## first for every terrain request; a returned envelope is used instead of the backend, and `null` lets the
-## request go to the backend. Nothing in the application sets it.
+## request go to the backend. The override may also be a coroutine (T-135 Part C, F52): it is awaited, so it can hold
+## a reply until a test releases it, and then return the envelope or `null`. A plain function keeps working. Nothing
+## in the application sets it.
 var _terrain_request_override := Callable()
 
 ## Whether the terrain's source boundaries are drawn (T-135 Part B): set by the shell from the user's setting, read
@@ -235,7 +237,8 @@ func set_terrain_request_override(override: Callable) -> void:
 ## caller can read `result` (`revision`, `tiles`, `source_ids`) on `res` and the code on `err`. `E_BUSY` and
 ## `E_NOT_FOUND` are the caller's to handle (back off, re-list), and `E_NO_PROJECT` and `E_NO_SESSION` are the
 ## expected state before a project opens (`project_changed` re-lists); none of the four is reported as a backend
-## error. Any other failure emits [signal EventBus.backend_error]. Always resolves.
+## error, and neither is `E_BAD_PARAMS` from `terrain.tiles` or `imagery.tiles` (too many tiles to list): the field shows
+## its own status message for it. Any other failure emits [signal EventBus.backend_error]. Always resolves.
 func fetch_terrain_tiles(level: int) -> IpcEnvelope:
 	var envelope := await _terrain_request("terrain.tiles", {"level": level})
 	_report_terrain_failure(envelope)
@@ -256,7 +259,7 @@ func fetch_terrain_tile(level: int, ix: int, iy: int, revision: int) -> IpcEnvel
 
 func _terrain_request(method: String, params: Dictionary) -> IpcEnvelope:
 	if _terrain_request_override.is_valid():
-		var replaced: Variant = _terrain_request_override.call(method, params)
+		var replaced: Variant = await _terrain_request_override.call(method, params)
 		if replaced is IpcEnvelope:
 			return replaced
 	return await Backend.request(method, params)
@@ -267,6 +270,9 @@ func _report_terrain_failure(envelope: IpcEnvelope) -> void:
 		return
 	var code := String(envelope.error.get("code", "E_INTERNAL"))
 	if code == "E_BUSY" or code == "E_NOT_FOUND" or code == "E_NO_PROJECT" or code == "E_NO_SESSION":
+		return
+	# A listing refused for too many tiles is one status message from the field, not a backend error (T-135 Part C).
+	if code == "E_BAD_PARAMS" and (envelope.method == "terrain.tiles" or envelope.method == "imagery.tiles"):
 		return
 	EventBus.backend_error.emit(code, envelope.error.get("message", ""))
 

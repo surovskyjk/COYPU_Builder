@@ -8,9 +8,12 @@
   the output folder with one summary line per shot and for the frame-time statistics. Needs a desktop GPU
   and an interactive desktop session; it never runs on CI.
 
-  Exit codes: 0 every shot written and every frame looks like a real scene; 1 the capture failed (see the
-  errors it prints); 2 it did not finish within -TimeoutS and the process tree was killed; 3 the capture
-  finished but a backend process it started was still alive (it is killed here).
+  Exit codes: 0 every shot written and every frame looks like a real scene, or the scenario was skipped because
+  COYPU_DATA is not set (printed as "skipped: COYPU_DATA is not set"); 1 the capture failed (see the errors it
+  prints); 2 it did not finish within -TimeoutS and the process tree was killed; 3 the capture finished but a
+  backend process it started was still alive (it is killed here).
+  A scenario that names ${COYPU_DATA} gets a copy with the variable expanded from the environment, in a temporary
+  folder that is deleted afterwards.
 .PARAMETER Scenario
   A scenario name (client/tools/capture/scenarios/<name>.json) or a path to a scenario file.
 .PARAMETER Out
@@ -37,6 +40,13 @@ if (Test-Path -LiteralPath $Scenario -PathType Leaf) {
     }
 }
 $scenarioName = [System.IO.Path]::GetFileNameWithoutExtension($scenarioPath)
+$scenarioText = [System.IO.File]::ReadAllText($scenarioPath)
+# T-135 Part C: a scenario that names ${COYPU_DATA} needs the local data folder. Without it the scenario is skipped here,
+# before Godot starts, so the repository never needs a real data path.
+if ($scenarioText.Contains('${COYPU_DATA}') -and [string]::IsNullOrEmpty($env:COYPU_DATA)) {
+    Write-Host "skipped: COYPU_DATA is not set"
+    exit 0
+}
 
 $godot = Get-ChildItem (Join-Path $PSScriptRoot "godot") -Filter "Godot_v*_win64_console.exe" -ErrorAction SilentlyContinue |
     Select-Object -First 1
@@ -96,12 +106,24 @@ $gitCommit = $env:COYPU_CAPTURE_COMMIT
 
 $before = @(Get-BackendProcesses | ForEach-Object { $_.ProcessId })
 
+# The scenario Godot reads. With ${COYPU_DATA} in it, a copy with the folder written in (forward slashes, so the JSON
+# strings stay valid) goes to a temporary folder outside the repository; it is deleted when the run ends.
+$captureScenarioPath = $scenarioPath
+$expandedDir = $null
+if ($scenarioText.Contains('${COYPU_DATA}')) {
+    $expandedDir = Join-Path ([System.IO.Path]::GetTempPath()) ("coypu-capture-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $expandedDir | Out-Null
+    $captureScenarioPath = Join-Path $expandedDir "$scenarioName.json"
+    $dataFolder = $env:COYPU_DATA.Replace('\', '/')
+    [System.IO.File]::WriteAllText($captureScenarioPath, $scenarioText.Replace('${COYPU_DATA}', $dataFolder), (New-Object System.Text.UTF8Encoding $false))
+}
+
 $argList = @("--path", (Quote $client), "--resolution", ("{0}x{1}" -f $resolution[0], $resolution[1]), "--")
 if ($project) {
     $projectPath = if ([System.IO.Path]::IsPathRooted($project)) { $project } else { Join-Path $root $project }
     $argList += @("--project", (Quote $projectPath))
 }
-$argList += @("--capture", (Quote $scenarioPath), "--capture-out", (Quote $Out))
+$argList += @("--capture", (Quote $captureScenarioPath), "--capture-out", (Quote $Out))
 
 $stdoutLog = Join-Path $Out "godot_stdout.log"
 $stderrLog = Join-Path $Out "godot_stderr.log"
@@ -123,6 +145,7 @@ try {
         Stop-ProcessTree $proc.Id
         $null = $proc.WaitForExit(10000)
     }
+    if ($expandedDir) { Remove-Item -LiteralPath $expandedDir -Recurse -Force -ErrorAction SilentlyContinue }
 
     # Backend processes that appeared during this run and are still alive: the driver quits through
     # Backend.shutdown(), so there must be none. Give the OS a moment to reap a just-killed tree first.
@@ -160,6 +183,16 @@ if (Test-Path -LiteralPath $manifestPath) {
         $perf = $manifest.perf
         Write-Host ("  perf: {0} frames  p50 {1:N2}  p95 {2:N2}  p99 {3:N2}  max {4:N2} ms  >16.7 ms: {5}  >33.3 ms: {6}" -f $perf.frames, $perf.p50_ms, $perf.p95_ms, $perf.p99_ms, $perf.max_ms, $perf.over_16_7_ms, $perf.over_33_3_ms)
     }
+    foreach ($shot in $manifest.shots) {
+        if (-not $shot.memory) { continue }
+        $m = $shot.memory
+        $levels = @($m.tiles_per_level.PSObject.Properties | Sort-Object { [int]$_.Name } | ForEach-Object {
+            $drape = $m.draped_per_level.PSObject.Properties[$_.Name]
+            "L{0} {1}/{2}" -f $_.Name, $_.Value, $(if ($drape) { $drape.Value } else { 0 })
+        })
+        Write-Host ("  memory {0,-24} texture {1:N1} MiB  video {2:N1} MiB  tiles/draped {3}" -f $shot.file, ($m.texture_mem_bytes / 1MB), ($m.video_mem_bytes / 1MB), ($levels -join "  "))
+    }
+    foreach ($skip in $manifest.skipped) { Write-Host "  skipped: $skip" }
     foreach ($problem in $manifest.errors) { Write-Host "  ERROR: $problem" }
 } elseif (-not $timedOut) {
     Write-Host "no manifest.json was written"

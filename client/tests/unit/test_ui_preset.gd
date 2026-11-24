@@ -548,3 +548,36 @@ func test_popover_separates_each_entry_from_the_next() -> void:
 	var separators := shell.data_sources_popover().find_children("*", "HSeparator", true, false)
 	assert_int(separators.size()).is_equal(2)
 	Session.set_data_sources([] as Array[Dictionary])
+
+
+## T-135 Part C review: the Data sources popover is as tall as its entries, and no taller than the cap: 80 % of the window.
+func test_popover_grows_with_its_entries_and_stops_at_the_cap() -> void:
+	var shell := await _make_shell()
+	shell.popover_window_height = 500.0
+	var one: Array[Dictionary] = [{"source_id": "a", "kind": "terrain", "name": "T", "attribution": "A", "notices": PackedStringArray()}]
+	Session.set_data_sources(one)
+	await get_tree().process_frame
+	shell.show_data_sources()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var single := shell.data_sources_popover().size.y
+	shell.close_data_sources()
+	var many: Array[Dictionary] = []
+	for i in 30:
+		many.append({"source_id": "s%d" % i, "kind": "imagery", "name": "Source %d" % i,
+			"attribution": "Attribution text %d, long enough to wrap onto a second line in the popover." % i,
+			"notices": PackedStringArray()})
+	Session.set_data_sources(many)
+	await get_tree().process_frame
+	shell.show_data_sources()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var crowded := shell.data_sources_popover().size.y
+	var cap := int(500.0 * UiShell.POPOVER_MAX_HEIGHT_FRACTION)
+	assert_int(int(single)).append_failure_message("one entry: %d px" % single).is_less(int(crowded))
+	assert_int(int(crowded)).append_failure_message("thirty entries: %d px, cap %d px" % [crowded, cap]).is_less_equal(cap)
+	# The headless window is 16 px smaller than the requested rect (measured: 400 px box, 384 px window), so it can fall
+	# up to 16 px short of the cap. On a real display the window is exact.
+	assert_int(int(crowded)).append_failure_message("thirty entries stop short of the cap: %d px, cap %d px" % [crowded, cap]).is_greater_equal(cap - 16)
+	shell.close_data_sources()
+	Session.set_data_sources([] as Array[Dictionary])

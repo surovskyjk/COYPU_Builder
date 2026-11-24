@@ -44,6 +44,11 @@ const _RIDGE_WIDTH := 35.0
 
 var _field: TerrainField
 var _camera: Camera3D
+## T-135 Part C (F52): the imagery replies a test holds. `released` is set in `after_test` too, so no held reply outlives
+## its test.
+var _held: Dictionary = {"released": true}
+## F52 test gate: while `closed`, the override holds `terrain.tiles`. `after_test` opens it, so a failing test cannot hang.
+var _terrain_gate: Dictionary = {"closed": false}
 
 
 func before() -> void:
@@ -61,6 +66,8 @@ func after() -> void:
 
 
 func after_test() -> void:
+	_held["released"] = true
+	_terrain_gate["closed"] = false
 	Session.set_terrain_request_override(Callable())
 	var none: Array[Dictionary] = []
 	Session.set_data_sources(none)
@@ -1023,15 +1030,33 @@ func test_stale_imagery_job_is_dropped() -> void:
 	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
 	var calls := []
 	var moved := [false]
-	var seam := func(method: String, _params: Dictionary) -> IpcEnvelope:
-		if method == "imagery.tile":
-			calls.append(method)
-			if not moved[0]:
-				moved[0] = true
-				_field._revision += 1
-		return null
+	# The terrain lanes and the imagery lane run apart (F52), so a relist could restore the revision before the stale
+	# job is attached, and the job would then be current again. The gate holds terrain listings until that first job
+	# has been attached or dropped, so the revision stays stale for it.
+	var replied := [false]
+	_terrain_gate["closed"] = false
+	var seam := func(method: String, params: Dictionary) -> IpcEnvelope:
+		if method == "terrain.tiles" and _terrain_gate["closed"]:
+			while _terrain_gate["closed"]:
+				await get_tree().process_frame
+		if method != "imagery.tile":
+			return null
+		calls.append(method)
+		if moved[0]:
+			return null
+		moved[0] = true
+		_terrain_gate["closed"] = true
+		_field._revision += 1
+		var envelope: IpcEnvelope = await Backend.request(method, params)
+		replied[0] = true
+		return envelope
 	Session.set_terrain_request_override(seam)
 	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(func() -> bool: return replied[0], _FIELD_TIMEOUT_SEC)).is_true()
+	assert_bool(await _wait_until(
+		func() -> bool: return _field._jobs.is_empty() and _field._ready_queue.is_empty(), _FIELD_TIMEOUT_SEC
+	)).is_true()
+	_terrain_gate["closed"] = false
 	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
 	assert_bool(moved[0]).is_true()
 	var selected := TerrainLod.select_tiles(_camera.global_position, _field.lists())
@@ -1117,3 +1142,337 @@ func test_sources_changed_relists() -> void:
 	EventBus.sources_changed.emit("terrain")
 	var relisted := await _wait_until(func() -> bool: return listings.size() > before, 10.0)
 	assert_bool(relisted).append_failure_message("sources_changed did not make the field list again").is_true()
+
+
+## T-135 Part C (F52): a held imagery reply does not hold up the terrain. The override holds every imagery.tile until
+## the test releases it. While the first one is held the camera moves to a view whose terrain is not attached yet; that
+## terrain must still be fetched and attached. Released, the held tile drapes.
+func test_a_slow_imagery_reply_does_not_delay_terrain() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	_held = {"released": false, "held": 0, "key": Vector3i(-1, -1, -1)}
+	Session.set_terrain_request_override(func(method: String, params: Dictionary) -> IpcEnvelope:
+		if method != "imagery.tile":
+			return null
+		_held["held"] = int(_held["held"]) + 1
+		if int(_held["held"]) == 1:
+			_held["key"] = Vector3i(int(params["level"]), int(params["ix"]), int(params["iy"]))
+		while not _held["released"]:
+			await get_tree().process_frame
+		return null
+	)
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(func() -> bool: return int(_held["held"]) >= 1, _FIELD_TIMEOUT_SEC)).append_failure_message(
+		"no imagery request was made"
+	).is_true()
+
+	var unattached := 0
+	for key: Vector3i in TerrainLod.select_tiles(_CAMERA_B, _field.lists()):
+		if _field.tile_at(key) == null:
+			unattached += 1
+	assert_int(unattached).append_failure_message("the camera move selects no terrain that is not attached").is_greater(0)
+	_camera.position = _CAMERA_B
+	assert_bool(await _wait_until(_selection_attached, _FIELD_TIMEOUT_SEC)).append_failure_message(
+		"terrain selected while an imagery reply was held was never attached"
+	).is_true()
+	assert_int(int(_held["held"])).append_failure_message("a second imagery request went out while one was held").is_equal(1)
+
+	var held_key: Vector3i = _held["key"]
+	_held["released"] = true
+	assert_bool(await _wait_until(func() -> bool: return _has_imagery(held_key), _FIELD_TIMEOUT_SEC)).append_failure_message(
+		"the held imagery did not drape after its release"
+	).is_true()
+	assert_int(_field.tile_at(held_key).imagery_revision).is_equal(_field.imagery_revision())
+
+
+## T-135 Part C (F52): one imagery request is in flight at a time. The override counts the imagery requests that are
+## in flight, holding each for a few frames and then letting it reach the backend; the peak must be 1.
+func test_one_imagery_request_is_in_flight_at_a_time() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	var counts := {"in_flight": 0, "peak": 0, "requested": 0}
+	Session.set_terrain_request_override(func(method: String, params: Dictionary) -> IpcEnvelope:
+		if method != "imagery.tile":
+			return null
+		counts["in_flight"] = int(counts["in_flight"]) + 1
+		counts["requested"] = int(counts["requested"]) + 1
+		counts["peak"] = maxi(int(counts["peak"]), int(counts["in_flight"]))
+		for _frame in 3:
+			await get_tree().process_frame
+		var envelope: IpcEnvelope = await Backend.request(method, params)
+		counts["in_flight"] = int(counts["in_flight"]) - 1
+		return envelope
+	)
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	assert_int(int(counts["peak"])).append_failure_message("%d imagery requests were in flight at once" % counts["peak"]).is_equal(1)
+	assert_int(int(counts["requested"])).append_failure_message("only %d imagery requests were made" % counts["requested"]).is_greater(1)
+
+
+## T-135 Part C (F52): an incomplete composition is drawn, then requested again at the same revision after the delay,
+## and kept once the retry is complete. The override makes the first reply of one tile incomplete.
+func test_incomplete_imagery_is_retried_then_kept() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	var state := {"key": Vector3i(-1, -1, -1), "times": [], "revisions": []}
+	Session.set_terrain_request_override(func(method: String, params: Dictionary) -> IpcEnvelope:
+		if method != "imagery.tile":
+			return null
+		var key := Vector3i(int(params["level"]), int(params["ix"]), int(params["iy"]))
+		if state["key"] == Vector3i(-1, -1, -1):
+			state["key"] = key
+		if key != state["key"]:
+			return null
+		(state["times"] as Array).append(Time.get_ticks_msec())
+		(state["revisions"] as Array).append(int(params["revision"]))
+		var envelope: IpcEnvelope = await Backend.request(method, params)
+		if envelope.type == "res":
+			envelope.result["complete"] = (state["times"] as Array).size() >= 2
+		return envelope
+	)
+	_field = _start_field(_CAMERA_A)
+	_field.incomplete_retry_start_sec = 0.3
+	_field.incomplete_retry_max_sec = 0.6
+	assert_bool(await _wait_until(func() -> bool: return (state["times"] as Array).size() >= 2, _FIELD_TIMEOUT_SEC)).append_failure_message(
+		"the incomplete tile was never requested again"
+	).is_true()
+	var times: Array = state["times"]
+	var gap: int = times[1] - times[0]
+	assert_int(gap).append_failure_message("the retry came %d ms after the first request, expected at least 300 ms" % gap).is_greater_equal(270)
+	assert_bool(await _wait_until(_imagery_settled, _FIELD_TIMEOUT_SEC)).is_true()
+	for revision: int in state["revisions"]:
+		assert_int(revision).append_failure_message("the retry asked for another revision").is_equal(_field.imagery_revision())
+	var tile := _field.tile_at(state["key"])
+	assert_bool(tile != null and tile.has_imagery()).append_failure_message("the incomplete tile lost its drape").is_true()
+
+
+## T-135 Part C (F52): a retry stops when its tile leaves the view. Every imagery reply is incomplete. Once the tile
+## is draped, the camera moves to a view that does not select it; after its retry delay has passed, it must not be asked
+## for again, while other tiles of the new view are retried, which shows that the retry timers are running.
+func test_retry_stops_when_the_tile_leaves_the_view() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	var asked := {}
+	Session.set_terrain_request_override(func(method: String, params: Dictionary) -> IpcEnvelope:
+		if method != "imagery.tile":
+			return null
+		var key := Vector3i(int(params["level"]), int(params["ix"]), int(params["iy"]))
+		asked[key] = int(asked.get(key, 0)) + 1
+		var envelope: IpcEnvelope = await Backend.request(method, params)
+		if envelope.type == "res":
+			envelope.result["complete"] = false
+		return envelope
+	)
+	_field = _start_field(_CAMERA_A)
+	_field.incomplete_retry_start_sec = 1.0
+	_field.incomplete_retry_max_sec = 2.0
+	assert_bool(await _wait_until(func() -> bool: return not asked.is_empty(), _FIELD_TIMEOUT_SEC)).is_true()
+	var far := TerrainLod.select_tiles(_CAMERA_FAR, _field.lists())
+	var leaver := Vector3i(-1, -1, -1)
+	for key: Vector3i in asked.keys():
+		if not far.has(key):
+			leaver = key
+			break
+	assert_bool(leaver.x >= 0).append_failure_message("no imagery tile is outside the far view").is_true()
+	assert_bool(await _wait_until(func() -> bool: return _has_imagery(leaver), _FIELD_TIMEOUT_SEC)).is_true()
+	var due_by := Time.get_ticks_msec() + 1300
+	_camera.position = _CAMERA_FAR
+	assert_bool(await _wait_until(func() -> bool: return Time.get_ticks_msec() >= due_by, _FIELD_TIMEOUT_SEC)).is_true()
+	assert_bool(await _wait_until(func() -> bool: return _retried_other_than(asked, leaver), _FIELD_TIMEOUT_SEC)).append_failure_message(
+		"no tile of the far view was retried; the timers did not run"
+	).is_true()
+	assert_int(int(asked[leaver])).append_failure_message("the tile that left the view was requested again").is_equal(1)
+
+
+## T-135 Part C review: every selected incomplete tile is asked for a second time. Its first reply is incomplete, its second
+## complete, with short delays. This is a whole-path smoke test: it does not by itself catch the loss of the last tile's
+## record. `test_a_record_survives_until_its_tile_is_draped` and `test_due_retry_skips_a_pending_tile` cover that.
+func test_every_incomplete_tile_is_retried() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	var asked := {}
+	Session.set_terrain_request_override(func(method: String, params: Dictionary) -> IpcEnvelope:
+		if method != "imagery.tile":
+			return null
+		var key := Vector3i(int(params["level"]), int(params["ix"]), int(params["iy"]))
+		asked[key] = int(asked.get(key, 0)) + 1
+		var envelope: IpcEnvelope = await Backend.request(method, params)
+		if envelope.type == "res":
+			envelope.result["complete"] = int(asked[key]) >= 2
+		return envelope
+	)
+	_field = _start_field(_CAMERA_A)
+	_field.incomplete_retry_start_sec = 0.3
+	_field.incomplete_retry_max_sec = 0.6
+	assert_bool(await _wait_until(func() -> bool: return _unretried_count(asked) == 0, 20.0)).is_true()
+	assert_int(_unretried_count(asked)).append_failure_message("selected tiles not asked a second time").is_equal(0)
+
+
+## T-135 Part C review: a level the backend refuses with `E_BAD_PARAMS` (too many tiles) is skipped, the coarser levels
+## show, and the listing gives exactly one status message, not a backend error.
+func test_a_refused_level_is_skipped_with_one_message() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	var messages := []
+	var collect := func(text: String) -> void:
+		messages.append(text)
+	var errors := []
+	var collect_error := func(code: String, _message: String) -> void:
+		errors.append(code)
+	EventBus.status_message.connect(collect)
+	EventBus.backend_error.connect(collect_error)
+	Session.set_terrain_request_override(func(method: String, params: Dictionary) -> IpcEnvelope:
+		if method != "terrain.tiles" or int(params["level"]) != 0:
+			return null
+		var refused := IpcEnvelope.new()
+		refused.type = "err"
+		refused.method = method
+		refused.error = {"code": "E_BAD_PARAMS", "message": "more than 5000 tiles (test)"}
+		refused.blobs = {}
+		return refused
+	)
+	_field = _start_field(_CAMERA_A)
+	var attached := await _wait_until(_selection_attached, _FIELD_TIMEOUT_SEC)
+	EventBus.status_message.disconnect(collect)
+	EventBus.backend_error.disconnect(collect_error)
+	assert_bool(attached).append_failure_message("the coarser levels never attached").is_true()
+	assert_int(messages.size()).append_failure_message("status messages: %s" % str(messages)).is_equal(1)
+	assert_array(errors).append_failure_message("backend errors for a refused level: %s" % str(errors)).is_empty()
+	if messages.size() == 1:
+		assert_bool(String(messages[0]).contains("Terrain level 0")).append_failure_message(String(messages[0])).is_true()
+	var keys := _field.attached_keys()
+	assert_int(keys.size()).is_greater(0)
+	for key: Vector3i in keys:
+		assert_int(key.x).append_failure_message("a tile of refused level 0 was attached: %s" % key).is_greater_equal(1)
+
+
+## T-135 Part C review: an imagery level the backend refuses with `E_BAD_PARAMS` (too many tiles) is skipped. Its tiles show
+## without imagery and the coarser imagery levels drape. The listing gives one status message and no backend error.
+func test_a_refused_imagery_level_is_skipped_with_one_message() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	assert_bool(await _import_imagery(_FILE_IMAGE, Color(0.35, 0.55, 0.3), "Synthetic image")).is_true()
+	var messages := []
+	var collect := func(text: String) -> void:
+		messages.append(text)
+	var errors := []
+	var collect_error := func(code: String, _message: String) -> void:
+		errors.append(code)
+	EventBus.status_message.connect(collect)
+	EventBus.backend_error.connect(collect_error)
+	Session.set_terrain_request_override(func(method: String, params: Dictionary) -> IpcEnvelope:
+		if method != "imagery.tiles" or int(params["level"]) != 0:
+			return null
+		var refused := IpcEnvelope.new()
+		refused.type = "err"
+		refused.method = method
+		refused.error = {"code": "E_BAD_PARAMS", "message": "more than 5000 tiles (test)"}
+		refused.blobs = {}
+		return refused
+	)
+	_field = _start_field(_CAMERA_A)
+	var settled := await _wait_until(func() -> bool: return _field.settled(), _FIELD_TIMEOUT_SEC)
+	EventBus.status_message.disconnect(collect)
+	EventBus.backend_error.disconnect(collect_error)
+	assert_bool(settled).append_failure_message("the field never settled with a refused imagery level").is_true()
+	assert_array(errors).append_failure_message("backend errors for a refused imagery level: %s" % str(errors)).is_empty()
+	assert_int(messages.size()).append_failure_message("status messages: %s" % str(messages)).is_equal(1)
+	if messages.size() == 1:
+		var text := String(messages[0])
+		assert_bool(text.contains("Imagery level 0") and text.contains("those tiles show without imagery")).append_failure_message(
+			text
+		).is_true()
+	var fine_tiles := 0
+	var coarse_drapes := 0
+	for key: Vector3i in _field.attached_keys():
+		var tile := _field.tile_at(key)
+		if key.x == 0:
+			fine_tiles += 1
+			assert_bool(tile.has_imagery()).append_failure_message("a tile of refused imagery level 0 was draped: %s" % key).is_false()
+		elif tile.has_imagery():
+			coarse_drapes += 1
+	assert_int(fine_tiles).append_failure_message("no level-0 tile was attached, so the refusal was not exercised").is_greater(0)
+	assert_int(coarse_drapes).append_failure_message("no coarser tile was draped").is_greater(0)
+
+
+## T-135 Part C review: the record of an incomplete reply survives until its tile is draped. The drape job of a tile
+## attaches a frame or more after its reply, so a record made at the reply must not be dropped while the tile has no
+## current imagery. Deterministic: no timing, the check runs in one call.
+func test_a_record_survives_until_its_tile_is_draped() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_selection_attached, _FIELD_TIMEOUT_SEC)).is_true()
+	assert_bool(await _wait_until(func() -> bool: return _field.imagery_revision() >= 0, _FIELD_TIMEOUT_SEC)).is_true()
+	# No imagery or terrain fetch in flight, so the nearest tile's fetch cannot be running. The wait comes before the record
+	# is made, and nothing yields between the record and `_due_retry`, so the imagery lane cannot retry the tile meanwhile.
+	assert_bool(await _wait_until(
+		func() -> bool: return _field._imagery_pending.is_empty() and _field._jobs.is_empty(), _FIELD_TIMEOUT_SEC
+	)).is_true()
+	var key: Vector3i = _field._selected[0]
+	var tile: TerrainTile = _field.tile_at(key)
+	tile.imagery_revision = -1
+	_field.incomplete_retry_start_sec = 0.0
+	_field._note_completeness(key, false)
+	assert_bool(_field._retry_still_wanted(key)).append_failure_message("the record of an undraped tile was dropped").is_true()
+	assert_bool(_field._due_retry() == key).append_failure_message("the due retry did not return the undraped tile").is_true()
+
+
+## T-135 Part C review: a tile whose imagery fetch is in flight is not retried, and its record is kept. Once the flag is
+## cleared, the same record is returned. The flag stands for the fetch, so the check is deterministic and runs in one call.
+func test_due_retry_skips_a_pending_tile() -> void:
+	if not _require_ready():
+		return
+	assert_bool(await _open_project_with_terrain(_FILE_A)).is_true()
+	_field = _start_field(_CAMERA_A)
+	assert_bool(await _wait_until(_selection_attached, _FIELD_TIMEOUT_SEC)).is_true()
+	assert_bool(await _wait_until(func() -> bool: return _field.imagery_revision() >= 0, _FIELD_TIMEOUT_SEC)).is_true()
+	assert_bool(await _wait_until(
+		func() -> bool: return _field._imagery_pending.is_empty() and _field._jobs.is_empty(), _FIELD_TIMEOUT_SEC
+	)).is_true()
+	var key: Vector3i = _field._selected[0]
+	_field.incomplete_retry_start_sec = 0.0
+	_field._note_completeness(key, false)
+	_field._imagery_pending[key] = true
+	assert_bool(_field._due_retry() == null).append_failure_message("a tile whose fetch is in flight was returned for retry").is_true()
+	assert_bool(_field._incomplete.has(key)).append_failure_message("the record of a pending tile was dropped").is_true()
+	_field._imagery_pending.erase(key)
+	assert_bool(_field._due_retry() == key).append_failure_message("the tile was not returned once its fetch was over").is_true()
+
+
+## The selected tiles not yet asked for a second time, or -1 before a listing exists.
+func _unretried_count(asked: Dictionary) -> int:
+	var selected := TerrainLod.select_tiles(_camera.global_position, _field.lists())
+	if selected.is_empty():
+		return -1
+	var missing := 0
+	for key: Vector3i in selected:
+		if int(asked.get(key, 0)) < 2:
+			missing += 1
+	return missing
+
+
+func _has_imagery(key: Vector3i) -> bool:
+	var tile := _field.tile_at(key)
+	return tile != null and tile.has_imagery()
+
+
+## True once a tile other than `leaver` has been asked for twice, so the retry timers have run.
+func _retried_other_than(asked: Dictionary, leaver: Vector3i) -> bool:
+	for key: Vector3i in asked.keys():
+		if key != leaver and int(asked[key]) >= 2:
+			return true
+	return false

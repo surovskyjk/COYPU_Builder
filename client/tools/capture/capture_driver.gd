@@ -41,6 +41,9 @@ var _manifest_shots: Array[Dictionary] = []
 var _manifest_perf: Variant = null
 var _manifest_perf_baseline: Variant = null
 var _errors: Array[String] = []
+## Reasons the run did not do something it was asked for, without failing: an unset variable, or an import whose
+## provider could not be reached (T-135 Part C). Printed as `skipped: ...` and listed in the manifest.
+var _skipped: Array[String] = []
 
 var _recording_frames := false
 var _frame_ms := PackedFloat64Array()
@@ -97,7 +100,18 @@ func _run(scenario_path: String) -> void:
 		return
 
 	if _errors.is_empty():
-		await _capture_all()
+		# T-135 Part C: a variable an import path names is read here, so a scenario run without tools/capture.ps1 still
+		# expands it. An unset one skips the whole scenario, which exits 0 with its reason.
+		var values := {}
+		for name in _scenario.path_variables():
+			values[name] = OS.get_environment(name).replace("\\", "/") if OS.has_environment(name) else ""
+		var unset := _scenario.unset_variables(values)
+		if not unset.is_empty():
+			for name in unset:
+				_skip("%s is not set" % name)
+		else:
+			_scenario.expand_import_paths(values)
+			await _capture_all()
 	_finish()
 
 
@@ -161,25 +175,46 @@ func _run_imports() -> bool:
 				resolved.append(_resolve_path(String(path)))
 			params["paths"] = resolved
 		var inspect_params := {}
-		for key: String in ["path", "paths", "kind", "format_id"]:
+		for key: String in ["path", "paths", "kind", "format_id", "provider", "query"]:
 			if params.has(key):
 				inspect_params[key] = params[key]
-		var inspected := await Backend.request("import.inspect", inspect_params)
+		var inspected := await Backend.request("import.inspect", inspect_params, ImportDialog.request_timeout_sec("import.inspect"))
 		if inspected.type != "res":
-			_errors.append("import of %s: import.inspect failed: %s" % [str(params.get("kind", "?")), str(inspected.error.get("message", ""))])
+			var reason := String(inspected.error.get("message", ""))
+			if _skip_unreachable_provider(params, reason, String(inspected.error.get("code", ""))):
+				continue
+			_errors.append("import of %s: import.inspect failed: %s" % [str(params.get("kind", "?")), reason])
 			return false
 		var settings: Dictionary = (inspected.result.get("suggested_settings", {}) as Dictionary).duplicate()
 		settings.merge(params.get("settings", {}), true)
 		params["settings"] = settings
-		var ran := await Backend.request("import.run", params)
+		var ran := await Backend.request("import.run", params, ImportDialog.request_timeout_sec("import.run"))
 		if ran.type != "res":
-			_errors.append("import of %s: import.run failed: %s" % [str(params.get("kind", "?")), str(ran.error.get("message", ""))])
+			var run_reason := String(ran.error.get("message", ""))
+			if _skip_unreachable_provider(params, run_reason, String(ran.error.get("code", ""))):
+				continue
+			_errors.append("import of %s: import.run failed: %s" % [str(params.get("kind", "?")), run_reason])
 			return false
 		print("capture: imported %s as %s" % [str(params.get("kind", "?")), str(ran.result.get("name", ""))])
 	var got := await Backend.request("project.get", {})
 	if got.type == "res":
 		Session.set_project_info(got.result)
 	return true
+
+
+## T-135 Part C: a provider import that failed because its service or the network could not be reached is a skip, not
+## an error, so the remaining imports and shots still run. True when the failure was such a skip.
+func _skip_unreachable_provider(params: Dictionary, reason: String, code: String) -> bool:
+	if not params.has("provider") or not Scenario.is_unreachable(reason, code):
+		return false
+	_skip("%s could not be reached: %s" % [str(params["provider"]), reason])
+	return true
+
+
+## Prints a skip and records it for the manifest. A skip is not an error: the exit code stays 0.
+func _skip(reason: String) -> void:
+	print("skipped: %s" % reason)
+	_skipped.append(reason)
 
 
 ## A repository-relative path made absolute under the repository root; an absolute path stays as it is.
@@ -229,6 +264,7 @@ func _capture_shot(shot: Dictionary, timeline: TimelineState, playback: Playback
 		"source_boundaries": _shell.source_boundaries(),
 		"attribution": _shell.attribution_text(),
 	}
+	entry["memory"] = _memory_stats()
 	var image := get_viewport().get_texture().get_image()
 	var saved: int = ERR_CANT_CREATE if image == null else image.save_png(_out_dir.path_join(entry["file"]))
 	if saved != OK:
@@ -311,6 +347,26 @@ func _terrain_field() -> TerrainField:
 		if node is TerrainField:
 			return node as TerrainField
 	return null
+
+
+## T-135 Part C (F48): the video memory in use and, per level, the attached terrain tiles and those with imagery drape.
+## Read through the field's public accessors only; the counts are of attached tiles, shown or not.
+func _memory_stats() -> Dictionary:
+	var tiles := {}
+	var draped := {}
+	var field := _terrain_field()
+	if field != null:
+		for key: Vector3i in field.attached_keys():
+			var level := str(key.x)
+			tiles[level] = int(tiles.get(level, 0)) + 1
+			if field.tile_at(key).has_imagery():
+				draped[level] = int(draped.get(level, 0)) + 1
+	return {
+		"texture_mem_bytes": RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TEXTURE_MEM_USED),
+		"video_mem_bytes": RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIDEO_MEM_USED),
+		"tiles_per_level": tiles,
+		"draped_per_level": draped,
+	}
 
 
 ## Plays the perf block once and returns its frame-time statistics.
@@ -458,6 +514,7 @@ func _finish() -> void:
 		"shots": _manifest_shots,
 		"perf": _manifest_perf,
 		"perf_baseline": _manifest_perf_baseline,
+		"skipped": _skipped,
 		"errors": _errors,
 	}
 	var path := _out_dir.path_join("manifest.json")

@@ -355,10 +355,10 @@ func test_frame_stats_of_no_frames_are_zero() -> void:
 
 func test_cli_args_carry_the_capture_flags() -> void:
 	var result := CliArgs.parse(
-		PackedStringArray(["--project", "p.coypu", "--capture", "s.json", "--capture-out", "D:/out"])
+		PackedStringArray(["--project", "p.coypu", "--capture", "s.json", "--capture-out", "/opt/coypu-test-out"])
 	)
 	assert_str(result.get("capture", "")).is_equal("s.json")
-	assert_str(result.get("capture_out", "")).is_equal("D:/out")
+	assert_str(result.get("capture_out", "")).is_equal("/opt/coypu-test-out")
 	assert_str(result.get("project", "")).is_equal("p.coypu")
 
 
@@ -436,6 +436,89 @@ func test_imports_must_be_a_list_of_dictionaries() -> void:
 	var mixed := Scenario.parse('{"project": "p.coypu", "imports": [{"kind": "terrain"}, "a.xml"], "shots": [{"name": "a", "camera": "orbit"}]}')
 	_assert_error_mentions(mixed, "imports[1] must be an object")
 	assert_int(mixed.imports.size()).is_equal(1)
+
+	# T-135 Part C: a provider import keeps its provider id and its query for import.inspect and import.run.
+	var provider := Scenario.parse('{"project": "p.coypu", "imports": [{"kind": "terrain", "provider": "copernicus-glo30", "query": {"clip": {"type": "corridor", "buffer_m": 2000}}}], "shots": [{"name": "a", "camera": "orbit"}]}')
+	assert_array(provider.errors()).is_empty()
+	assert_str(String(provider.imports[0]["provider"])).is_equal("copernicus-glo30")
+	assert_float(float(provider.imports[0]["query"]["clip"]["buffer_m"])).is_equal_approx(2000.0, 1e-9)
+
+
+## T-135 Part C: a `${NAME}` in an import path names an environment variable. Unset, the scenario is skipped; set, its
+## value is written into the paths. The variables are read from a dictionary here, so the test never depends on the machine.
+func test_an_unset_variable_skips_the_scenario() -> void:
+	var scenario := Scenario.parse(
+		'{"project": "p.coypu", "imports": [{"kind": "terrain", "paths": ["${COYPU_TEST_DATA}/a.zip", "${COYPU_TEST_DATA}/b.zip"]}, {"kind": "imagery", "path": "${COYPU_TEST_OTHER}/c.png"}], "shots": [{"name": "a", "camera": "orbit"}]}'
+	)
+	assert_array(scenario.errors()).is_empty()
+	var names := scenario.path_variables()
+	assert_int(names.size()).is_equal(2)
+	assert_str(names[0]).is_equal("COYPU_TEST_DATA")
+	assert_str(names[1]).is_equal("COYPU_TEST_OTHER")
+	assert_int(scenario.unset_variables({}).size()).is_equal(2)
+	assert_int(scenario.unset_variables({"COYPU_TEST_DATA": "", "COYPU_TEST_OTHER": "/opt/coypu-test-data"}).size()).is_equal(1)
+	assert_str(scenario.unset_variables({"COYPU_TEST_DATA": "/opt/coypu-test-data"})[0]).is_equal("COYPU_TEST_OTHER")
+
+
+func test_a_set_variable_is_expanded() -> void:
+	var scenario := Scenario.parse(
+		'{"project": "p.coypu", "imports": [{"kind": "terrain", "paths": ["${COYPU_TEST_DATA}/a.zip", "relative/b.zip"]}, {"kind": "imagery", "path": "${COYPU_TEST_DATA}/c.png"}], "shots": [{"name": "a", "camera": "orbit"}]}'
+	)
+	scenario.expand_import_paths({"COYPU_TEST_DATA": "/opt/coypu-test-data"})
+	var paths: Array = scenario.imports[0]["paths"]
+	assert_str(String(paths[0])).is_equal("/opt/coypu-test-data/a.zip")
+	assert_str(String(paths[1])).is_equal("relative/b.zip")
+	assert_str(String(scenario.imports[1]["path"])).is_equal("/opt/coypu-test-data/c.png")
+	assert_int(scenario.unset_variables({"COYPU_TEST_DATA": "/opt/coypu-test-data"}).size()).is_equal(0)
+	assert_str(Scenario.expand_variables("${COYPU_TEST_DATA}/x", {})).is_equal("${COYPU_TEST_DATA}/x")
+
+
+## T-135 Part C: only the provider failures that say the service or the network could not be reached are skips.
+func test_a_network_failure_is_a_skip_and_other_provider_errors_are_not() -> void:
+	for message in [
+		"Copernicus DEM: https://example.invalid/tile.tif: giving up after 3 attempts (ConnectionError: refused)",
+		"ČÚZK download service: giving up after 3 attempts (HTTP 503)",
+		"ČÚZK download service: ConnectionError: refused",
+		"cannot connect",
+		"timed out",
+		"connection lost",
+		"no request is made while the service cannot be reached (cannot connect); retrying in 40 s",
+		"HTTP 503",
+	]:
+		assert_bool(Scenario.is_unreachable(message, "E_BAD_PARAMS")).append_failure_message("not read as unreachable: %s" % message).is_true()
+	# The backend dying is not a provider failure, whatever its wording; nor is a 404 or any other code.
+	assert_bool(Scenario.is_unreachable("connection lost", "E_DISCONNECTED")).append_failure_message("the backend dying is a skip").is_false()
+	assert_bool(Scenario.is_unreachable("cannot connect", "E_INTERNAL")).append_failure_message("an internal error is a skip").is_false()
+	assert_bool(Scenario.is_unreachable("HTTP 404", "E_BAD_PARAMS")).append_failure_message("a 404 is a skip").is_false()
+	for message in [
+		"Copernicus: request limit of 200 requests reached; fetch refused",
+		"no Copernicus DEM tile covers the clip region (open water has none)",
+		"ČÚZK orthophoto: refused URL 'https://example.invalid/' (not a ČÚZK host)",
+		"the ČÚZK capabilities are not safe, readable XML: unexpected end of file",
+		"no ČÚZK sheet overlaps the clip region",
+		"clip.type must be 'corridor' or 'bbox', got 'circle'",
+	]:
+		assert_bool(Scenario.is_unreachable(message, "E_BAD_PARAMS")).append_failure_message("read as unreachable: %s" % message).is_false()
+
+
+## T-135 Part C: the Kralupy scenario is valid, keeps `${COYPU_DATA}` unexpanded for tools/capture.ps1 to fill in, and its
+## perf block stays inside the run.
+func test_the_kralupy_terrain_scenario_is_valid() -> void:
+	var text := FileAccess.get_file_as_string("res://tools/capture/scenarios/terrain_kralupy.json")
+	assert_str(text).is_not_empty()
+	var scenario := Scenario.parse(text)
+	assert_array(scenario.errors()).is_empty()
+	assert_int(scenario.imports.size()).is_equal(3)
+	assert_int(scenario.shots.size()).is_equal(6)
+	assert_str(scenario.shots[5]["name"]).is_equal("kralupy_corridor")
+	assert_bool(scenario.has_perf()).is_true()
+	assert_bool(scenario.perf["first"]).is_true()
+	var names := scenario.path_variables()
+	assert_int(names.size()).is_equal(1)
+	assert_str(names[0]).is_equal("COYPU_DATA")
+	assert_int(scenario.unset_variables({"COYPU_DATA": "/opt/coypu-test-data"}).size()).is_equal(0)
+	scenario.check_against_run(true, 1159.0)
+	assert_array(scenario.errors()).is_empty()
 
 
 func test_source_boundaries_must_be_a_boolean() -> void:

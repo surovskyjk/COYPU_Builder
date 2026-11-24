@@ -8,10 +8,11 @@ extends Node3D
 ##   imagery of the attached tiles it lacks, attaches up to [constant ATTACH_PER_FRAME] finished jobs, frees the
 ##   least recently used tiles beyond [constant MAX_TILES], and publishes the data sources in view. It never sends
 ##   a request.
-## - One paging coroutine ([method _run], started from `_ready`) lists the terrain and then the imagery when asked
-##   to, and otherwise fetches one request at a time: terrain tiles first, nearest first, then imagery. A busy
-##   backend (`E_BUSY`, `E_TIMEOUT`) is waited out with exponential backoff; a stale revision (`E_NOT_FOUND`)
-##   asks for a new listing.
+## - Two paging coroutines, started from `_ready`. [method _run] lists the terrain and then the imagery when asked
+##   to, and fetches the terrain tiles, nearest first. [method _run_imagery] (the imagery lane, F52) fetches one
+##   imagery tile at a time, and the retries of incomplete compositions. The lanes are independent: a slow imagery
+##   reply never holds up terrain. A busy backend (`E_BUSY`, `E_TIMEOUT`) is waited out with exponential backoff;
+##   a stale revision (`E_NOT_FOUND`) asks for a new listing.
 ## - A finished fetch goes to a `WorkerThreadPool` task. A terrain task builds the arrays ([HeightfieldMesh]); an
 ##   imagery task decodes the JPEG and the alpha and source images ([TerrainMaterial.decode_job]). The `ArrayMesh`,
 ##   the node and the textures are made on the main thread when the field attaches them ([TerrainTile]).
@@ -36,6 +37,10 @@ const MAX_TILES := 256
 const BUSY_BACKOFF_START_SEC := 0.1
 const BUSY_BACKOFF_MAX_SEC := 2.0
 const IDLE_POLL_SEC := 0.05
+## An imagery tile the backend composed without every streamed tile (`complete: false`) is requested again after this
+## delay, doubling up to the maximum. The two values are the defaults of the test-settable members below.
+const INCOMPLETE_RETRY_START_SEC := 30.0
+const INCOMPLETE_RETRY_MAX_SEC := 300.0
 ## The imagery source that stands for shaded relief; it has no attribution entry and adds nothing to the attribution.
 const RELIEF_SOURCE := "relief"
 
@@ -58,6 +63,10 @@ var _imagery_pending: Dictionary = {}  # Vector3i -> true from the imagery fetch
 var _imagery_failed: Dictionary = {}
 var _request_queue: Array[Vector3i] = []
 var _imagery_queue: Array[Vector3i] = []
+var _incomplete: Dictionary = {}     # Vector3i -> {delay_sec, due_msec}: imagery drawn without all its tiles, due for a retry
+## The delays of the retry of incomplete imagery. Settable so that a test can run them in fractions of a second.
+var incomplete_retry_start_sec := INCOMPLETE_RETRY_START_SEC
+var incomplete_retry_max_sec := INCOMPLETE_RETRY_MAX_SEC
 var _selected: Array[Vector3i] = []  # the last selection, nearest first
 var _visibility_dirty := false
 var _sources_dirty := false
@@ -67,7 +76,9 @@ var _jobs: Dictionary = {}           # WorkerThreadPool task id -> job, until th
 var _ready_queue: Array = []         # finished jobs, in completion order, waiting to attach
 var _relist_wanted := false
 var _imagery_relist_wanted := false
-var _busy_streak := 0
+var _listing := false                # true while the paging lane lists the terrain or the imagery
+var _busy_streak := 0               # the terrain lane's E_BUSY streak (listings included)
+var _imagery_busy_streak := 0       # the imagery lane's E_BUSY streak
 var _frame := 0
 var _closing := false
 var _built_count := 0
@@ -91,6 +102,7 @@ func _ready() -> void:
 	_on_layers_changed()
 	_relist_wanted = true
 	_run()
+	_run_imagery()
 
 
 func _exit_tree() -> void:
@@ -180,10 +192,12 @@ func build_stats() -> Dictionary:
 	return {"count": _built_count, "mean_usec": mean}
 
 
-## True when nothing is in flight and every selected tile is attached and, with the Imagery layer on, draped with
-## the current imagery (or known to have none). The capture driver waits for it before a shot.
+## True when nothing is in flight on either lane and every selected tile is attached and, with the Imagery layer on,
+## draped with the current imagery (or known to have none). The capture driver waits for it before a shot.
 func settled() -> bool:
 	if _revision < 0 or _camera == null or not _selection_attached():
+		return false
+	if _listing or _relist_wanted or _imagery_relist_wanted:
 		return false
 	if not _request_queue.is_empty() or not _imagery_queue.is_empty():
 		return false
@@ -251,28 +265,87 @@ func _on_backend_state_changed(state: int) -> void:
 		relist()
 
 
-## The one paging coroutine: lists when asked, otherwise fetches one queued request at a time and idles between
-## checks. It ends when the field leaves the tree.
+## The terrain paging coroutine (the terrain lane): lists when asked, otherwise fetches one queued terrain tile at a
+## time and idles between checks. `_listing` is set for the whole of each listing, so the imagery lane waits. It
+## ends when the field leaves the tree.
 func _run() -> void:
 	while not _closing and is_inside_tree():
 		if _relist_wanted:
 			if Backend.state() == Backend.State.READY:
+				_listing = true
 				await _list_terrain()
+				_listing = false
 			else:
 				await get_tree().create_timer(IDLE_POLL_SEC).timeout
 		elif _imagery_relist_wanted:
 			if Backend.state() == Backend.State.READY:
+				_listing = true
 				await _list_imagery()
+				_listing = false
 			else:
 				await get_tree().create_timer(IDLE_POLL_SEC).timeout
 		elif not _request_queue.is_empty():
 			var key: Vector3i = _request_queue.pop_front()
 			await _fetch(key)
+		else:
+			await get_tree().create_timer(IDLE_POLL_SEC).timeout
+
+
+## The imagery paging coroutine (the imagery lane, F52): fetches one queued imagery tile at a time, so at most one
+## `imagery.tile` is in flight, and a slow reply never holds the terrain lane. When nothing is queued it retries an
+## incomplete composition whose delay has passed. It starts no request while a listing is wanted or running. It ends
+## when the field leaves the tree.
+func _run_imagery() -> void:
+	while not _closing and is_inside_tree():
+		await get_tree().process_frame
+		if _closing or not is_inside_tree():
+			return
+		if _listing or _relist_wanted or _imagery_relist_wanted:
+			await get_tree().create_timer(IDLE_POLL_SEC).timeout
 		elif not _imagery_queue.is_empty():
 			var imagery_key: Vector3i = _imagery_queue.pop_front()
 			await _fetch_imagery(imagery_key)
 		else:
-			await get_tree().create_timer(IDLE_POLL_SEC).timeout
+			var retry: Variant = _due_retry()
+			if retry == null:
+				await get_tree().create_timer(IDLE_POLL_SEC).timeout
+			else:
+				await _fetch_imagery(retry, true)
+
+
+## The first incomplete tile whose retry is due, or null. A record that no longer applies (the tile left the view,
+## was replaced, or the imagery revision changed) is dropped here, so it can never be returned again.
+func _due_retry() -> Variant:
+	var now := Time.get_ticks_msec()
+	for key: Vector3i in _incomplete.keys():
+		if not _retry_still_wanted(key):
+			_incomplete.erase(key)
+		elif _imagery_pending.has(key):
+			continue
+		elif int(_incomplete[key]["due_msec"]) <= now:
+			return key
+	return null
+
+
+## A record still applies while its tile is on screen and attached to the current terrain. The imagery revision is not
+## checked: a tile whose drape job has not attached yet has no current imagery, and that must not drop its record.
+func _retry_still_wanted(key: Vector3i) -> bool:
+	if not _tiles.has(key) or not _selected.has(key):
+		return false
+	var tile: TerrainTile = _tiles[key]
+	return tile.revision == _revision
+
+
+## Records the outcome of an imagery reply for the retry: a complete composition ends any retry; an incomplete one is
+## due again after the current delay, which doubles on each attempt, up to the maximum.
+func _note_completeness(key: Vector3i, complete: bool) -> void:
+	if complete:
+		_incomplete.erase(key)
+		return
+	var delay := incomplete_retry_start_sec
+	if _incomplete.has(key):
+		delay = minf(incomplete_retry_max_sec, float(_incomplete[key]["delay_sec"]) * 2.0)
+	_incomplete[key] = {"delay_sec": delay, "due_msec": Time.get_ticks_msec() + int(delay * 1000.0)}
 
 
 ## Lists the terrain levels, coarsest first. Every level must report the same revision; a change in between
@@ -283,12 +356,17 @@ func _list_terrain() -> void:
 	var lists := {}
 	var revision := -1
 	var source_ids := PackedStringArray()
+	var refused := []
 	for level in range(TerrainLod.MAX_LEVEL, -1, -1):
 		var envelope := await Session.fetch_terrain_tiles(level)
 		if _closing or not is_inside_tree():
 			return
 		if envelope.type != "res":
 			var code := String(envelope.error.get("code", ""))
+			if code == "E_BAD_PARAMS":
+				lists[level] = {}
+				refused.append(level)
+				continue
 			if code == "E_BUSY" or code == "E_TIMEOUT":
 				_relist_wanted = true
 				await get_tree().create_timer(busy_backoff_sec(_busy_streak)).timeout
@@ -303,6 +381,10 @@ func _list_terrain() -> void:
 			_relist_wanted = true
 			return
 		lists[level] = _index_tiles(envelope.result.get("tiles", []))
+	if not refused.is_empty():
+		EventBus.status_message.emit(_refusal_message("Terrain", refused))
+	if revision == -1:
+		return
 	_lists = lists
 	_revision = revision
 	_source_ids = source_ids
@@ -340,12 +422,17 @@ func _list_imagery() -> void:
 	var terrain_revision := -1
 	var attributions := {}
 	var notices := {}
+	var refused := []
 	for level in range(TerrainLod.MAX_LEVEL, -1, -1):
 		var envelope := await Session.fetch_imagery_tiles(level)
 		if _closing or not is_inside_tree():
 			return
 		if envelope.type != "res":
 			var code := String(envelope.error.get("code", ""))
+			if code == "E_BAD_PARAMS":
+				lists[level] = {}
+				refused.append(level)
+				continue
 			if code == "E_BUSY" or code == "E_TIMEOUT":
 				_imagery_relist_wanted = true
 				await get_tree().create_timer(busy_backoff_sec(_busy_streak)).timeout
@@ -365,12 +452,19 @@ func _list_imagery() -> void:
 			_imagery_relist_wanted = true
 			return
 		lists[level] = _index_imagery(envelope.result.get("tiles", []))
+	if not refused.is_empty():
+		EventBus.status_message.emit(_refusal_message("Imagery", refused))
+	if revision == -1:
+		return
 	_imagery_lists = lists
+	if revision != _imagery_revision:
+		_incomplete.clear()
 	_imagery_revision = revision
 	_imagery_terrain_revision = terrain_revision
 	_attributions = attributions
 	_notices = notices
 	_imagery_failed.clear()
+	_busy_streak = 0
 	_sources_dirty = true
 	# An imagery import adds a source the terrain listing has not named, so the names are read again here too.
 	await _read_source_names()
@@ -405,11 +499,13 @@ func _fetch(key: Vector3i) -> void:
 		_failed[key] = true
 
 
-func _fetch_imagery(key: Vector3i) -> void:
+## One imagery request (the imagery lane). `retry` asks again for a tile that is already draped with the current
+## imagery, because its composition was incomplete; `_retry_still_wanted` has checked that it still applies.
+func _fetch_imagery(key: Vector3i, retry := false) -> void:
 	if _imagery_pending.has(key) or not _tiles.has(key):
 		return
 	var queued_tile: TerrainTile = _tiles[key]
-	if queued_tile.imagery_revision == _imagery_revision:
+	if not retry and queued_tile.imagery_revision == _imagery_revision:
 		return
 	_imagery_pending[key] = true
 	var revision := _imagery_revision
@@ -418,19 +514,23 @@ func _fetch_imagery(key: Vector3i) -> void:
 		return
 	_imagery_pending.erase(key)
 	if envelope.type == "res":
-		_busy_streak = 0
+		_imagery_busy_streak = 0
 		if revision == _imagery_revision and _tiles.has(key):
 			_start_imagery_job(key, envelope)
+			_note_completeness(key, bool(envelope.result.get("complete", true)))
 		return
 	var code := String(envelope.error.get("code", ""))
 	if code == "E_BUSY" or code == "E_TIMEOUT":
-		var delay := busy_backoff_sec(_busy_streak)
-		_busy_streak += 1
+		var delay := busy_backoff_sec(_imagery_busy_streak)
+		_imagery_busy_streak += 1
 		await get_tree().create_timer(delay).timeout
+	elif revision != _imagery_revision:
+		return
 	elif code == "E_NOT_FOUND":
 		_imagery_relist_wanted = true
 	else:
 		_imagery_failed[key] = true
+		_incomplete.erase(key)
 
 
 func _start_job(key: Vector3i, envelope: IpcEnvelope, revision: int) -> void:
@@ -756,6 +856,18 @@ func _listed(key: Vector3i) -> bool:
 func _imagery_listed(key: Vector3i) -> bool:
 	var level_map: Dictionary = _imagery_lists.get(key.x, {})
 	return level_map.has(Vector2i(key.y, key.z))
+
+
+## The one status-bar message for the levels a listing refused with `E_BAD_PARAMS` (too many tiles to list). Terrain
+## falls back to the coarser levels; imagery's tiles show without imagery, since their terrain still shows.
+static func _refusal_message(kind: String, levels: Array) -> String:
+	var names := PackedStringArray()
+	for level: Variant in levels:
+		names.append(str(level))
+	var noun := "level" if levels.size() == 1 else "levels"
+	var verb := "has" if levels.size() == 1 else "have"
+	var fallback := "those tiles show without imagery." if kind == "Imagery" else "showing coarser levels."
+	return "%s %s %s %s too many tiles to list; %s" % [kind, noun, ", ".join(names), verb, fallback]
 
 
 static func _is_empty(lists: Dictionary) -> bool:

@@ -17,6 +17,20 @@ const DIALOGS: Array[String] = ["envelope_export", "settings", "data_sources"]
 const DEFAULT_UI := "hidden"
 const DEFAULT_PRESET := "engineering"
 
+## T-135 Part C: an import path may name an environment variable as `${NAME}`. The scenario is skipped when a variable
+## it names is unset, so a scenario that needs local data never fails on a machine without it.
+const VARIABLE_PATTERN := "\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}"
+## Phrases of a provider error that say the service or the network could not be reached (T-135 Part C), matched only
+## with the code `E_BAD_PARAMS`, which is how the handlers report a provider failure. Where they come from:
+## `io/gis/cuzk_atom.py` ("giving up after"), `io/providers/copernicus.py` ("giving up after", "ConnectionError",
+## "Timeout"), `io/providers/cuzk_terrain.py` (the `requests` exceptions, "ConnectionError", "Timeout"),
+## `io/imagery/cuzk_wmts.py` ("cannot connect", "timed out", "connection lost", "HTTP 5xx" after the retries, and
+## "cannot be reached" from the breaker). Any other provider error, or any other code, is an error.
+const UNREACHABLE_PHRASES: Array[String] = [
+	"giving up after", "cannot connect", "timed out", "connection lost", "cannot be reached", "ConnectionError", "Timeout",
+	"HTTP 5",
+]
+
 const DEFAULT_RESOLUTION := Vector2i(1600, 900)
 const DEFAULT_READY_TIMEOUT_S := 90.0
 const DEFAULT_SETTLE_FRAMES := 30
@@ -88,6 +102,70 @@ func is_valid() -> bool:
 
 func errors() -> PackedStringArray:
 	return _errors
+
+
+## T-135 Part C: the variable names the import paths (`path` and each of `paths`) use, each once, in order of first use.
+func path_variables() -> PackedStringArray:
+	var names := PackedStringArray()
+	var pattern := RegEx.create_from_string(VARIABLE_PATTERN)
+	for entry in imports:
+		for text in _path_texts(entry):
+			for found in pattern.search_all(text):
+				if not names.has(found.get_string(1)):
+					names.append(found.get_string(1))
+	return names
+
+
+## The names of [method path_variables] whose value in `values` (name -> text) is missing or empty.
+func unset_variables(values: Dictionary) -> PackedStringArray:
+	var unset := PackedStringArray()
+	for name in path_variables():
+		if String(values.get(name, "")).is_empty():
+			unset.append(name)
+	return unset
+
+
+## Replaces each `${NAME}` in the import paths by `values[NAME]`. A name without a value is left as it is.
+func expand_import_paths(values: Dictionary) -> void:
+	for entry in imports:
+		if entry.get("path") is String:
+			entry["path"] = expand_variables(entry["path"], values)
+		if entry.get("paths") is Array:
+			var expanded: Array = []
+			for path: Variant in entry["paths"]:
+				expanded.append(expand_variables(String(path), values))
+			entry["paths"] = expanded
+
+
+static func expand_variables(text: String, values: Dictionary) -> String:
+	var result := text
+	for found in RegEx.create_from_string(VARIABLE_PATTERN).search_all(text):
+		var value := String(values.get(found.get_string(1), ""))
+		if not value.is_empty():
+			result = result.replace(found.get_string(0), value)
+	return result
+
+
+## True when a provider error with this code and message says the service or the network could not be reached (see
+## [constant UNREACHABLE_PHRASES]), so the scenario skips that import rather than failing. Any code but `E_BAD_PARAMS`
+## is an error: `E_DISCONNECTED` is the backend dying, not a provider failure.
+static func is_unreachable(message: String, code: String) -> bool:
+	if code != "E_BAD_PARAMS":
+		return false
+	for phrase in UNREACHABLE_PHRASES:
+		if message.contains(phrase):
+			return true
+	return false
+
+
+func _path_texts(entry: Dictionary) -> PackedStringArray:
+	var texts := PackedStringArray()
+	if entry.get("path") is String:
+		texts.append(entry["path"])
+	if entry.get("paths") is Array:
+		for path: Variant in entry["paths"]:
+			texts.append(String(path))
+	return texts
 
 
 func has_perf() -> bool:
