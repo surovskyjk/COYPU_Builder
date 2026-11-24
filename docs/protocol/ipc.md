@@ -38,10 +38,11 @@ refused or answered against the state it is ordered after: a request pipelined b
 
 **Long requests.** A request whose handler can run for more than about 100 ms (imports, inspection, frame and
 track-mesh baking, the envelope export, terrain builds and bakes) does its blocking work off the server's
-event loop, so `session.ping` and the waiting itself never block the connection. One connection runs at most
-4 such requests at a time and holds at most 64 more waiting; a further one is answered `E_BUSY` (retry
-later); `E_BUSY` is listed under every method that can return it. An exception inside a handler is answered
-`E_INTERNAL` for that request and the connection stays open.
+event loop, so `session.ping` and the waiting itself never block the connection. One connection runs at most 4
+such requests at a time and holds at most 64 more waiting; a further one is answered `E_BUSY` (retry later);
+`E_BUSY` is listed under every method that can return it. Imagery tiles from a streamed service run in 4 slots
+of their own beside those 4, and count toward the same limit of 68 requests in flight. An exception inside a
+handler is answered `E_INTERNAL` for that request and the connection stays open.
 
 ## Blob encoding
 

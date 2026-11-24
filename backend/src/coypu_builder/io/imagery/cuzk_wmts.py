@@ -1122,6 +1122,8 @@ class WmtsLayer:
     fetches the tiles that cover the window and the clip, through the host's breaker, and runs in a worker
     thread. A render reports the tiles it could not give to the `tile_report` open in its thread."""
 
+    network_bound = True  # its render waits for the network (F50)
+
     def __init__(self, source_id: str, source: WmtsSource) -> None:
         self.source_id = source_id
         self.source = source

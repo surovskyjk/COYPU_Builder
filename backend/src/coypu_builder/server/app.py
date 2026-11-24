@@ -93,7 +93,8 @@ async def _handle_connection(ws: ServerConnection, token: str | None) -> None:
     0003), is an *eager* task: it runs synchronously up to its first real suspension, so its session, project
     and parameter checks and its snapshot happen now, before the next frame is read. Anything else runs
     inline. At most `MAX_EXECUTING` + `MAX_PENDING` coroutine requests are in flight per connection
-    (`MAX_EXECUTING` of them in their blocking phase, see `Session.gate`); more get `E_BUSY`."""
+    (`MAX_EXECUTING` of them in their blocking phase, see `Session.gate`, and up to `MAX_NETWORK` streamed
+    imagery compositions beside them, see `Session.net_gate`); more get `E_BUSY`."""
     session = Session(session_id=str(uuid.uuid4()), expected_token=token)
     running: set[asyncio.Task] = set()
     coroutine_requests: set[asyncio.Task] = set()

@@ -1701,12 +1701,20 @@ def _compose_blocking(
     return tile, report.missing == 0
 
 
+def _gate_for(session: Session, layers: tuple[ImageryLayer, ...] | None) -> asyncio.Semaphore:
+    """The gate a composition of `layers` passes through: `net_gate` when a layer waits for the network (F50),
+    else `session.gate`. No layers, or none marked `network_bound`, means `session.gate`."""
+    if any(getattr(layer, "network_bound", False) for layer in layers or ()):
+        return session.net_gate
+    return session.gate
+
+
 async def _compose_into(
     session: Session, imagery: ImageryCache, terrain: TerrainCache, level: int, ix: int, iy: int
 ) -> tuple[ImageryTile, bool]:
     key = (level, ix, iy)
     try:
-        async with session.gate:
+        async with _gate_for(session, imagery.layers):
             tile, complete = await asyncio.to_thread(
                 _compose_blocking, imagery.layers, terrain.stack, imagery.heights_range, level, ix, iy
             )

@@ -21,6 +21,7 @@ from coypu_builder.io.mesh.terrain_tiles import TerrainTile
 TILE_CACHE_SIZE = 512
 IMAGERY_TILE_CACHE_SIZE = 64
 MAX_EXECUTING = 4  # coroutine requests of one connection that do their blocking work at once
+MAX_NETWORK = 4  # compositions of one connection that wait for a streamed imagery service at once (F50)
 _REVISIONS = itertools.count(1)  # process-wide, so a revision is never reused across projects
 
 
@@ -179,3 +180,5 @@ class Session:
     # Work that runs off the event loop passes through `gate`: at most MAX_EXECUTING threads of one
     # connection at a time.
     gate: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(MAX_EXECUTING), repr=False)
+    # Imagery compositions that wait for a streamed service pass through `net_gate`, not `gate` (F50).
+    net_gate: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(MAX_NETWORK), repr=False)

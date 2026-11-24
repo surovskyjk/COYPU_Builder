@@ -70,6 +70,9 @@ class ImageryRaster:
 
 
 class ImageryLayer(Protocol):
+    """A layer may carry an optional `network_bound: bool`, true when `render` waits on a remote service.
+    It is read with `getattr`, so a layer without it is not network-bound."""
+
     source_id: str
     resolution_m: float
 

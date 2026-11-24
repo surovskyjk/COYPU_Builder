@@ -67,8 +67,14 @@ The first case was the TIN build in T-132 (ROADMAP F34): about 8.8 s for the Kra
 remaining 0.6 s GIL stall at the end of Qhull.
 
 **Sharing and limits.** Concurrent requests for the same result share one computation. A result computed for
-a superseded state is discarded rather than cached. Each connection runs at most 4 off-loop jobs at once and
-holds at most 64 pending requests; beyond that it answers `E_BUSY`.
+a superseded state is discarded rather than cached. Each connection runs at most 4 off-loop jobs at once, plus
+at most 4 streamed imagery compositions (below), and holds at most 64 pending requests; beyond that it answers
+`E_BUSY`.
+
+**Network-bound work (2026-11-23, F50).** An imagery composition whose layer stack holds a streamed layer waits
+for the network, not the CPU. It passes through a second per-connection gate of 4 slots, `session.net_gate`, so
+a slow service never holds the slots that terrain bakes and imports need. The `E_BUSY` limit counts both kinds
+of request together.
 
 **Sequential consistency per connection.** Within one connection, every request observes all state changes
 made by requests sent before it on that connection, and none made by requests sent after it.
