@@ -637,11 +637,136 @@ No regressions: both suites are green, with executed = declared test counts.
 
 ## Part C — online sources and polish
 
-### Deliverables (Part C)
+### How Part C runs (2026-11-24)
+
+Part C gained F51, F53 and F54 from the reviews of T-136 B and T-135 C, so it is split into three worker orders.
+They run in this order:
+
+| Order | What |
+|---|---|
+| **C1, backend** | F51's decode side, and F53's attribution and licence for files (below) |
+| **C2, the dialog** | the original Part C: online sources, re-import, F51's encode side, the live test and the captures. It also adds the dialog's attribution and licence fields (F53) and reviews the popup of a long CRS name |
+| **C3, presentation** | F54: a colour swatch per source in the Data sources popover, and imagery warnings shown to the user |
+
+### Part C1 — backend: F51 decode side, F53 attribution for files
+
+**Deliverables (C1)**
 
 | Path | Action |
 |---|---|
-| `client/ui/dialogs/import_dialog.gd` | the online-source step, and "Re-import of" |
+| `backend/src/coypu_builder/io/terrain/raster.py`, `io/imagery/raster_image.py` | F51: cast a confirmed `nodata` to the raster's dtype before masking, and record the cast value |
+| `backend/src/coypu_builder/protocol/messages.py` | `ImportRunParams.attribution: str \| None = None` and `licence: str \| None = None`; `ImportInspectResult.attribution_hint: str \| None = None` |
+| `backend/src/coypu_builder/io/sources/hints.py` | new: `product_hints(paths, format_id, kind) -> ProductHints \| None`, a pure recogniser |
+| `backend/src/coypu_builder/io/sources/registry.py`, `runner.py`, `server/handlers.py` | wire the hints into inspect, and the confirmed values into the file import |
+| `tools/gen_protocol_docs.py`, `docs/protocol/ipc.md` | the new fields, regenerated |
+| `docs/data-contracts/` (the import contract that documents `import.inspect` and `import.run`) | the new fields |
+| `client/tools/capture/scenarios/terrain_kralupy.json` | the DMR 5G import passes `"attribution": "© ČÚZK", "licence": "CC BY 4.0"` |
+| `backend/tests/test_import_attribution.py` | new; plus the F51 test in the existing raster test file |
+
+**Contract (C1)**
+
+- **F51, decode side.** Godot reads a suggested float32 nodata as the neighbouring double and sends it back
+  1 ulp off.
+  - Cast a confirmed `nodata` to the raster's dtype (`numpy.dtype(...).type(value)`) before masking, and
+    record the cast value in the dataset's settings.
+  - Recording the cast value is the one allowed difference from "settings recorded exactly as confirmed".
+    Note it in a single sentence in ADR 0009.
+  - Test: a float32 GeoTIFF holding FLT_MAX nodata cells, imported with `nodata` = `-3.4028234663852886e38`
+    and with the 1-ulp-larger neighbour (`numpy.nextafter`), masks the same cells, and records
+    `float(numpy.float32(-3.4028234663852886e38))`.
+- **F53, attribution and licence for files.**
+  - **`import.run`.** It takes optional `attribution` and `licence` for file imports (`path`/`paths`). A
+    non-empty value is recorded as the dataset's `attribution` / `licence`, in place of `""` and
+    `report.licence_hint or UNKNOWN_LICENCE`.
+    - With `provider`, either field is `E_BAD_PARAMS` ("attribution and licence come from the provider").
+    - A re-import without them keeps the previous dataset's values.
+  - **`import.inspect`.** It returns `attribution_hint`, and fills `licence_hint` when it is still `None`,
+    from `product_hints`.
+  - **`product_hints`.** It is pure: no I/O beyond the file names.
+    - It returns `ProductHints(licence="CC BY 4.0", attribution="© ČÚZK")` when every file name starts with a
+      ČÚZK SM5 map-sheet code, and the kind is terrain or imagery.
+      - A code is four ASCII letters and two digits, followed by `.`, `_` or the end of the stem, for
+        example `KRAV82.zip`, `KRAV82.laz` or `KRAV82.WRTO24.2025.zip`. Name the regex `SM5_SHEET_CODE` in
+        `hints.py`.
+      - `cuzk_bulk.py`'s `_CODE` only checks for a safe file name, so it is no recogniser.
+    - Otherwise it returns `None`.
+    - The hint is a guess. The dialog shows it prefilled and editable (C2); nothing records it unless the
+      client sends it back.
+  - **Round trip.** The project file and `source.list` already carry `attribution` and `licence`. Prove the
+    round trip in a test: import with an attribution, save, reopen, and `source.list` shows it.
+  - **The Kralupy scenario** passes the values explicitly for the DMR 5G import. In the warm capture, the Data
+    sources popover then credits DMR 5G "© ČÚZK".
+- **Acceptance (C1).**
+  - Tests:
+    - `test_confirmed_nodata_is_cast_to_the_raster_dtype` (F51);
+    - `test_file_import_records_the_confirmed_attribution_and_licence`;
+    - `test_reimport_keeps_attribution_when_none_is_sent`;
+    - `test_provider_import_refuses_attribution`;
+    - `test_inspect_hints_cuzk_sheets`;
+    - `test_inspect_gives_no_hint_for_other_names`;
+    - `test_attribution_round_trips_through_the_project_file`.
+  - No regressions: 890 pytest before. Ruff and `gen_protocol_docs.py --check` pass, and the gdUnit suite
+    stays at 406.
+  - A warm `terrain_kralupy` capture shows "© ČÚZK" under the DMR 5G source.
+
+**Review decisions (C1, 2026-11-24).** Pass with findings; no defect that corrupts data. The fixes:
+1. **Tests.**
+   - A sheet name alone records no attribution. The hint is never recorded silently.
+   - A provider's inspect gives no `attribution_hint`.
+   - F51 is tested across two float32 sheets, and with mixed sample types, where each file is masked with its
+     own cast and the confirmed value is recorded.
+2. **The skipped round-trip test.** It becomes `test_source_list_shows_the_recorded_attribution_and_licence`.
+   `SourceSummary` gains `licence`, which C2 and C3 need. The save-and-reopen half goes to T-145.
+3. **`SM5_SHEET_CODE`.** It is uppercase only, `[A-Z]{4}[0-9]{2}`, so ordinary names like `data01.tif` give no
+   hint.
+4. **One home for the ČÚZK terms.** The licence and attribution strings live in a leaf module,
+   `io/sources/terms.py`. `cuzk_wmts`, `cuzk_bulk`, `cuzk_terrain` and `hints` all use it.
+5. **Prose.** The protocol prose, `import-framework.md`, ADR 0009 and the `domain/sources.py` comment state
+   the F51 cast exception and the rule that an empty string means "not sent".
+6. **Small code fixes.**
+   - `cast_nodata` tolerates dtypes numpy cannot parse.
+   - Attribution and licence are stripped of surrounding whitespace.
+   - A re-import does not copy the unknown-licence placeholder.
+7. **Accepted deviations.**
+   - `product_hints(paths, kind)` has no `format_id`, because it was unused.
+   - `raster_image.py` is unchanged, because imagery never applies a confirmed nodata.
+   - `product_hints` is called in `handlers.py`, to avoid an import cycle.
+8. **For C2.**
+   - The dialog's "No data" row is shown for imagery, where the value is recorded but never applied. Hide it
+     for imagery.
+   - Prefill a re-import's attribution and licence from `source.list`.
+
+### Part C3 — presentation: F54
+
+**Deliverables (C3).** `client/ui/shell/ui_shell.gd` (the popover), `client/scene/terrain/terrain_field.gd`
+(the imagery warnings it lists), `client/core/session.gd` if the warnings travel through it, the matching
+tests in `test_ui_preset.gd` / `test_terrain_field.gd`, and `ui_shell.json` / `terrain_synthetic.json` shots.
+
+**Contract (C3)**
+
+- **Swatches.** Each terrain source row in the Data sources popover shows a small colour swatch. It uses
+  the colour the source-boundary overlay gives that source, read from the same function the shader's
+  colours come from. The two must never be computed in two places. Imagery rows show no swatch.
+- **Licence for file sources** (from C1's report). Today the popover shows a licence line only for provider
+  sources, through their notices. A file source with a recorded `licence` other than the unknown placeholder
+  shows it too: for example "Licensed under CC BY 4.0" under DMR 5G, worded like the provider rows.
+- **Imagery warnings.** `imagery.tiles` returns `warnings`, for example ČÚZK unreachable. The field collects
+  the distinct warnings of a listing. They show:
+  - once, in the status bar, when they change;
+  - in the popover, under the imagery source they belong to, or under a "Warnings" line when they name no
+    source.
+  A listing without warnings clears them.
+- **Acceptance (C3).**
+  - Tests:
+    - `test_swatch_colour_matches_the_overlay`;
+    - `test_imagery_warnings_show_once_and_clear`.
+  - The `terrain_synthetic` boundaries shot and a Data sources shot show the swatches; judge them on the GPU.
+
+### Deliverables (Part C2; the original Part C)
+
+| Path | Action |
+|---|---|
+| `client/ui/dialogs/import_dialog.gd` | the online-source step, "Re-import of", and the Attribution and Licence fields for files (F53: prefilled from `attribution_hint` / `licence_hint`, editable, sent as `attribution` / `licence`; hidden for providers) |
 | `client/tests/unit/test_import_dialog.gd` | the cases below |
 | `client/tests/integration/test_import_dialog_live.gd` | new — live backend, synthetic data, the test-server providers |
 | `client/tools/capture/scenarios/ui_shell.json` | import-dialog shots |
@@ -668,7 +793,12 @@ No regressions: both suites are green, with executed = declared test counts.
 1. **Unit:**
    - `test_online_source_sets_kind_and_default_query`;
    - `test_bulk_orthophoto_shows_its_size_warning`;
-   - `test_reimport_of_sends_the_source_id`.
+   - `test_reimport_of_sends_the_source_id`;
+   - `test_attribution_fields_prefill_from_hints_and_are_sent` (F53; hidden for a provider);
+   - F51, encode side: `test_ipc_envelope.gd` shows that an encoded header parses back to the same float64
+     for −3.4028234663852886e38 and 0.3048006096.
+   - The popup of a very long CRS name stays on screen (deferred from Part B's review). Show it in a capture
+     shot, and fix it if it runs past the screen edge.
 2. **Live** (`test_import_dialog_live.gd`, with synthetic data from the T-130/T-131 fixtures written into a
    temporary folder outside the repository):
    - files → inspect → set EPSG:5514 → import produces a source;
