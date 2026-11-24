@@ -333,7 +333,8 @@ control. These decisions follow from it:
 | `tools/capture.ps1` | expand `${COYPU_DATA}` from the environment; pass the expanded scenario to Godot |
 | `client/tools/capture/scenarios/terrain_kralupy.json` | new |
 | `client/tests/unit/test_capture_scenario.gd` | `imports` validation cases |
-| `client/scene/terrain/terrain_field.gd`, `client/tests/integration/test_terrain_field.gd` | retry of incomplete imagery tiles (added 2026-11-23, from T-134 B's review) |
+| `client/scene/terrain/terrain_field.gd`, `client/tests/integration/test_terrain_field.gd` | retry of incomplete imagery tiles (added 2026-11-23, from T-134 B's review); imagery on its own paging coroutine (F52, added 2026-11-24, from T-148's review) |
+| `client/core/session.gd` | the terrain test seam awaits its override, so a test can hold a reply (F52) |
 | `docs/tasks/task_135_terrain_scene.md` | F48: the measured video memory of draped imagery on Kralupy |
 
 ### Contract (Part C)
@@ -347,6 +348,28 @@ control. These decisions follow from it:
   - **Tests:**
     - `test_incomplete_imagery_is_retried_then_kept`;
     - `test_retry_stops_when_the_tile_leaves_the_view`.
+- **Imagery lane** (F52, added 2026-11-24). Today `_run()` is the one paging coroutine and awaits each
+  request in turn. Once an `imagery.tile` is in flight, no terrain fetch starts, so a slow ČÚZK reply stalls
+  the terrain for up to the backend's 15 s render deadline. T-148 fixed the backend half of this (F50).
+  - `_run()` keeps both listings and the terrain fetches. A second coroutine, `_run_imagery()`, is started in
+    `_ready()` beside it. It takes `_imagery_queue` and the retries of incomplete tiles, so the retry above
+    runs on this lane.
+  - At most one `imagery.tile` request is in flight at a time. A terrain fetch never waits for an imagery
+    reply, and the connection stays far below the backend's `E_BUSY` limit of 68 requests in flight.
+  - The imagery lane starts no request while a listing is wanted or running. Add a `_listing` flag, set
+    around `_list_terrain()` and `_list_imagery()`. While waiting, it idles with `IDLE_POLL_SEC` like `_run()`.
+  - Each lane keeps its own `E_BUSY` streak: `_busy_streak` for terrain, `_imagery_busy_streak` for imagery.
+  - Both lanes end when the field leaves the tree, as `_run()` does now. `settled()` stays true only when
+    both lanes are idle.
+  - **Test seam:** `Session._terrain_request` awaits the override's result. A test override can then be a
+    coroutine that holds a reply until the test releases it. A plain function keeps working, and its doc
+    comment says so.
+  - **Tests:**
+    - `test_a_slow_imagery_reply_does_not_delay_terrain`. The override holds every `imagery.tile` until the
+      test releases it. While one is held, a terrain tile that the camera selects afterwards is fetched and
+      attached. After the release, the held imagery drapes.
+    - `test_one_imagery_request_is_in_flight_at_a_time`. The override counts concurrent `imagery.tile`
+      requests, and the peak is 1.
 - **F48:** measure the video memory the attached imagery holds in the Kralupy capture, with the tile
   counts per level, and report it.
 
