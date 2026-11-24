@@ -335,6 +335,7 @@ control. These decisions follow from it:
 | `client/tests/unit/test_capture_scenario.gd` | `imports` validation cases |
 | `client/scene/terrain/terrain_field.gd`, `client/tests/integration/test_terrain_field.gd` | retry of incomplete imagery tiles (added 2026-11-23, from T-134 B's review); imagery on its own paging coroutine (F52, added 2026-11-24, from T-148's review) |
 | `client/core/session.gd` | the terrain test seam awaits its override, so a test can hold a reply (F52) |
+| `client/ui/shell/ui_shell.gd`, `client/tests/unit/test_ui_preset.gd` | the Data sources popover's height follows its content (review decision 5, 2026-11-24) |
 | `docs/tasks/task_135_terrain_scene.md` | F48: the measured video memory of draped imagery on Kralupy |
 
 ### Contract (Part C)
@@ -389,7 +390,83 @@ control. These decisions follow from it:
     - a cab view at km 16.7, at the Vltava bridge gap;
     - the source-boundary overlay on;
     - the shell visible with the Data sources popover open;
+    - a high corridor overview, last (added 2026-11-24, review decision 6);
   - perf: cab at 4× through km 12–17, with streaming active.
+
+### Review decisions (Part C, 2026-11-24)
+
+The worker's first capture, cold and warm, passed with no skips. In the warm run the perf block covered 59 090
+frames, with p95 1.81 ms, a maximum of 9.53 ms and no frame over 16.7 ms, while 183 terrain tiles were built
+and 167 drapes attached. The review (Sonnet) passed it with findings, and these decisions follow:
+
+1. **The cutting at km 13.** The shot shows the real cutting, but not the project's rail, which lies about 17 m
+   below the ground there (F32). The criterion is amended, and "ground above the rail" goes to T-137 B. A
+   terrain see-through control is F55.
+2. **Retry of the last tile.** The retry record was written before the drape attached, and the next
+   `_due_retry` erased it, so the last tile of a batch was never retried. The fix drops the
+   `imagery_revision` clause from `_retry_still_wanted`, and `_due_retry` skips keys that are pending. Test:
+   `test_every_incomplete_tile_is_retried`.
+3. **Refused listing levels.** The criterion on a level whose listing is refused had no code. On
+   `E_BAD_PARAMS`, that level is listed as empty, and one status-bar message goes out per listing. Test:
+   `test_a_refused_level_is_skipped_with_one_message`.
+4. **Capture skips.**
+   - A provider skip needs `E_BAD_PARAMS` with an unreachable phrase. A dead backend's `E_DISCONNECTED`
+     "connection lost" stays an error.
+   - "HTTP 5" is added to the phrases.
+   - The driver uses the dialog's request timeouts: `import.inspect` 300 s, `import.run` 1800 s.
+5. **Data sources popover.** The height follows the content, up to 80 % of the window, so all three sources
+   and "© ČÚZK" show (`client/ui/shell/ui_shell.gd`, authorised outside Deliverables).
+6. **Corridor shot.** A sixth shot, `kralupy_corridor`, is placed last because shots chain their orbit state.
+   It shows the whole corridor, the Copernicus buffer and the Vltava gap. The overview shows the rail only as
+   the train's marker, because the rail is buried there.
+7. **The DMR 5G file's attribution.** It reads "No attribution recorded for this file"; the credit shows only
+   because the orthophoto provider adds "© ČÚZK". This is F53, for T-136 C.
+8. **F48, measured** (warm run, MiB, RTX 4060 Laptop):
+   - **Totals:** texture memory 323–341 and video memory 545–572, with 256 attached tiles (`MAX_TILES`):
+     - L0: 170 attached, 117 draped;
+     - L1: 62 attached, 46 draped;
+     - L2: 16 attached, 14 draped;
+     - L3: 6–7 attached, 4–5 draped;
+     - L4: 2 attached, none draped. Those two were never selected at a shot, so they were never draped; this
+       is not a defect.
+   - **Per tile:** about 1.5–1.8 MiB per drape and 0.9 MiB per mesh.
+   - **Corridor shot** (added in decision 6): 405 MiB of texture and 637 MiB of video memory, with 232 of the
+     256 tiles draped.
+   - **Worst case:** about 700 MiB, with all 256 tiles draped.
+   - **Decision:** accepted for M3, because the cap bounds it. T-144 chooses among:
+     - BC1 compression of the albedo on the worker thread, about 8:1;
+     - freeing the textures of unselected tiles before their meshes;
+     - a lower `max_tiles`, 96–128.
+   - Low-VRAM GPUs were not measured.
+9. **Nits.**
+   - A wider margin in the retry-stops test.
+   - Stale imagery replies after a listing do nothing.
+   - `_list_imagery` resets its busy streak.
+   - The capture output says MiB.
+
+**Round 2** (re-review, 2026-11-24). The fixes for findings 1, 3 and 4 hold, and finding 2 is fixed in code.
+The five original shots are pixel-identical to the earlier warm run. Round 2 decides:
+
+10. **The corridor shot's pose.**
+    - `focus_station_m` does nothing for an orbit shot while a train exists, because the orbit pivots on the
+      lead car (`orbit_camera.gd: _target_anchor`).
+    - The shot uses the train's time instead, with `time_s` 550, which puts the pivot at about 8.2 km. It also
+      sets yaw to 0 and turns the source-boundary overlay on.
+    - The keys were proven by a probe capture.
+11. **The open popover.** It no longer refits when the sources change; its list scrolls. Refitting while open
+    pushed Close off the screen. The fit also uses the panel's real margins.
+12. **Tests of refused levels.**
+    - The terrain test also asserts that no backend error is raised.
+    - The imagery refusal gets its own test, and its message says those tiles show without imagery.
+13. **Retry tests.**
+    - A deterministic test that `_due_retry` skips a pending tile.
+    - The draped-record test first waits for pending fetches to finish.
+    - `test_every_incomplete_tile_is_retried` stays as a smoke test, with an honest doc comment.
+14. **Nits.**
+    - `_run_imagery` re-checks `_closing` after its frame yield.
+    - `session.gd`'s doc comment is updated.
+    - `popover_window_height` moves to the member block.
+    - The Kralupy capture runs with `-TimeoutS 2400`.
 
 ### Acceptance criteria (Part C)
 
@@ -398,7 +475,9 @@ control. These decisions follow from it:
    - `test_an_unset_variable_skips_the_scenario`.
 2. **Capture of `terrain_kralupy`** (with `COYPU_DATA` set; Verification only):
    - every shot has terrain and imagery;
-   - the cutting near km 13 is visible as ground above the rail;
+   - the cutting near km 13 shows as walls either side of the track bed. The fixture's idealised rail lies
+     about 17 m below that ground (F32), and terrain seen from below is culled, so no 3D pose shows the rail
+     there. "Ground above the rail" is shown by T-137 B's Profile tab (amended 2026-11-24, review decision 1);
    - the bridge gap at km 16.7 shows as a hole or water area under the track;
    - the boundary overlay distinguishes DMR 5G from Copernicus;
    - attribution text is present;
@@ -434,7 +513,7 @@ tools\godot\Godot_v4.7.2-stable_win64_console.exe --headless --path client -s ad
 powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Scenario kralupy_m2
 powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Scenario ui_shell
 powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Scenario terrain_synthetic   # Part B, on the GPU
-powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Scenario terrain_kralupy   # Part C, with COYPU_DATA set
+powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Scenario terrain_kralupy -TimeoutS 2400   # Part C, with COYPU_DATA set
 ```
 
 ```bash
