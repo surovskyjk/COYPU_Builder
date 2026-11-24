@@ -171,11 +171,18 @@ Read before starting:
 |---|---|
 | `client/ui/widgets/crs_picker.gd` | new — `class_name CrsPicker`, a searchable CRS field over `crs.search` |
 | `client/ui/dialogs/import_dialog.gd` | new — `class_name ImportDialog`, the five-step dialog |
-| `client/ui/top_bar/ribbon.gd` | Import group: "Import terrain or imagery…" |
-| `client/ui/shell/ui_shell.gd` | open and own the dialog, like the export dialog |
+| `client/ui/widgets/number_field.gd`, `client/tests/unit/test_number_field.gd` | new (review round 2) — `class_name NumberField`, exact numeric entry |
+| `client/core/backend.gd` | `request()` gains an optional `timeout_sec` (review decision 5) |
+| `client/ui/top_bar/ribbon.gd` | Import group: "Import terrain or imagery…"; its doc comment no longer says Import has no command |
+| `client/project.godot` | input action `shell_import_sources`, Ctrl+I (free today) |
+| `client/assets/icons/import_sources.svg` | new — original line artwork on the 24 px grid with a 2 px stroke, like its neighbours; the editor run writes its `.import` file, which is committed with it |
+| `client/assets/icons/LICENSE` | add `import_sources` to the list of original icons |
+| `client/ui/shell/ui_shell.gd` | open and own the dialog, like the export dialog; `show_dialog(&"import")` and `close_dialogs()` cover it |
 | `client/core/event_bus.gd` | new signal `sources_changed(kind: String)` |
 | `client/scene/terrain/terrain_field.gd` | connect `sources_changed` to `relist()` |
 | `client/tests/unit/test_crs_picker.gd`, `test_import_dialog.gd` | new — fake requester |
+| `client/tests/unit/test_ui_preset.gd` | the expected command list gains the import command |
+| `client/tests/integration/test_terrain_field.gd` | `test_sources_changed_relists` |
 | `client/README.md` | document the dialog |
 
 ### Contract (Part B)
@@ -251,6 +258,291 @@ Read before starting:
   temporary folder outside the repository.
 - Every string uses the plain-language style of T-140's dialogs, the theme tokens and no hard-coded colours.
 
+### Clarifications (Part B, 2026-11-23, before the worker)
+
+Checked against the code after T-134 B. Where the contract above leaves a choice open, these settle it.
+
+**Buttons.**
+- The dialog's OK button is the primary, and it is the Next button. It reads:
+  - *Next* on steps 1 and 2;
+  - *Import* on step 3;
+  - *Close* on step 5.
+
+  On step 4 it is disabled while the import runs.
+- *Back* is an extra button (`add_button`). It is disabled on steps 1, 4 and 5.
+- *Cancel* closes the dialog on every step.
+- Set `dialog_hide_on_ok = false`, so that OK moves to the next step instead of hiding the window. Only *Close* on
+  step 5 hides it.
+- Pressing Next on step 1 runs `import.inspect` and shows step 2 with the busy indicator. Next on step 2 is
+  enabled once a report has arrived. Back keeps what was entered, but choosing other files on step 1 and
+  inspecting them again resets Settings to the new `suggested_settings`.
+- Each disabled primary button has a reason, shown in its tooltip and in the hint line. For example:
+  - "Choose one or more files first";
+  - "The inspection failed — go back and choose other files";
+  - "Choose a coordinate system for this data";
+  - "Enter a box whose minimum is below its maximum".
+
+**What is sent.**
+- `import.inspect {paths, kind?}`: always `paths`, also for one file. No `kind`, so every reader is tried.
+- `import.run {paths, kind, settings, format_id, name?}`: `format_id` is the one the report gave, so the run
+  uses the same reader as the inspection. An empty name sends no `name`.
+- `settings` is a whole `ImportSettingsDTO` dictionary. A field the user did not touch keeps its
+  `suggested_settings` value, including `null`.
+
+**The CRS picker and declared values.**
+- `set_code(code)` holds any CRS string: `EPSG:<n>`, WKT or PROJ. `code()` returns it unchanged.
+- For `EPSG:<n>` the picker shows the code at once, then fills in the name from
+  `crs.search {query: code, limit: 1, kind}` when the first result has that code.
+- For any other string it shows "As declared in the file".
+
+  A WKT that `suggested_settings` carries is therefore sent back exactly as it came. Readers suggest the
+  declared CRS as `EPSG:<n>`, or as WKT when it has no EPSG code.
+- Choosing a result from the list sets its `code`. Free text sets `""` (as the contract says).
+
+**Rasters.**
+- The report is a raster's when its `counts` hold `width` and `height`. GeoTIFF terrain and orthophoto images
+  report these; LAS and LandXML surfaces do not. Base this on the report, never on a list of format ids.
+- Only for rasters, the dialog shows display resolution and nodata.
+- These, and the corridor's station range, are optional numbers. Each is a CheckBox with a SpinBox, as in
+  `EnvelopeExportDialog`'s station range. Unchecked sends `null`. Checked by default only when the suggested
+  value is not `null`.
+
+**Point classes.**
+- One checkbox per `sample_class_<N>` count, labelled with its code and its sampled share.
+- While every box is checked, `point_classes` keeps its suggested value (`null` means every class, including
+  any the sample missed).
+- Once one is unchecked, it is the sorted list of the checked codes.
+- Unchecking all of them disables Import, with the reason "Keep at least one point class".
+
+**Clip.**
+- Default: the corridor at 250 m, with `alignment_ids` empty (every alignment), when `Session.alignments()` is
+  not empty. Otherwise none.
+- The station range is offered only when the project has exactly one alignment.
+- The bounding box is in the project's coordinate system, and the dialog says so beside it.
+  - It is pre-filled from the report's `extent` only when the settings' horizontal CRS equals
+    `Session.crs()`. Otherwise it starts empty.
+  - Import stays disabled until the minimum is below the maximum on both axes.
+- The dialog is opened with `open(alignments: Array[Dictionary])`, like the export dialog.
+
+**`E_BUSY`.**
+- `import.inspect` and `import.run` both retry `E_BUSY`.
+- The delays come from `static func busy_backoff_sec(attempt: int) -> float`: 0.5, 1, 2, then 4 s.
+- At most 8 retries, then one sentence: "The backend stayed busy — try again in a moment."
+- The wait goes through a seam, `var wait: Callable = func(sec: float) -> void: await
+  get_tree().create_timer(sec).timeout`, so the test records the delays instead of sleeping them.
+- `E_BUSY` is answered before the backend does any work, so retrying `import.run` is safe.
+
+**Closing while an import runs.**
+- Out of scope says the dialog may be closed during an import. The coroutine keeps going.
+- If the window is hidden when the reply arrives, the outcome is still delivered:
+  - a success emits `sources_changed(kind)` and `EventBus.status_message` with one sentence, for example
+    "Imported 1 terrain source "kralupy_dmr" (12 objects added)";
+  - a failure emits `EventBus.status_message` with the plain error sentence.
+- Opening the dialog again while that import runs shows step 4 with the busy indicator.
+
+**Errors.** Reuse the shape of `EnvelopeExportDialog.plain_error`: one sentence for each code.
+- `E_CRS_REQUIRED`: "This file declares no coordinate system — choose one". It returns to Settings.
+- `E_BAD_PARAMS`: the backend's message, which is already plain.
+- `E_NO_PROJECT`: "Open or create a project first".
+- `E_NOT_FOUND`: "A file could not be found — choose it again".
+- `E_EMPTY`: "Nothing of this data lies inside the clip — widen the clip or choose none". It returns to
+  Settings.
+- `E_INTERNAL`: "Something went wrong in the backend — the log has the details".
+
+### Review decisions (Part B, 2026-11-23)
+
+The Sonnet review passed Part B with changes: 352/352 gdUnit tests, and every settings combination
+decodes into the backend's own `ImportRunParams`. The GPU renders found what headless tests cannot see.
+These decisions are binding for the fix round.
+
+1. **The dialog fits on the screen (review finding 1, high).** At the default 1600×900 window, the Inspect and
+   Settings pages pushed Back, Next and Cancel below the screen edge. At 1280×720, Import could not be clicked.
+   The cause: the window was centred once at about 296 px high and then grew downward.
+   - On every step change while visible, the dialog calls `reset_size()` and re-centres. Defer it by one
+     frame, so that the new page's size is known.
+   - The window's height never exceeds 90 % of the visible screen.
+   - The Inspect report sits in a `ScrollContainer` with a capped height, like the Settings page.
+2. **The CRS picker (finding 2).**
+   - The dropdown no longer widens the dialog: `fit_to_longest_item = false`, `clip_text = true`.
+   - The field and the dropdown share the row 3 : 2.
+   - `set_code` clears the list back to its idle placeholder, so a code from an earlier file is never shown
+     beside a new one.
+   - A chosen result shows its code and name in the field.
+   - **Enter** in the field, while it holds no chosen code and results are listed, chooses the first result.
+     With a chosen code, it presses the primary button. **Down** opens the dropdown.
+3. **Numbers are never rounded, snapped or clamped on the way through (finding 3; the "sent exactly as
+   entered" rule).**
+   - **No data** is a CheckBox with a `LineEdit`, not a SpinBox.
+     - The text shows the value with `str()`, so −3.4028234663852886e38 is shown in full precision.
+     - Text that is not a valid float disables Import, with the reason "Enter a number for no data".
+     - Unticking and re-ticking restores the suggested value, unless the user edited it.
+   - **The other SpinBoxes** (linear unit, buffer, resolution, station range, box):
+     - `step = 0`, with `custom_arrow_step` for the arrows;
+     - `allow_greater` and `allow_lesser` wherever a bound is not physical. A unit, a resolution and a buffer
+       must still be above 0.
+     - A value typed or suggested is the value sent. Check the display at `step = 0` with a probe, and report
+       how a long value shows.
+4. **"Import as" on step 1 (finding 4).** In the real registry no reader takes both kinds, so the Settings
+   "Kind" control was always disabled. A `.tif` orthophoto was inspected as terrain, with no way to import it
+   as imagery.
+   - Step 1 gains an "Import as" choice: *Detect from the files* (the default, which sends no `kind`),
+     *Terrain (heights)* or *Imagery (orthophoto)*.
+   - The chosen kind is sent as `kind` to `import.inspect`.
+   - Settings shows the kind as text, with "to import these files as the other kind, go back to step 1"
+     where the reader takes only one kind. It stays a choice where a reader takes both.
+5. **Long requests (finding 5).**
+   - `client/core/backend.gd: request()` gains an optional third parameter, `timeout_sec := REQUEST_TIMEOUT_SEC`.
+     That is a minimal edit to an unlisted file, made because the contract needs it. Calls that already
+     exist do not change.
+   - The dialog's default requester uses 1800 s for `import.run` and 300 s for `import.inspect`. The backend
+     answers pings meanwhile (ADR 0003 addendum), so a long wait is not a dead connection.
+   - `E_TIMEOUT` on `import.run` reads "The import is taking longer than expected — it may still finish; check
+     the data sources before importing again". It still emits `sources_changed`, so a finished import shows.
+6. **Stale errors (finding 6).** Inspecting clears the Settings error and its label.
+7. **Point classes (finding 7).**
+   - Ticks unchanged from how they were filled: send the suggested value verbatim.
+   - Otherwise, every box ticked: send `null` (every class).
+   - Otherwise: the sorted list of the ticked codes.
+8. **Back keeps the report (finding 8).** Next on step 1 with the same files and a report re-inspects
+   nothing. It goes straight to step 2, with the settings kept. Choosing files or changing "Import as" clears
+   the report.
+9. **Smaller fixes:**
+   - **The extent** has no unit. Values of 1,000 or more show 1 decimal; smaller ones (degrees) show 6.
+   - **The box pre-fill** is re-evaluated when the horizontal CRS changes, as long as the user has not edited
+     the box.
+   - **No project:**
+     - Step 1 shows "Open or create a project first — imported data belongs to a project" while
+       `Session.project_id()` is empty, and Next is disabled with that reason.
+     - Re-evaluate it when the dialog opens and on `EventBus.project_changed`.
+   - **Format labels:** add `wmts-descriptor` ("ČÚZK orthophoto service (.wmts)") and `cuzk-ortho-sheet`
+     ("ČÚZK orthophoto sheet").
+   - **The Result page** opens with a headline, `Imported "<name>"`.
+   - **Point classes** show the standard ASPRS names from the LAS 1.4 specification beside their codes, for
+     example "2 Ground", "6 Building", "9 Water". An unknown code shows only its number. These are display
+     labels; the client parses no data.
+   - **`E_DISCONNECTED`** reads "The backend is not running — wait for it to reconnect, then try again". It
+     no longer says "nothing was imported".
+   - **Shadowed `name` locals** in both scripts are renamed.
+10. **Tests that can fail (finding 10).** Every assertion compares with literal numbers, never with a widget's
+   own value.
+   - `test_edits_are_sent_verbatim` covers:
+     - linear unit 0.3048006096;
+     - a box of literals;
+     - `vertical_crs`;
+     - a station range of 12000.25 to 15500.5 on an alignment that starts at 12345.6789;
+     - display resolution 0.125;
+     - nodata −3.4028234663852886e38 left untouched, then unticked and re-ticked.
+   - The Enter half of `test_escape_closes_and_enter_presses_the_primary_button` focuses a `LineEdit`, not
+     the button.
+   - The prefill test feeds JSON-shaped floats (`[2.0, 9.0]`) and asserts that ints are sent.
+
+### Review decisions, round 2 (Part B, 2026-11-23)
+
+After the first fix round: 371/371 gdUnit, and the dialog fits and is centred at 1280×720 and 1600×900. The GPU
+shots showed two problems that `step = 0` brings with it:
+- the station "To" field showed "99999998 m" for 18184.9717. A SpinBox at `step = 0` prints 16 decimals
+  ("18184.971699999998"), and the narrow field clipped the head;
+- the no-data value showed as a 39-digit decimal.
+
+The values sent were right in both cases. These decisions are binding:
+
+11. **`NumberField`** (new: `client/ui/widgets/number_field.gd`, `class_name NumberField extends LineEdit`;
+    tests in `client/tests/unit/test_number_field.gd`). Every numeric setting in the dialog uses it: linear
+    unit, buffer, station range, display resolution, no data and the four box values. It replaces the
+    SpinBoxes and the no-data `LineEdit`.
+    - `set_value(v: float)` stores `v` and shows `exact_text(v)`. `value() -> float` returns the stored float.
+      An untouched field gives back exactly what it was given.
+    - User text is parsed on every edit. Valid text sets the value and emits
+      `value_edited(value: float)`. Invalid or out-of-bounds text makes `is_valid()` false.
+    - Bounds: `minimum` and `maximum` (default −INF and INF), plus `minimum_exclusive: bool` for a unit, a
+      resolution and a buffer, which must be above 0. Nothing is ever clamped or snapped. A value outside
+      the bounds is invalid, not changed.
+    - Up and Down step the value by `arrow_step` while the field has focus. The result is shown with
+      `exact_text`.
+    - `static func exact_text(v: float) -> String` gives the shortest text that `to_float()` reads back as
+      exactly `v`:
+      - `12345.6789` stays as written, and `0.3048006096` stays as written;
+      - `250.0` shows as `250`;
+      - magnitudes of 1e15 or more, and non-zero magnitudes below 1e-4, use scientific notation. For example
+        −3.4028234663852886e38 shows as `-3.4028234663852886e+38` or shorter, if a shorter text reads back
+        exactly.
+
+      GDScript has no `%g`. A loop over the decimal count that checks the read-back is enough.
+    - A unit (`m`) is a `Label` beside the field, not part of its text.
+    - Every invalid field disables Import with a reason that names it, for example "Enter a number for the
+      buffer" or "The linear unit must be above 0". The no-data reason stays "Enter a number for no data".
+12. **Enter.** Enter in a `NumberField` only confirms the number. It never presses Import, because a user who
+    types a value and presses Enter means the value, not the import. Enter in the name field, and in the CRS
+    field once a code is chosen, presses the primary button. Enter on a focused button presses it, as Godot
+    does by default.
+13. **No project:** the reason shows once, in the hint line. The red line on the page goes.
+14. **Seams for the untested bits:**
+    - `static func request_timeout_sec(method: String) -> float`: 1800 for `import.run`, 300 for
+      `import.inspect`, `Backend.REQUEST_TIMEOUT_SEC` otherwise. The default requester uses it.
+    - A test presses Down in the CRS field and asserts that the results popup is shown.
+
+### Review decisions, round 3 (Part B, 2026-11-24)
+
+The re-review (Sonnet) passed the two fix rounds with changes. Of its first ten findings, eight are fixed and
+two are mostly fixed. The dialog fits and is centred in every state, in both presets, at 1280×720 and
+1600×900. `exact_text` is correct and fast over 21,055 doubles: p99 0.37 ms, with no format errors and no
+overflow. These small items remain:
+
+15. **The CRS dropdown must not look chosen.** `_show_results` selected the placeholder before adding the
+    entries, so result 1 showed as selected while `code()` was "". Select the placeholder after the entries
+    are added. A test asserts `results_choice().selected == 0` once results are listed.
+16. **Enter never picks from an out-of-date list.** Every keystroke puts the list back to its idle
+    placeholder until the answer for the new text arrives. Enter with no current list does nothing.
+    A test types "k", lets its answer arrive, types "krovak", presses Enter before the debounce runs out, and
+    asserts that `code()` is still "".
+17. **Warnings are never below the fold.**
+    - The report lists the warnings, with the no-CRS notice, above the class table.
+    - The scroll caps of the report, Settings and Result pages follow the screen: the 90 % rule minus the
+      dialog's own chrome, not a fixed 300 or 360 px.
+    - The fit test keeps passing at 1280×720.
+18. **Arrow steps are decimal.** Up and Down round the sum to the larger decimal count of the current text
+    and of `arrow_step`, so 0.3048 + 0.01 gives 0.3148, then 0.3248, and 0.7 + 0.1 gives 0.8. A field that
+    is not `editable` ignores Up and Down.
+19. **Smaller items:**
+    - The buffer has a client-side maximum of 5000 m, which matches `domain/sources.py`. Its reason reads
+      "The buffer must be at most 5000 m".
+    - The dropdown's idle placeholder is short enough not to be clipped mid-word: "Search results". Set
+      `text_overrun_behavior` to an ellipsis on the OptionButton.
+    - ASPRS codes 8 and 12 are reserved in LAS 1.4, so they show only their numbers.
+    - `_import_running` stays true until `_finish_import`, including its `source.get`, has finished. Hiding
+      and re-opening during that wait then shows step 4.
+20. **Tests for the survivors the re-review named:**
+    - `exact_text` gains these cases:
+      - 1e15 and both its neighbours, and 999999999999999.9;
+      - 1e-4 and both its neighbours;
+      - −0.0;
+      - the smallest subnormal and the largest double;
+      - −1947302.4602381494, a value that Godot cannot read back. It must give the correctly rounded
+        17-digit text.
+    - The "no longer than the shortest" assertion must also bind for the scientific cases.
+    - A dialog-level test shows that Enter in the CRS field with a chosen code presses the primary button.
+    - The fit test also checks the 36 px title bar.
+
+### Review decisions, round 4 (Part B, 2026-11-24)
+
+Round 3 reached 390/390. The architect's look at its GPU shots found two leftovers:
+
+21. **Pages sized to their content.** Each of the report, Settings and Result scrolls is as tall as its content,
+    up to the screen-derived cap of decision 17. They are no longer always as tall as the cap: at 1600×900
+    the Result page was a mostly empty, nearly full-screen window. Measure the content after layout, in the
+    deferred fit; take a second deferred pass if wrapped labels have not settled after the first. Then
+    reset the size and re-centre.
+22. **Step 5 shows only *Close*.** *Back* and *Cancel* are hidden on the Result page. A user should not see
+    two buttons that do the same thing.
+
+Tests:
+- `test_short_pages_are_sized_to_their_content`: at 1600×900, the Result page with the standard result is
+  less than half the screen tall, and the LAS report at 1280×720 still fits;
+- `test_the_result_page_shows_only_close`.
+
+The CRS dropdown's popup list can still run past the screen with a very long name. That is low, because
+real EPSG names are shorter, so it goes to Part C's capture review.
+
 ### Acceptance criteria (Part B)
 
 `test_crs_picker.gd`:
@@ -269,6 +561,78 @@ Read before starting:
 - `test_a_successful_import_emits_sources_changed`, plus, in `test_terrain_field.gd`,
   `test_sources_changed_relists`.
 
+Added with the clarifications:
+- `test_crs_picker.gd`:
+  - `test_a_declared_wkt_is_kept_verbatim`;
+  - `test_set_code_fills_the_name`;
+  - `test_a_late_name_lookup_does_not_replace_a_chosen_code`.
+- `test_import_dialog.gd`:
+  - `test_rasters_show_resolution_and_nodata_others_do_not`;
+  - `test_all_classes_checked_keeps_the_suggestion_and_unchecking_sends_the_list`;
+  - `test_corridor_is_the_default_only_with_an_alignment`;
+  - `test_inspect_and_run_send_paths_and_the_reported_format`;
+  - `test_busy_gives_up_after_eight_retries_with_one_sentence`;
+  - `test_closing_during_import_reports_in_the_status_bar`;
+  - `test_every_disabled_primary_has_a_reason`.
+- `test_ui_preset.gd`: `test_import_command_opens_the_dialog`.
+
+Added with the review decisions:
+- `test_crs_picker.gd`:
+  - `test_enter_chooses_the_first_result`;
+  - `test_set_code_clears_an_earlier_list`;
+  - `test_long_names_do_not_widen_the_picker`.
+- `test_import_dialog.gd`:
+  - `test_every_step_fits_a_1280_by_720_screen`: after each step change, the dialog's size and position lie
+    inside a 1280×720 visible rect, with the large LAS report and the GeoTIFF settings;
+  - `test_nodata_keeps_a_float32_value_through_a_toggle`;
+  - `test_import_as_sends_the_kind_to_inspect`;
+  - `test_a_timed_out_import_says_it_may_still_finish`;
+  - `test_inspect_clears_an_old_settings_error`;
+  - `test_point_classes_rule`, which covers the three cases of decision 7;
+  - `test_back_and_next_on_the_same_files_keeps_the_settings`;
+  - `test_no_project_disables_next_with_a_reason`;
+  - `test_result_page_shows_every_field`;
+  - `test_report_page_shows_every_field`;
+  - `test_bbox_prefill_follows_the_horizontal_crs`;
+  - `test_not_found_returns_to_source_and_empty_returns_to_settings`;
+  - `test_a_failure_while_hidden_reports_in_the_status_bar`;
+  - `test_reopening_while_an_import_runs_shows_step_four`;
+  - `test_inspect_retries_busy`.
+
+Added with round 2:
+- `test_number_field.gd`:
+  - `test_exact_text_reads_back_exactly`, for 0.3048006096, 12345.6789, 18184.971666, 250.0, −746900.0,
+    1e-7, 0.0 and −3.4028234663852886e38. Each text reads back equal, and each is no longer than the
+    shortest such text;
+  - `test_an_untouched_field_returns_the_value_it_was_given`;
+  - `test_invalid_and_out_of_bounds_text_is_not_a_value`;
+  - `test_up_and_down_step_by_the_arrow_step`.
+- `test_import_dialog.gd`:
+  - `test_enter_in_a_number_field_does_not_start_the_import`;
+  - `test_request_timeouts_per_method`;
+  - `test_every_invalid_number_disables_import_with_its_name`.
+- `test_crs_picker.gd`: `test_down_opens_the_results`.
+
+Added with round 3:
+- `test_crs_picker.gd`:
+  - `test_listed_results_leave_the_placeholder_selected`;
+  - `test_enter_ignores_an_out_of_date_list`.
+- `test_number_field.gd`:
+  - `test_exact_text_boundaries_and_extremes`;
+  - `test_arrow_steps_are_decimal`;
+  - `test_a_read_only_field_ignores_the_arrows`.
+- `test_import_dialog.gd`:
+  - `test_warnings_come_before_the_class_table`;
+  - `test_enter_in_the_crs_field_with_a_code_presses_the_primary_button`;
+  - `test_buffer_above_5000_disables_import_with_a_reason`;
+  - `test_hiding_during_the_source_lookup_reopens_at_step_four`.
+
+**GPU check:** the reviewer opens the dialog on the GPU in both presets and judges steps 1 to 5 from real
+windows. A scratch script outside the repository drives it with a fake requester. Headless tests cannot show
+layout, clipping or focus rings (F44).
+- The worker adds no capture shots (that is Part C).
+- `ui_shell.show_dialog(&"import")` must make the dialog reachable for that check.
+
 No regressions: both suites are green, with executed = declared test counts.
 
 ## Part C — online sources and polish
@@ -281,6 +645,8 @@ No regressions: both suites are green, with executed = declared test counts.
 | `client/tests/unit/test_import_dialog.gd` | the cases below |
 | `client/tests/integration/test_import_dialog_live.gd` | new — live backend, synthetic data, the test-server providers |
 | `client/tools/capture/scenarios/ui_shell.json` | import-dialog shots |
+| `client/ipc/envelope.gd`, `client/tests/unit/test_ipc_envelope.gd` | F51: encode headers at full precision (`JSON.stringify(header, "", true, true)`); a unit test shows that the encoded header parses back (`JSON.parse_string`) to the same float64 for −3.4028234663852886e38 and 0.3048006096 |
+| `backend/src/coypu_builder/io/terrain/raster.py`, `io/imagery/raster_image.py`, a backend test | F51, decode side: Godot reads the suggested float32 nodata as the neighbouring double and sends it back 1 ulp off. Cast a confirmed `nodata` to the raster's dtype before masking, and record the cast value. A test shows that a nodata 1 ulp above FLT_MAX still masks the file's FLT_MAX cells and is recorded as FLT_MAX |
 
 ### Contract (Part C)
 
