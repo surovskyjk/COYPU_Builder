@@ -284,7 +284,9 @@ T-140: the product frame around the 3D view. `scene/main.tscn` instances `ui/she
 - **Import terrain or imagery...** (`ui/dialogs/import_dialog.gd`, Ctrl+I, the Import group; T-136 Part B). Five
   steps, shown in a strip at the top: 1 Source (Files… opens the native file dialog, filtered by the readers that
   `import.formats` lists; "Import as" chooses Detect from the files, which is the default, Terrain or Imagery; Online
-  source is coming in the next step of this feature), 2 Inspect (the report of `import.inspect`: format, file count,
+  source opens the list of `import.formats` providers, one radio choice each with its description, licence and notices,
+  and choosing one sets the kind and its default query, the clip is edited in Settings, and the download limit shows in
+  Settings when the source has one; "Nothing chosen yet." sits under the buttons), 2 Inspect (the report of `import.inspect`: format, file count,
   kind, declared CRS, extent, counts, licence and every warning verbatim, in a scrolling area; a file that declares no
   CRS gets a notice), 3 Settings (every value of `ImportSettingsDTO`, pre-filled from the suggestion), 4 Import
   (`import.run` with a busy indicator and elapsed time), 5 Result (a headline with the name, the added, changed,
@@ -313,6 +315,18 @@ T-140: the product frame around the 3D view. `scene/main.tscn` instances `ui/she
   - `E_BUSY` is retried after 0.5, 1, 2 and then 4 s, at most eight times, and then one sentence says the backend
     stayed busy. Every other error is one plain sentence (`ImportDialog.plain_error`), and `E_CRS_REQUIRED` returns to
     Settings with the CRS field focused. Without an open project, Next on step 1 is disabled with the reason.
+  - The project's coordinate system is required too: without one, Next on step 1 is disabled ("The project has no
+    coordinate system yet — import an alignment first"), and the backend's `E_CRS_REQUIRED` about the project goes to
+    the Source step with that sentence, not to Settings. An online source is cut to a corridor around an alignment, so
+    without an alignment Next is disabled for it.
+  - "Re-import of" (Settings) lists the existing sources of the same kind and format from `source.list`, with their
+    object counts; choosing one sends `reimport_of`, and while Name is untouched it takes that source's name. The
+    selector is disabled with "No earlier source of this kind and format" when there is none. After an import in the
+    same dialog the next Next inspects again, so the list shows the new source.
+  - Attribution and Licence are recorded for a file import. They are prefilled from the re-import source, else from the
+    file-name hints (`attribution_hint`, `licence_hint`), and the note under them says "Suggested from the file names;
+    check it." only while a hint fills the field. An empty field is not sent, so the backend keeps the previous values.
+    An online source takes its attribution and licence from the provider, so these rows are hidden for it.
   - Closing the window does not stop a running import. Its outcome then goes to the status bar, and a success emits
     `EventBus.sources_changed(kind)`, which `TerrainField` answers by listing the terrain again.
   - The CRS fields (`ui/widgets/crs_picker.gd`) search `crs.search` after a 250 ms pause and show only the latest
@@ -371,9 +385,18 @@ A scenario is JSON (`tools/capture/scenario.gd` is the parser, and lists every e
   (`p50`/`p95`/`p99`/`max` and counts over 16.7 ms and 33.3 ms). The run must be long enough for it.
 - By default the UI is hidden while capturing (and restored afterwards), so each PNG and its statistics show
   only the 3D render. T-140 adds, per shot, `"ui": "visible"` (default `"hidden"`), `"preset"` (`engineering` or
-  `sandbox`), `"panel_opacity"` (0.4 to 1.0) and `"dialog"` (`envelope_export` or `settings`, with an optional
+  `sandbox`), `"panel_opacity"` (0.4 to 1.0) and `"dialog"` (`envelope_export`, `settings` or `import`, with an optional
   `dialog_offset_px` `[dx, dy]` to move it) and `"overlay_text"` (a themed box of text at the centre of the 3D view, to
-  prove glyphs); none of them is saved to the user's settings. For a visible shot the frame statistics are taken over
+  prove glyphs);
+  - `"import_dialog"` (T-136 Part C2) poses the import dialog, and needs `"ui": "visible"` and `"dialog": "import"`. It is
+    an object: `"step"` is `online` (the provider list, no files), `report` (the inspect report), `settings` (Settings)
+    or `result` (after the import); `"files"` is a non-empty array of paths for the other steps, and may name
+    `${COYPU_CAPTURE_SAMPLES}/sample_terrain_nocrs.tif` and its siblings (`tools/capture.ps1` writes the synthetic samples
+    of `tools/write_import_samples.py` into a temporary folder for that run and removes it afterwards); `"settings"`
+    (on the settings and result steps only) holds `"horizontal_crs"`, a code such as `"EPSG:5514"`, and `"clip": "none"`;
+    `"crs_query"` (settings only) types a search into the CRS field and opens its list; `"provider"` (online only) chooses
+    an online source of `import.formats`. The driver records an error for
+    an empty online list, and for an inspection that failed on a `report` shot. none of them is saved to the user's settings. For a visible shot the frame statistics are taken over
   the 3D view area with every chrome rectangle (cards, bars, open dialogs, the overlay text) painted in the background
   colour, so only the render decides whether a shot is empty; the manifest records `view_rect` and, for Sandbox shots,
   `card_luma` (the scene seen through the Layers card). The `perf` block takes `ui`, `preset` and `panel_opacity` too, and

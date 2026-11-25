@@ -23,7 +23,9 @@ var blobs: Dictionary
 
 static func encode(id: String, type: String, method: String = "", params: Dictionary = {}) -> PackedByteArray:
 	var header := {"v": PROTOCOL_VERSION, "id": id, "type": type, "method": method, "params": params}
-	var header_bytes := JSON.stringify(header).to_utf8_buffer()
+	# Full precision (F51): a header number is written as the shortest text that reads back to the same float64. Godot's
+	# default text for -FLT_MAX is a 39-digit decimal; the full-precision text is -3.4028234663852886e+38.
+	var header_bytes := JSON.stringify(header, "", true, true).to_utf8_buffer()
 	var frame := PackedByteArray()
 	frame.resize(_HEADER_LEN_BYTES)
 	frame.encode_u32(0, header_bytes.size())

@@ -37,7 +37,7 @@ const KIND_TITLES: Array[String] = ["Terrain", "Imagery"]
 const IMPORT_AS_CHOICES: Array[String] = ["", "terrain", "imagery"]
 const IMPORT_AS_TITLES: Array[String] = ["Detect from the files", "Terrain (heights)", "Imagery (orthophoto)"]
 const IMPORT_AS_NOTE := "Detect reads the files and finds their kind. Choose a kind only when that is wrong."
-const KIND_ONE_READER_NOTE := "This reader takes only one kind. To import these files as the other kind, go back to step 1."
+const KIND_ONE_READER_NOTE := "This reader takes only one kind. To import these files as the other kind, go back to the Source step."
 
 const MAX_BUSY_RETRIES := 8
 const BUSY_BACKOFF_START_SEC := 0.5
@@ -51,15 +51,30 @@ const RESOLUTION_DEFAULT_M := 1.0
 const NODATA_DEFAULT := -9999.0
 const NO_CRS_NOTICE := "No coordinate system declared — choose one in Settings"
 const NO_PROJECT_REASON := "Open or create a project first — imported data belongs to a project"
+const NO_SOURCE_REASON := "Choose one or more files, or an online source, first"
+const NO_CRS_PROJECT_TEXT := "The project has no coordinate system yet — import an alignment first"
+const ONLINE_ALIGNMENT_REASON := "An online source is cut to a corridor around an alignment — import an alignment first"
+const NO_EARLIER_SOURCE_REASON := "No earlier source of this kind and format"
+const NOTHING_CHOSEN := "Nothing chosen yet."
+const PROVIDERS_FAILED_TEXT := "The online sources could not be listed — the backend did not answer."
+const PROVIDERS_NONE_TEXT := "The backend lists no online sources."
 const NODATA_REASON := "Enter a number for no data"
 const TIMEOUT_IMPORT_TEXT := "The import is taking longer than expected — it may still finish; check the data sources before importing again"
 const NOT_STATED := "Not stated"
+## The backend's transformation for a source already in the project's CRS (`io/sources/runner.py`): none was applied.
+const NO_TRANSFORMATION := "none"
 const SCREEN_SHARE := 0.9
 ## The least a scrolling page part is given, however little room the screen leaves.
 const PAGE_MIN_PX := 120
 ## The most fit passes one fit makes, a frame apart: the first measures, a second settles the wrapped labels.
 const PAGE_SETTLE_PASSES := 3
 const SETTINGS_PAGE_WIDTH := 740
+## The title of an online source, in the size of the theme's panel titles, so it reads above its muted description.
+const PROVIDER_TITLE_PX := 15
+## The unchecked radio of an online source: a ring in this grey, which shows on the light and the dark theme alike (the
+## theme's own radio is dark, so it disappears on the dark one).
+const RADIO_RING_COLOUR := Color(0.6039, 0.6549, 0.7098)
+const RADIO_RING_PX := 18
 const LABEL_COLUMN_PX := 170
 const WRAP_MIN_PX := 320
 const NUMBER_MIN_PX := 120
@@ -70,6 +85,20 @@ const BUFFER_REASON := "The buffer must be above 0"
 const BUFFER_MAX_M := 5000.0
 const BUFFER_MAX_REASON := "The buffer must be at most 5000 m"
 const RESOLUTION_REASON := "The display resolution must be above 0"
+const MAX_TOTAL_REASON := "The download limit must be above 0 MB"
+const ATTRIBUTION_HINT := "Suggested from the file names; check it."
+const ATTRIBUTION_NOTE := "Shown in Data sources."
+const LICENCE_NOTE := "The terms the data is shared under."
+const CLIP_NOTE := "The part of the file that is imported. None imports everything the file holds."
+## The backend's placeholder for a source whose licence is not known (`io/sources/runner.py: UNKNOWN_LICENCE`). It is
+## shown as an empty field, so it is never sent back as a licence.
+const UNKNOWN_LICENCE := "unknown"
+const NO_RE_IMPORT := "— none —"
+const RE_IMPORT_NOTE := "Choose a source to refresh it: objects that match keep their identifiers, and the source keeps its id."
+const PROVIDER_KIND_NOTE := "The online source supplies this kind of data."
+const PROVIDER_CLIP_NOTE := "An online source is always clipped: a corridor or a box, not the whole file."
+const DOWNLOAD_NONE_NOTE := "The inspection did not count the download."
+const NODATA_NOTE := "Rasters only: cells that hold this value have no height."
 const BOX_CAPTIONS: Array[String] = ["Min E", "Min N", "Max E", "Max N"]
 const FORMAT_LABELS := {
 	"las": "LAS point cloud",
@@ -143,6 +172,23 @@ var _nodata_edited := false
 var _fit_queued := false
 ## The scrolling page parts (report, Settings, result), whose heights [method _fit_now] sets from the screen.
 var _scroll_pages: Array[ScrollContainer] = []
+## The online sources of `import.formats`, and the one chosen ("" when the source is files).
+var _providers: Array[Dictionary] = []
+var _provider_id := ""
+var _provider_title := ""
+var _provider_query: Dictionary = {}
+## The existing sources of this kind and format (`source.list`), and the re-import chosen from them ("" for none).
+var _sources: Array[Dictionary] = []
+var _reimport_of := ""
+## Set when the user types in a field: a typed value wins over the prefill of a re-import or a hint.
+var _attribution_edited := false
+var _licence_edited := false
+## Set when the user types in Name: a typed name wins over the re-import source's name and the automatic one.
+var _name_edited := false
+## Set when `import.formats` failed, so the online list says it could not be read rather than that none exist.
+var _providers_failed := false
+## The one radio group of the online list: one source is chosen at a time.
+var _provider_group := ButtonGroup.new()
 
 var _column: VBoxContainer
 var _pages: Array[Control] = []
@@ -187,6 +233,25 @@ var _kind_choice: OptionButton
 var _kind_text: Label
 var _kind_note: Label
 var _name_field: LineEdit
+var _import_as_row: HBoxContainer
+var _provider_scroll: ScrollContainer
+var _provider_box: VBoxContainer
+## Provider id -> its toggle button, and -> the notices shown while it is the chosen one.
+var _provider_rows: Dictionary = {}
+var _provider_notices: Dictionary = {}
+var _reimport: OptionButton
+var _reimport_row: HBoxContainer
+var _attribution: LineEdit
+var _attribution_row: HBoxContainer
+var _licence: LineEdit
+var _licence_row: HBoxContainer
+var _max_total: NumberField
+var _row_max_total: HBoxContainer
+var _max_total_note: Label
+var _clip_note: Label
+var _reimport_note: Label
+var _attribution_note: Label
+var _licence_note: Label
 
 
 func _init() -> void:
@@ -299,6 +364,11 @@ static func normalised_settings(raw: Dictionary) -> Dictionary:
 
 static func _coordinate_text(value: float) -> String:
 	return "%.1f" % value if absf(value) >= 1000.0 else "%.6f" % value
+
+
+## A licence as people read it: the backend's placeholder for an unknown licence is no licence at all.
+static func _known_licence(licence: String) -> String:
+	return "" if licence == UNKNOWN_LICENCE else licence
 
 
 static func _text_or_null(value: Variant) -> Variant:
@@ -448,6 +518,112 @@ func name_field() -> LineEdit:
 	return _name_field
 
 
+## The kind the source is imported as: the report's, or the online source's.
+func kind() -> String:
+	return _kind
+
+
+## The chosen online source's id, or "" when the source is files.
+func provider_id() -> String:
+	return _provider_id
+
+
+## The query the online source is inspected with: its default query, with the download limit as the user has set it. The
+## clip is merged in only when the import runs, from the Settings clip ([method _run_query]).
+func provider_query() -> Dictionary:
+	return _provider_query.duplicate(true)
+
+
+func import_as_row() -> Control:
+	return _import_as_row
+
+
+## The toggle that chooses online source `provider_id` on the source step, or null when there is no such source.
+func provider_button(provider_id_text: String) -> Button:
+	return _provider_rows.get(provider_id_text) as Button
+
+
+func provider_scroll() -> Control:
+	return _provider_scroll
+
+
+## How many online sources `import.formats` listed. Zero when the list failed or was empty.
+func provider_count() -> int:
+	return _providers.size()
+
+
+## Whether the notices of online source `provider_id_text` are shown: true only while it is the chosen one.
+func provider_notices_visible(provider_id_text: String) -> bool:
+	var notices: Variant = _provider_notices.get(provider_id_text)
+	return notices is Control and (notices as Control).visible
+
+
+## The text of every label in the online list, in order: the sources' descriptions and licences, or the one sentence that
+## says the list is empty or could not be read.
+func provider_list_texts() -> PackedStringArray:
+	var texts := PackedStringArray()
+	_collect_texts(_provider_box, texts)
+	return texts
+
+
+func clip_note() -> Label:
+	return _clip_note
+
+
+func reimport_note() -> Label:
+	return _reimport_note
+
+
+func attribution_note() -> Label:
+	return _attribution_note
+
+
+func licence_note() -> Label:
+	return _licence_note
+
+
+## The Source step's line under its buttons: the chosen files or online source, or "Nothing chosen yet.".
+func source_summary() -> String:
+	return _files_label.text
+
+
+func reimport_choice() -> OptionButton:
+	return _reimport
+
+
+func reimport_row() -> Control:
+	return _reimport_row
+
+
+func attribution_field() -> LineEdit:
+	return _attribution
+
+
+func attribution_row() -> Control:
+	return _attribution_row
+
+
+func licence_field() -> LineEdit:
+	return _licence
+
+
+func licence_row() -> Control:
+	return _licence_row
+
+
+## The download limit of an online source (`max_total_mb`), in MB.
+func max_total_field() -> NumberField:
+	return _max_total
+
+
+func max_total_row() -> Control:
+	return _row_max_total
+
+
+func max_total_note() -> Label:
+	return _max_total_note
+
+
 func is_busy() -> bool:
 	return _busy or _import_running
 
@@ -507,14 +683,70 @@ func file_filters() -> PackedStringArray:
 ## Chooses the files (the native dialog's `files_selected` calls this). Paths are absolute. A different list clears the
 ## report, so the next Next inspects again; the same list keeps it.
 func set_files(paths: PackedStringArray) -> void:
-	if paths != _files:
+	if paths != _files or not _provider_id.is_empty():
 		_clear_report()
+	_provider_id = ""
+	_provider_title = ""
+	_provider_query = {}
 	_files = paths.duplicate()
 	_source_error = ""
 	_source_error_label.text = ""
 	_source_error_label.visible = false
-	_files_label.text = _describe_files()
+	_refresh_source_page()
+
+
+## Chooses online source `provider_id` from `import.formats` (the toggle of its row does the same). Its kind and default
+## query are taken from the source, and any files or report it replaces are dropped. Choosing the source already chosen
+## changes nothing.
+func choose_provider(provider_id_text: String) -> void:
+	var info := _provider_info(provider_id_text)
+	if info.is_empty() or provider_id_text == _provider_id:
+		_refresh_provider_rows()
+		return
+	_clear_report()
+	_provider_id = provider_id_text
+	_provider_title = String(info.get("title", provider_id_text))
+	var default_query: Variant = info.get("default_query", {})
+	_provider_query = (default_query as Dictionary).duplicate(true) if default_query is Dictionary else {}
+	var kinds: Array = info.get("kinds", [])
+	_kind = String(kinds[0]) if not kinds.is_empty() else "terrain"
+	_files = PackedStringArray()
+	_source_error = ""
+	_source_error_label.text = ""
+	_source_error_label.visible = false
+	_refresh_source_page()
+
+
+## Shows the list of online sources (the Source step's "Online source" button does the same).
+func show_online_sources() -> void:
+	_provider_scroll.visible = true
+	_fit_later()
+
+
+## Chooses the existing source at `index` of the re-import selector (0 is "— none —") and prefills the attribution and the
+## licence from it, unless the user has typed in them.
+func choose_reimport(index: int) -> void:
+	var choice := clampi(index, 0, _sources.size())
+	_reimport.select(choice)
+	_reimport_of = String(_sources[choice - 1].get("id", "")) if choice > 0 else ""
+	_prefill_name()
+	_prefill_text_fields()
+	_refresh_buttons()
+
+
+## Chooses the clip at `index` of the Clip selector, as the user would.
+func choose_clip(index: int) -> void:
+	_clip.select(index)
+	_on_clip_selected(index)
+
+
+## Shows the Source step's controls for the current source: the file names or the online source's title, and the Import as
+## choice, which an online source does not take.
+func _refresh_source_page() -> void:
+	_files_label.text = _describe_source()
 	_files_label.tooltip_text = "\n".join(_files)
+	_import_as_row.visible = _provider_id.is_empty()
+	_refresh_provider_rows()
 	_refresh_buttons()
 	_fit_later()
 
@@ -525,7 +757,12 @@ func reason_for_step(step_number: int) -> String:
 		STEP_SOURCE:
 			if Session.project_id().is_empty():
 				return NO_PROJECT_REASON
-			return "" if not _files.is_empty() else "Choose one or more files first"
+			if Session.crs().is_empty():
+				return NO_CRS_PROJECT_TEXT
+			if not _provider_id.is_empty():
+				# An online source is cut to a corridor, which needs an alignment (no box is offered for that case).
+				return "" if not _alignments.is_empty() else ONLINE_ALIGNMENT_REASON
+			return "" if not _files.is_empty() else NO_SOURCE_REASON
 		STEP_INSPECT:
 			if _busy:
 				return "The inspection is still running"
@@ -568,6 +805,8 @@ func _number_reason() -> String:
 		reason = number_reason(_resolution, "the display resolution", RESOLUTION_REASON)
 	if reason.is_empty() and _nodata_check.button_pressed:
 		reason = number_reason(_nodata, "no data", NODATA_REASON)
+	if reason.is_empty() and _row_max_total.visible:
+		reason = number_reason(_max_total, "the download limit", MAX_TOTAL_REASON)
 	return reason
 
 
@@ -672,14 +911,23 @@ func _share_requester() -> void:
 
 func _load_formats() -> void:
 	var reply: IpcEnvelope = await requester.call("import.formats", {})
+	_providers.clear()
 	if reply.type != "res":
+		_providers_failed = true
+		_rebuild_provider_rows()
 		return
+	_providers_failed = false
 	_readers.clear()
 	var readers: Array = reply.result.get("readers", [])
 	for entry: Variant in readers:
 		if entry is Dictionary:
 			_readers.append(entry as Dictionary)
+	var providers: Array = reply.result.get("providers", [])
+	for entry: Variant in providers:
+		if entry is Dictionary:
+			_providers.append(entry as Dictionary)
 	_file_dialog.filters = file_filters()
+	_rebuild_provider_rows()
 
 
 ## Coroutine: `import.inspect` for the chosen files, with a busy indicator, retries and the report. Inspecting clears the
@@ -687,24 +935,26 @@ func _load_formats() -> void:
 func _inspect() -> void:
 	_enter_step(STEP_INSPECT)
 	_clear_settings_error()
-	_set_busy(true, "Inspecting the files…")
-	var params := {"paths": _path_list()}
-	var kind := _import_as_kind()
-	if not kind.is_empty():
-		params["kind"] = kind
-	var reply: IpcEnvelope = await _request_with_retry("import.inspect", params, "Inspecting the files…")
-	_set_busy(false, "")
+	var busy_text := "Inspecting the online source…" if not _provider_id.is_empty() else "Inspecting the files…"
+	_set_busy(true, busy_text)
+	var reply: IpcEnvelope = await _request_with_retry("import.inspect", _inspect_params(), busy_text)
 	if reply.type != "res":
+		_set_busy(false, "")
 		_report = {}
-		_inspect_error = plain_error(_code_of(reply), _message_of(reply))
+		_inspect_error = _error_sentence(_code_of(reply), _message_of(reply))
 		_render_report()
 		_refresh_buttons()
 		return
+	_format_id = String(reply.result.get("format_id", ""))
+	_kind = String(reply.result.get("kind", "terrain"))
+	# The existing sources are listed while the dialog still counts as busy, so Next cannot pass them by.
+	await _load_sources()
+	_set_busy(false, "")
 	_inspect_error = ""
 	_report = reply.result
-	_format_id = String(_report.get("format_id", ""))
-	_kind = String(_report.get("kind", "terrain"))
-	_auto_name = _files[0].get_file().get_basename()
+	_auto_name = _provider_title if not _provider_id.is_empty() else _files[0].get_file().get_basename()
+	_attribution_edited = false
+	_licence_edited = false
 	var suggested: Dictionary = reply.result.get("suggested_settings", {})
 	_settings = normalised_settings(suggested)
 	_suggested_classes = _settings["point_classes"]
@@ -713,17 +963,45 @@ func _inspect() -> void:
 	_refresh_buttons()
 
 
+## What `import.inspect` is asked: the online source and its query, or the files, with the kind when the user chose one.
+func _inspect_params() -> Dictionary:
+	if not _provider_id.is_empty():
+		return {"provider": _provider_id, "query": _provider_query.duplicate(true)}
+	var params := {"paths": _path_list()}
+	var kind := _import_as_kind()
+	if not kind.is_empty():
+		params["kind"] = kind
+	return params
+
+
+## Coroutine: the existing sources of this kind and format (`source.list`) for the re-import selector. A failed list leaves
+## the selector at "— none —"; a re-import is never required.
+func _load_sources() -> void:
+	_sources.clear()
+	var reply: IpcEnvelope = await _request_with_retry("source.list", {}, _busy_text)
+	if reply.type == "res":
+		for entry: Variant in reply.result.get("sources", []):
+			if entry is Dictionary and _is_reimport_candidate(entry as Dictionary):
+				_sources.append(entry as Dictionary)
+	_reimport_of = ""
+	_reimport.clear()
+	_reimport.add_item(NO_RE_IMPORT)
+	for source in _sources:
+		var objects := int(source.get("object_count", 0))
+		_reimport.add_item("%s · %d %s" % [String(source.get("name", "")), objects, "object" if objects == 1 else "objects"])
+	_reimport.select(0)
+	_reimport.disabled = _sources.is_empty()
+	_reimport_note.text = NO_EARLIER_SOURCE_REASON if _sources.is_empty() else RE_IMPORT_NOTE
+
+
+## Whether a listed source can be re-imported by this import: the same kind and the same format.
+func _is_reimport_candidate(source: Dictionary) -> bool:
+	return String(source.get("kind", "")) == _kind and String(source.get("format_id", "")) == _format_id
+
+
 ## Coroutine: `import.run` with the settings exactly as they stand, then the outcome.
 func _run_import() -> void:
-	var params := {
-		"paths": _path_list(),
-		"kind": _kind,
-		"settings": _settings.duplicate(true),
-		"format_id": _format_id,
-	}
-	var chosen_name := _name_field.text.strip_edges()
-	if not chosen_name.is_empty():
-		params["name"] = chosen_name
+	var params := _import_params()
 	_clear_settings_error()
 	_import_running = true
 	_enter_step(STEP_IMPORT)
@@ -757,13 +1035,15 @@ func _request_with_retry(method: String, params: Dictionary, busy_text: String) 
 
 func _fail_import(reply: IpcEnvelope) -> void:
 	var code := _code_of(reply)
-	var sentence := plain_error(code, _message_of(reply))
+	var sentence := _error_sentence(code, _message_of(reply))
 	if code == "E_TIMEOUT":
 		# The backend may still be importing: the sources may change, so the terrain lists them again.
 		sentence = TIMEOUT_IMPORT_TEXT
 		EventBus.sources_changed.emit(_kind)
-	if code == "E_NOT_FOUND":
-		_report = {}
+	if code == "E_NOT_FOUND" or _is_project_crs_error(code):
+		# Neither is fixed in Settings: a file that is gone is chosen again, and a project without a CRS needs an alignment.
+		if code == "E_NOT_FOUND":
+			_report = {}
 		_source_error = sentence
 		_source_error_label.text = sentence
 		_source_error_label.visible = true
@@ -786,12 +1066,14 @@ func _finish_import(result: Dictionary) -> void:
 	_result_attribution = ""
 	var detail: IpcEnvelope = await requester.call("source.get", {"source_id": String(result.get("source_id", ""))})
 	if detail.type == "res":
-		_result_licence = String(detail.result.get("licence", _result_licence))
+		_result_licence = _known_licence(String(detail.result.get("licence", _result_licence)))
 		_result_attribution = String(detail.result.get("attribution", ""))
 	EventBus.sources_changed.emit(_kind)
 	_outcome_unseen = not visible
 	_enter_step(STEP_RESULT)
 	_render_result()
+	# The report is spent: the next Next inspects again, so "Re-import of" lists the source this import has just made.
+	_clear_report()
 	if not visible:
 		EventBus.status_message.emit(summary_of(result, _kind))
 
@@ -806,6 +1088,52 @@ func _code_of(reply: IpcEnvelope) -> String:
 
 func _message_of(reply: IpcEnvelope) -> String:
 	return String(reply.error.get("message", ""))
+
+
+## The sentence for a failed request: the project's sentence for the project's `E_CRS_REQUIRED`, else [method plain_error].
+func _error_sentence(code: String, message: String) -> String:
+	return NO_CRS_PROJECT_TEXT if _is_project_crs_error(code) else plain_error(code, message)
+
+
+## Whether `code` is `E_CRS_REQUIRED` about the project: the project has no coordinate system, or a horizontal CRS is already
+## chosen, so Settings cannot change the answer. Only a file with no CRS and no choice sends the user to Settings.
+func _is_project_crs_error(code: String) -> bool:
+	return code == "E_CRS_REQUIRED" and (Session.crs().is_empty() or not _text_of(_settings, "horizontal_crs").is_empty())
+
+
+## What `import.run` is sent. The settings go exactly as they stand. A file import takes the format of its report and the
+## typed attribution and licence, and an empty field is not sent (the backend then keeps the previous values). An online
+## source takes its query, with the clip from the settings, and no file values (the backend refuses them for a provider).
+func _import_params() -> Dictionary:
+	var params := {"kind": _kind, "settings": _settings.duplicate(true)}
+	if _provider_id.is_empty():
+		params["paths"] = _path_list()
+		params["format_id"] = _format_id
+		var attribution := _attribution.text.strip_edges()
+		if not attribution.is_empty():
+			params["attribution"] = attribution
+		var licence := _licence.text.strip_edges()
+		if not licence.is_empty():
+			params["licence"] = licence
+	else:
+		params["provider"] = _provider_id
+		params["query"] = _run_query()
+	var chosen_name := _name_field.text.strip_edges()
+	if not chosen_name.is_empty():
+		params["name"] = chosen_name
+	if not _reimport_of.is_empty():
+		params["reimport_of"] = _reimport_of
+	return params
+
+
+## The online source's query for the import: its default query and download limit, with the clip the settings hold, so the
+## fetch selects what the settings say.
+func _run_query() -> Dictionary:
+	var query := _provider_query.duplicate(true)
+	var clip: Variant = _settings.get("clip")
+	if clip is Dictionary:
+		query["clip"] = (clip as Dictionary).duplicate(true)
+	return query
 
 
 func _path_list() -> Array:
@@ -844,8 +1172,13 @@ func _refresh_buttons() -> void:
 			primary.text = "Next"
 	primary.disabled = not reason.is_empty()
 	primary.tooltip_text = reason
+	var hint_shown := _hint.visible
+	var hint_text := _hint.text
 	_hint.text = reason
 	_hint.visible = not reason.is_empty()
+	# A hint line that appears or changes makes the window taller, so the window is fitted again.
+	if _hint.visible != hint_shown or _hint.text != hint_text:
+		_fit_later()
 	_back.disabled = _busy or _import_running or _step == STEP_SOURCE or _step == STEP_RESULT
 	# The Result step has one button, Close: Back and Cancel would both only close the window.
 	_back.visible = _step != STEP_RESULT
@@ -905,6 +1238,110 @@ func _on_number_typed(_text: String) -> void:
 func _on_import_as_selected(_index: int) -> void:
 	_clear_report()
 	_refresh_buttons()
+
+
+## A typed attribution or licence is the user's: a later re-import or hint does not replace it.
+func _on_attribution_typed(_text: String) -> void:
+	if not _populating:
+		_attribution_edited = true
+		_refresh_text_notes()
+
+
+func _on_licence_typed(_text: String) -> void:
+	if not _populating:
+		_licence_edited = true
+		_refresh_text_notes()
+
+
+func _on_reimport_selected(index: int) -> void:
+	choose_reimport(index)
+
+
+## The download limit the user sets is the `max_total_mb` the import sends.
+func _on_max_total_changed(value: float) -> void:
+	if _populating:
+		return
+	_provider_query["max_total_mb"] = value
+	_refresh_buttons()
+
+
+func _on_provider_toggled(on: bool, provider_id_text: String) -> void:
+	if on:
+		choose_provider(provider_id_text)
+	else:
+		# The chosen online source cannot be un-chosen by its toggle: it is pressed again.
+		_refresh_provider_rows()
+
+
+## The `import.formats` entry of online source `provider_id_text`, or an empty dictionary.
+func _provider_info(provider_id_text: String) -> Dictionary:
+	for info: Dictionary in _providers:
+		if String(info.get("provider_id", "")) == provider_id_text:
+			return info
+	return {}
+
+
+## One row per online source: a radio choice with its title (the stronger line), its description and licence, and its
+## notices in a box while it is chosen. With no source listed, the list says why in one sentence.
+func _rebuild_provider_rows() -> void:
+	_clear(_provider_box)
+	_provider_rows.clear()
+	_provider_notices.clear()
+	if _providers.is_empty():
+		_provider_box.add_child(_wrapped_label(PROVIDERS_FAILED_TEXT if _providers_failed else PROVIDERS_NONE_TEXT, &"HintLabel"))
+	var ring := _radio_ring()
+	for info: Dictionary in _providers:
+		var provider_key := String(info.get("provider_id", ""))
+		var row := VBoxContainer.new()
+		row.name = "Provider_" + provider_key.replace("-", "_")
+		row.add_theme_constant_override(&"separation", 4)
+		var pick := CheckBox.new()
+		pick.name = "Pick"
+		pick.button_group = _provider_group
+		pick.text = String(info.get("title", provider_key))
+		pick.add_theme_font_size_override(&"font_size", PROVIDER_TITLE_PX)
+		pick.add_theme_icon_override(&"radio_unchecked", ring)
+		pick.toggled.connect(_on_provider_toggled.bind(provider_key))
+		row.add_child(pick)
+		row.add_child(_wrapped_label(String(info.get("description", "")), &"MutedLabel"))
+		var licence := String(info.get("licence", "")).strip_edges()
+		row.add_child(_wrapped_label("Licence: %s" % (licence if not licence.is_empty() else NOT_STATED), &"MutedLabel"))
+		var notice_texts: Array = info.get("notices", [])
+		if not notice_texts.is_empty():
+			var notices := PanelContainer.new()
+			notices.name = "Notices"
+			var column := VBoxContainer.new()
+			column.add_theme_constant_override(&"separation", 4)
+			for notice: Variant in notice_texts:
+				column.add_child(_wrapped_label(String(notice)))
+			notices.add_child(column)
+			row.add_child(notices)
+			_provider_notices[provider_key] = notices
+		_provider_box.add_child(row)
+		_provider_rows[provider_key] = pick
+	_refresh_provider_rows()
+	_fit_later()
+
+
+## The ring drawn for an unchecked radio of an online source (see [constant RADIO_RING_COLOUR]).
+static func _radio_ring() -> ImageTexture:
+	var image := Image.create(RADIO_RING_PX, RADIO_RING_PX, false, Image.FORMAT_RGBA8)
+	var centre := Vector2(RADIO_RING_PX, RADIO_RING_PX) / 2.0
+	for y in RADIO_RING_PX:
+		for x in RADIO_RING_PX:
+			var distance := Vector2(x + 0.5, y + 0.5).distance_to(centre)
+			image.set_pixel(x, y, RADIO_RING_COLOUR if distance >= 6.0 and distance <= 8.0 else Color(0.0, 0.0, 0.0, 0.0))
+	return ImageTexture.create_from_image(image)
+
+
+## Shows the chosen online source's radio pressed and its notices, and the others unpressed and closed. Setting the state
+## does not emit the toggle, so no source is chosen by this.
+func _refresh_provider_rows() -> void:
+	for provider_key: String in _provider_rows:
+		var chosen := provider_key == _provider_id
+		(_provider_rows[provider_key] as CheckBox).set_pressed_no_signal(chosen)
+		if _provider_notices.has(provider_key):
+			(_provider_notices[provider_key] as Control).visible = chosen
 
 
 # --- window size -----------------------------------------------------------------------------------------------------
@@ -1152,17 +1589,121 @@ func _populate_settings() -> void:
 	_order_note.text = auto_order_text(_format_id)
 	_unit.set_value(float(_settings["linear_unit_m"]))
 	_populate_clip()
+	_populate_download()
+	_attribution_row.visible = _provider_id.is_empty()
+	_licence_row.visible = _provider_id.is_empty()
 	_populate_classes()
 	_populate_raster()
 	_populate_kind()
-	_name_field.text = _auto_name
+	_name_edited = false
+	_prefill_name()
+	_prefill_text_fields()
 	_populating = false
 	_refresh_buttons()
 	_fit_later()
 
 
+## The Name of the import: the re-import source's name, else the automatic name (the file's name, or the online source's title).
+## A name the user has typed is kept.
+func _prefill_name() -> void:
+	if _name_edited:
+		return
+	var was_populating := _populating
+	_populating = true
+	var from_source := String(_reimport_entry().get("name", "")).strip_edges()
+	_name_field.text = from_source if not from_source.is_empty() else _auto_name
+	_populating = was_populating
+
+
+## A typed name is the user's: a later re-import does not replace it.
+func _on_name_typed(_text: String) -> void:
+	if not _populating:
+		_name_edited = true
+
+
+## The attribution and the licence of the import: the re-import source's values, else the file names' hints, else empty. A
+## field the user has typed in keeps what the user typed. The placeholder licence of a source is shown as empty.
+func _prefill_text_fields() -> void:
+	var was_populating := _populating
+	_populating = true
+	if not _attribution_edited:
+		_attribution.text = _attribution_prefill()
+	if not _licence_edited:
+		_licence.text = _licence_prefill()
+	_populating = was_populating
+	_refresh_text_notes()
+
+
+## The note under Attribution and under Licence. The file-name suggestion is named only while a hint fills the field the user
+## has not typed in; otherwise Attribution says where it is shown, and Licence says what it means.
+func _refresh_text_notes() -> void:
+	_attribution_note.text = ATTRIBUTION_HINT if _attribution_from_hint() else ATTRIBUTION_NOTE
+	_licence_note.text = ATTRIBUTION_HINT if _licence_from_hint() else LICENCE_NOTE
+
+
+func _attribution_from_hint() -> bool:
+	if _attribution_edited or not String(_reimport_entry().get("attribution", "")).strip_edges().is_empty():
+		return false
+	return not _text_or_default(_report.get("attribution_hint"), "").is_empty()
+
+
+func _licence_from_hint() -> bool:
+	if _licence_edited or not _licence_from_source().is_empty():
+		return false
+	return not _text_or_default(_report.get("licence_hint"), "").is_empty()
+
+
+func _attribution_prefill() -> String:
+	var from_source := String(_reimport_entry().get("attribution", "")).strip_edges()
+	if not from_source.is_empty():
+		return from_source
+	return _text_or_default(_report.get("attribution_hint"), "")
+
+
+func _licence_prefill() -> String:
+	var from_source := _licence_from_source()
+	if not from_source.is_empty():
+		return from_source
+	return _text_or_default(_report.get("licence_hint"), "")
+
+
+## The licence of the re-import source, or "" when it has none or only the unknown-licence placeholder.
+func _licence_from_source() -> String:
+	var from_source := String(_reimport_entry().get("licence", "")).strip_edges()
+	return "" if from_source == UNKNOWN_LICENCE else from_source
+
+
+## The existing source the re-import selector chose, or an empty dictionary.
+func _reimport_entry() -> Dictionary:
+	for source in _sources:
+		if String(source.get("id", "")) == _reimport_of:
+			return source
+	return {}
+
+
+## The download limit of an online source that has one (ČÚZK sources do, as `max_total_mb`), with the total the inspection
+## reported beside it.
+func _populate_download() -> void:
+	var limited := not _provider_id.is_empty() and _provider_query.has("max_total_mb")
+	_row_max_total.visible = limited
+	if not limited:
+		return
+	_max_total.set_value(float(_provider_query["max_total_mb"]))
+	_max_total_note.text = _download_text()
+
+
+## The download the inspection counted, in plain words, or that it counted none.
+func _download_text() -> String:
+	var counts: Dictionary = _report.get("counts", {})
+	if not counts.has("bytes"):
+		return DOWNLOAD_NONE_NOTE
+	return "At inspection, the clip needed %.1f MB to download. The import is refused above this limit." % (float(counts["bytes"]) / 1000000.0)
+
+
 func _populate_clip() -> void:
-	if _settings["clip"] == null and not _alignments.is_empty():
+	# An online source is always clipped, so its "None" is disabled and a missing clip becomes its corridor.
+	var online := not _provider_id.is_empty()
+	if _settings["clip"] == null and (online or not _alignments.is_empty()):
 		_settings["clip"] = _default_corridor()
 	var clip: Variant = _settings["clip"]
 	var clip_dict: Dictionary = clip if clip is Dictionary else {}
@@ -1172,6 +1713,10 @@ func _populate_clip() -> void:
 			choice = CLIP_CORRIDOR
 		"bbox":
 			choice = CLIP_BBOX
+	_clip.set_item_disabled(CLIP_NONE, online)
+	_clip_note.text = PROVIDER_CLIP_NOTE if online else CLIP_NOTE
+	if online and choice == CLIP_NONE:
+		choice = CLIP_CORRIDOR
 	_bbox_edited = choice == CLIP_BBOX
 	_buffer.set_value(float(clip_dict.get("buffer_m", CORRIDOR_DEFAULT_M)))
 	var single := _alignments.size() == 1
@@ -1240,7 +1785,8 @@ func _populate_classes() -> void:
 func _populate_raster() -> void:
 	var raster := _is_raster()
 	_row_resolution.visible = raster
-	_row_nodata.visible = raster
+	# Imagery records its no-data value but never applies it (C1 review decision 8), so the row is shown for terrain only.
+	_row_nodata.visible = raster and _kind != "imagery"
 	var resolution: Variant = _settings["display_resolution_m"]
 	_resolution_check.button_pressed = resolution != null
 	_resolution.set_value(float(resolution) if resolution != null else RESOLUTION_DEFAULT_M)
@@ -1254,13 +1800,16 @@ func _populate_raster() -> void:
 
 func _populate_kind() -> void:
 	var kinds := _reader_kinds(_format_id)
-	var both := kinds.has("terrain") and kinds.has("imagery")
+	# An online source supplies its own kind, so the kind is shown as text there, as for a reader that takes one kind.
+	var fixed := not _provider_id.is_empty()
+	var both := not fixed and kinds.has("terrain") and kinds.has("imagery")
 	var shown := maxi(0, KIND_CHOICES.find(_kind))
 	_kind_choice.select(shown)
 	_kind_choice.visible = both
 	_kind_choice.disabled = not both
 	_kind_text.text = KIND_TITLES[shown]
 	_kind_text.visible = not both
+	_kind_note.text = PROVIDER_KIND_NOTE if fixed else KIND_ONE_READER_NOTE
 	_kind_note.visible = not both
 
 
@@ -1313,13 +1862,19 @@ func _fill_report() -> void:
 	var declared: Variant = _report.get("declared_crs")
 	var grid := _pair_grid()
 	_add_pair(grid, "Format", format_label(_format_id))
-	_add_pair(grid, "Files", "%d %s" % [_files.size(), "file" if _files.size() == 1 else "files"])
+	if _provider_id.is_empty():
+		_add_pair(grid, "Files", "%d %s" % [_files.size(), "file" if _files.size() == 1 else "files"])
+	else:
+		_add_pair(grid, "Source", _provider_title)
+		_add_pair(grid, "Attribution", String(_provider_info(_provider_id).get("attribution", "")))
 	_add_pair(grid, "Kind", KIND_TITLES[maxi(0, KIND_CHOICES.find(_kind))])
 	_add_pair(grid, "Declared CRS", String(declared) if declared != null else "None declared")
 	_add_pair(grid, "Extent", extent_text(_report.get("extent")))
 	_add_pair(grid, "Counts", _counts_text())
 	_add_pair(grid, "Licence", _text_or_default(_report.get("licence_hint"), NOT_STATED))
 	_report_box.add_child(grid)
+	for notice: Variant in _provider_info(_provider_id).get("notices", []):
+		_report_box.add_child(_note(String(notice)))
 	if declared == null:
 		_report_box.add_child(_wrapped_label(NO_CRS_NOTICE, &"ErrorLabel"))
 	var warnings: Array = _report.get("warnings", [])
@@ -1350,6 +1905,8 @@ func _render_result() -> void:
 
 func _transformation_text() -> String:
 	var transformation := String(_result.get("transformation", ""))
+	if transformation.is_empty() or transformation == NO_TRANSFORMATION:
+		return "None needed"
 	var accuracy: Variant = _result.get("transformation_accuracy_m")
 	if accuracy == null:
 		return "%s (accuracy not stated)" % transformation
@@ -1361,7 +1918,17 @@ func _counts_text() -> String:
 	if _is_raster():
 		return "%d × %d pixels, %d band(s)" % [int(counts["width"]), int(counts["height"]), int(counts.get("bands", 1))]
 	if counts.has("points"):
-		return "%d points" % int(counts["points"])
+		var points := int(counts["points"])
+		return "%d %s" % [points, "point" if points == 1 else "points"]
+	if counts.has("sheets"):
+		var sheets := int(counts["sheets"])
+		var text := "%d %s" % [sheets, "sheet" if sheets == 1 else "sheets"]
+		if counts.has("bytes"):
+			text += ", %.1f MB to download" % (float(counts["bytes"]) / 1000000.0)
+		return text
+	if counts.has("tiles"):
+		var tiles := int(counts["tiles"])
+		return "%d %s" % [tiles, "tile" if tiles == 1 else "tiles"]
 	return "Not counted"
 
 
@@ -1374,9 +1941,11 @@ func _class_table() -> GridContainer:
 	return grid
 
 
-func _describe_files() -> String:
+func _describe_source() -> String:
+	if not _provider_id.is_empty():
+		return "Online source: %s" % _provider_title
 	if _files.is_empty():
-		return "No files chosen yet."
+		return NOTHING_CHOSEN
 	var names := PackedStringArray()
 	for file in _files:
 		names.append(file.get_file())
@@ -1432,7 +2001,7 @@ func _build_steps() -> Control:
 
 func _build_source_page() -> Control:
 	var page := _page("SourcePage")
-	page.add_child(_wrapped_label("Choose the files to import. Several files of one format, such as the sheets of one survey, form one source."))
+	page.add_child(_wrapped_label("Choose files to import, or an online source. Several files of one format, such as the sheets of one survey, form one source."))
 	var buttons := HBoxContainer.new()
 	buttons.add_theme_constant_override(&"separation", 8)
 	var files := Button.new()
@@ -1443,17 +2012,24 @@ func _build_source_page() -> Control:
 	_online = Button.new()
 	_online.name = "OnlineSource"
 	_online.text = "Online source"
-	_online.disabled = true
-	_online.tooltip_text = "Coming in the next step of this feature"
+	_online.tooltip_text = "Download a source from one of the online services listed below"
+	_online.pressed.connect(show_online_sources)
 	buttons.add_child(_online)
 	page.add_child(buttons)
-	page.add_child(_wrapped_label("Coming in the next step of this feature", &"HintLabel"))
-	_files_label = _wrapped_label("No files chosen yet.", &"MutedLabel")
+	_files_label = _wrapped_label(NOTHING_CHOSEN, &"MutedLabel")
 	page.add_child(_files_label)
+	_provider_box = VBoxContainer.new()
+	_provider_box.name = "Providers"
+	_provider_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_provider_box.add_theme_constant_override(&"separation", 12)
+	_provider_scroll = _capped_scroll(_provider_box, "ProviderScroll")
+	_provider_scroll.visible = false
+	page.add_child(_provider_scroll)
 	_source_error_label = _wrapped_label("", &"ErrorLabel")
 	_source_error_label.visible = false
 	page.add_child(_source_error_label)
-	page.add_child(_row("Import as", _build_import_as(), [_note(IMPORT_AS_NOTE)]))
+	_import_as_row = _row("Import as", _build_import_as(), [_note(IMPORT_AS_NOTE)])
+	page.add_child(_import_as_row)
 	return page
 
 
@@ -1517,16 +2093,63 @@ func _build_settings_page() -> Control:
 	form.add_child(_row("Linear unit", _with_unit(_unit, UNIT_SUFFIX), [_note("Metres per source unit: 1 for metres, 0.3048 for feet.")]))
 
 	form.add_child(_build_clip_row())
+	form.add_child(_build_download_row())
 	form.add_child(_build_classes_row())
 	form.add_child(_build_raster_rows())
 	form.add_child(_build_kind_row())
+	form.add_child(_build_reimport_row())
+	form.add_child(_build_attribution_rows())
 
 	_name_field = LineEdit.new()
 	_name_field.name = "SourceName"
 	_name_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_name_field.text_submitted.connect(_on_field_submitted)
+	_name_field.text_changed.connect(_on_name_typed)
 	form.add_child(_row("Name", _name_field, [_note("The name the source has in the project. Leave it empty for no name.")]))
 	return page
+
+
+## The download limit of an online source (`max_total_mb`): a number in MB, with the download the inspection counted.
+func _build_download_row() -> Control:
+	_max_total = _number_field("DownloadLimit", 0.0, true, 10.0)
+	_max_total.value_edited.connect(_on_max_total_changed)
+	_max_total_note = _note("")
+	_row_max_total = _row("Download limit", _with_unit(_max_total, "MB"), [_max_total_note])
+	return _row_max_total
+
+
+## The existing sources a re-import can refresh. "— none —" is the first choice, so the selector is never empty.
+func _build_reimport_row() -> Control:
+	_reimport = OptionButton.new()
+	_reimport.name = "ReimportOf"
+	_reimport.add_item(NO_RE_IMPORT)
+	_reimport.item_selected.connect(_on_reimport_selected)
+	_reimport_note = _note(RE_IMPORT_NOTE)
+	_reimport_row = _row("Re-import of", _reimport, [_reimport_note])
+	return _reimport_row
+
+
+## Attribution and licence of a file import, recorded on the source (F53). An online source's come from the provider, so
+## these rows are hidden for one.
+func _build_attribution_rows() -> Control:
+	var group := VBoxContainer.new()
+	group.name = "AttributionFields"
+	group.add_theme_constant_override(&"separation", 12)
+	_attribution = LineEdit.new()
+	_attribution.name = "AttributionField"
+	_attribution.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_attribution.text_changed.connect(_on_attribution_typed)
+	_attribution_note = _note(ATTRIBUTION_NOTE)
+	_attribution_row = _row("Attribution", _attribution, [_attribution_note])
+	group.add_child(_attribution_row)
+	_licence = LineEdit.new()
+	_licence.name = "LicenceField"
+	_licence.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_licence.text_changed.connect(_on_licence_typed)
+	_licence_note = _note(LICENCE_NOTE)
+	_licence_row = _row("Licence", _licence, [_licence_note])
+	group.add_child(_licence_row)
+	return group
 
 
 func _build_kind_row() -> Control:
@@ -1607,7 +2230,8 @@ func _build_clip_row() -> Control:
 	_bbox_note = _note("")
 	_bbox_box.add_child(_bbox_note)
 	group.add_child(_bbox_box)
-	return _row("Clip", group, [_note("The part of the file that is imported. None imports everything the file holds.")])
+	_clip_note = _note(CLIP_NOTE)
+	return _row("Clip", group, [_clip_note])
 
 
 func _build_classes_row() -> Control:
@@ -1646,7 +2270,7 @@ func _build_raster_rows() -> Control:
 	_nodata.custom_minimum_size = Vector2(NODATA_TEXT_MIN_PX, 0)
 	_nodata.text_changed.connect(_on_nodata_text_changed)
 	nodata_field.add_child(_nodata)
-	_row_nodata = _row("No data", nodata_field, [_note("Rasters only: cells that hold this value have no height. The value is kept exactly as the file gives it.")])
+	_row_nodata = _row("No data", nodata_field, [_note(NODATA_NOTE)])
 	group.add_child(_row_nodata)
 	return group
 
@@ -1689,6 +2313,8 @@ func _capped_scroll(content: Control, scroll_name: String) -> ScrollContainer:
 
 
 func _on_files_pressed() -> void:
+	_provider_scroll.visible = false
+	_fit_later()
 	_file_dialog.filters = file_filters()
 	_file_dialog.popup_centered_ratio(0.6)
 

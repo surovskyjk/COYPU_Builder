@@ -240,7 +240,7 @@ func _wait_for_scene() -> bool:
 
 func _capture_shot(shot: Dictionary, timeline: TimelineState, playback: PlaybackController) -> void:
 	var camera_manager: CameraManager = _main.camera_manager()
-	await _pose_ui(shot)
+	await _pose_ui(shot, String(shot["name"]))
 	if shot.has("time_s"):
 		timeline.pause()
 		timeline.seek(shot["time_s"])
@@ -412,7 +412,7 @@ func _measure_perf(block: Dictionary, timeline: TimelineState, label: String) ->
 ## Poses the shell for a shot or perf block: `ui` "hidden" hides the chrome; "visible" applies `preset` and
 ## `panel_opacity` (the preset's own default when absent) and opens or closes the named `dialog`. The terrain's
 ## source boundaries are set for every block: off unless its `source_boundaries` is true.
-func _pose_ui(block: Dictionary) -> void:
+func _pose_ui(block: Dictionary, shot_name := "") -> void:
 	_shell.close_dialogs()
 	_shell.show_capture_text("")
 	_shell.set_source_boundaries(bool(block.get("source_boundaries", false)))
@@ -427,8 +427,86 @@ func _pose_ui(block: Dictionary) -> void:
 		var offset := Vector2i(block.get("dialog_offset_px", Vector2.ZERO))
 		if not _shell.show_dialog(StringName(block["dialog"]), offset):
 			_errors.append("unknown dialog '%s'" % block["dialog"])
+	if block.has("import_dialog"):
+		await _drive_import_dialog(shot_name, block["import_dialog"])
 	_shell.show_capture_text(block.get("overlay_text", ""))
 	await _frames(3)
+
+
+## T-136 Part C2: poses the import dialog of a shot the way a user reaches it. The online step only lists the sources. The
+## other steps choose the files, press Next (and wait for the inspection), and for the result press Import (and wait for the
+## import). `settings` sets the horizontal CRS and the clip, and `crs_query` types a search into the CRS field and opens its
+## list. `provider` chooses an online source on the online step. Only the dialog's public seams are used; each wait ends when the dialog is no longer busy, or at the request's own
+## timeout.
+func _drive_import_dialog(shot_name: String, block: Dictionary) -> void:
+	var dialog := _shell.import_dialog()
+	if String(block["step"]) == "online":
+		dialog.show_online_sources()
+		await _wait_for_providers(dialog)
+		if block.get("provider") != null:
+			var provider := String(block["provider"])
+			dialog.choose_provider(provider)
+			if dialog.provider_id() != provider:
+				_errors.append("shot '%s': the online source '%s' is not listed" % [shot_name, provider])
+		await _frames(2)
+		if dialog.provider_count() == 0:
+			_errors.append("shot '%s': the online source list is empty" % shot_name)
+		return
+	var files := PackedStringArray()
+	for path: Variant in block["files"]:
+		files.append(String(path))
+	dialog.set_files(files)
+	await _advance_dialog(shot_name, dialog, ImportDialog.STEP_INSPECT, "import.inspect")
+	if String(block["step"]) == "report":
+		if not dialog.error_text().is_empty():
+			_errors.append("shot '%s': the inspection failed: %s" % [shot_name, dialog.error_text()])
+		return
+	await _advance_dialog(shot_name, dialog, ImportDialog.STEP_SETTINGS, "import.inspect")
+	var settings: Dictionary = block.get("settings", {})
+	if settings.has("horizontal_crs"):
+		dialog.horizontal_picker().set_code(String(settings["horizontal_crs"]))
+	if settings.has("clip"):
+		dialog.choose_clip(ImportDialog.CLIP_NONE)
+	if block.get("crs_query") != null:
+		var field := dialog.horizontal_picker().line_edit()
+		field.text = String(block["crs_query"])
+		field.text_changed.emit(field.text)
+		await _wait_for_crs_results(shot_name, dialog.horizontal_picker())
+		dialog.horizontal_picker().results_choice().show_popup()
+		await _frames(2)
+	if String(block["step"]) == "result":
+		await _advance_dialog(shot_name, dialog, ImportDialog.STEP_RESULT, "import.run")
+
+
+## Presses the dialog's primary button once and waits while it is busy, at most the timeout of `method`. Records a problem
+## when the dialog is not on `expected_step` afterwards.
+func _advance_dialog(shot_name: String, dialog: ImportDialog, expected_step: int, method: String) -> void:
+	dialog.go_next()
+	var deadline := Time.get_ticks_msec() + int(ImportDialog.request_timeout_sec(method) * 1000.0)
+	while dialog.is_busy() and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+	if dialog.is_busy():
+		_errors.append("shot '%s': the import dialog was still busy after %s's timeout" % [shot_name, method])
+	await _frames(2)
+	if dialog.step() != expected_step:
+		_errors.append("shot '%s': the import dialog is on step %d, expected %d" % [shot_name, dialog.step(), expected_step])
+
+
+## Waits until the dialog has listed the online sources: it asks the backend for them as it opens, so a choice made before the
+## answer would be dropped. Gives up at the request timeout; an empty list is then recorded by the driver.
+func _wait_for_providers(dialog: ImportDialog) -> void:
+	var deadline := Time.get_ticks_msec() + int(Backend.REQUEST_TIMEOUT_SEC * 1000.0)
+	while dialog.provider_count() == 0 and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+
+
+## Waits for the CRS search of a typed query to list its results (the picker debounces the typing first).
+func _wait_for_crs_results(shot_name: String, picker: CrsPicker) -> void:
+	var deadline := Time.get_ticks_msec() + int(ImportDialog.request_timeout_sec("crs.search") * 1000.0)
+	while picker.result_codes().is_empty() and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+	if picker.result_codes().is_empty():
+		_errors.append("shot '%s': the CRS search listed no result" % shot_name)
 
 
 ## The 3D view area of `image` with every chrome rectangle (cards, bars, open dialogs, overlay text) painted in

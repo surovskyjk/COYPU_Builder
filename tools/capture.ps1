@@ -13,7 +13,9 @@
   prints); 2 it did not finish within -TimeoutS and the process tree was killed; 3 the capture finished but a
   backend process it started was still alive (it is killed here).
   A scenario that names ${COYPU_DATA} gets a copy with the variable expanded from the environment, in a temporary
-  folder that is deleted afterwards.
+  folder that is deleted afterwards. A scenario that names ${COYPU_CAPTURE_SAMPLES} gets the synthetic import samples
+  (tools/write_import_samples.py) written to a temporary folder, which is set as that variable for the run and deleted
+  afterwards.
 .PARAMETER Scenario
   A scenario name (client/tools/capture/scenarios/<name>.json) or a path to a scenario file.
 .PARAMETER Out
@@ -78,6 +80,17 @@ function Get-BackendProcesses {
 
 function Quote([string]$value) { '"' + $value + '"' }
 
+# The uv executable: on PATH, else the winget locations (docs/tasks/README.md, environment reminders).
+function Find-Uv {
+    $onPath = Get-Command uv -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    $link = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\uv.exe"
+    if (Test-Path -LiteralPath $link) { return $link }
+    $package = Get-ChildItem (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages") -Filter "astral-sh.uv_*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($package -and (Test-Path -LiteralPath (Join-Path $package.FullName "uv.exe"))) { return (Join-Path $package.FullName "uv.exe") }
+    throw "uv not found; put it on PATH or install it with winget (astral-sh.uv)"
+}
+
 # Short commit of the checkout at $Path (plus "-dirty" when the tree has changes), or "unknown" when there is
 # no git, no checkout or no commit. Windows PowerShell 5.1 turns a native command's stderr into a terminating
 # error under $ErrorActionPreference = "Stop" once it is redirected, so relax it locally and catch.
@@ -118,6 +131,24 @@ if ($scenarioText.Contains('${COYPU_DATA}')) {
     [System.IO.File]::WriteAllText($captureScenarioPath, $scenarioText.Replace('${COYPU_DATA}', $dataFolder), (New-Object System.Text.UTF8Encoding $false))
 }
 
+# T-136 Part C2: a scenario that names ${COYPU_CAPTURE_SAMPLES} gets the synthetic import samples written into a temporary
+# folder outside the repository. The variable is set for the Godot process only; the folder and the variable are removed in
+# the finally block below. The folder is never printed.
+$samplesDir = $null
+if ($scenarioText.Contains('${COYPU_CAPTURE_SAMPLES}')) {
+    $samplesDir = Join-Path ([System.IO.Path]::GetTempPath()) ("coypu-capture-samples-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $samplesDir | Out-Null
+    try {
+        $uv = Find-Uv
+        & $uv run --directory (Join-Path $root "backend") python -X utf8 (Join-Path $root "tools\write_import_samples.py") $samplesDir
+        if ($LASTEXITCODE -ne 0) { throw "write_import_samples.py failed (exit $LASTEXITCODE)" }
+    } catch {
+        Remove-Item -LiteralPath $samplesDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    $env:COYPU_CAPTURE_SAMPLES = $samplesDir
+}
+
 $argList = @("--path", (Quote $client), "--resolution", ("{0}x{1}" -f $resolution[0], $resolution[1]), "--")
 if ($project) {
     $projectPath = if ([System.IO.Path]::IsPathRooted($project)) { $project } else { Join-Path $root $project }
@@ -146,6 +177,10 @@ try {
         $null = $proc.WaitForExit(10000)
     }
     if ($expandedDir) { Remove-Item -LiteralPath $expandedDir -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($samplesDir) {
+        Remove-Item -LiteralPath $samplesDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item Env:COYPU_CAPTURE_SAMPLES -ErrorAction SilentlyContinue
+    }
 
     # Backend processes that appeared during this run and are still alive: the driver quits through
     # Backend.shutdown(), so there must be none. Give the OS a moment to reap a just-killed tree first.

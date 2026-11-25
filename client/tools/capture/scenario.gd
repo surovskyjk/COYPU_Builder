@@ -13,7 +13,11 @@ const CAMERAS: Array[String] = ["orbit", "wayside", "cab"]
 ## T-125 captured it) or "visible"; `preset` and `panel_opacity` pose the visible shell; `dialog` opens one.
 const UI_MODES: Array[String] = ["hidden", "visible"]
 const PRESETS: Array[String] = ["engineering", "sandbox"]
-const DIALOGS: Array[String] = ["envelope_export", "settings", "data_sources"]
+const DIALOGS: Array[String] = ["envelope_export", "settings", "data_sources", "import"]
+## T-136 Part C2: the steps of an `import_dialog` block, and the keys each part of it takes.
+const IMPORT_STEPS: Array[String] = ["online", "report", "settings", "result"]
+const _IMPORT_DIALOG_KEYS: Array[String] = ["step", "files", "settings", "crs_query", "provider"]
+const _IMPORT_SETTINGS_KEYS: Array[String] = ["horizontal_crs", "clip"]
 const DEFAULT_UI := "hidden"
 const DEFAULT_PRESET := "engineering"
 
@@ -55,7 +59,7 @@ const _TOP_KEYS: Array[String] = ["project", "resolution", "ready_timeout_s", "i
 const _SHOT_KEYS: Array[String] = [
 	"name", "camera", "time_s", "focus_station_m", "settle_frames", "orbit_zoom_notches", "orbit_drag_px",
 	"ui", "preset", "panel_opacity", "dialog", "dialog_offset_px", "overlay_text", "source_boundaries",
-	"scene_fraction_max",
+	"scene_fraction_max", "import_dialog",
 ]
 ## `baseline: true` makes the driver record the same run once with the UI hidden first (manifest `perf_baseline`),
 ## so the cost of the visible shell is a difference within one run.
@@ -70,8 +74,8 @@ var project := ""
 var resolution := DEFAULT_RESOLUTION
 var ready_timeout_s := DEFAULT_READY_TIMEOUT_S
 ## Normalised shot dictionaries: `name`, `camera`, `settle_frames`, `ui`, `preset` always present; `time_s`,
-## `focus_station_m`, `orbit_zoom_notches` (int), `orbit_drag_px` ([Vector2]), `panel_opacity` and `dialog`
-## only when the file gave them.
+## `focus_station_m`, `orbit_zoom_notches` (int), `orbit_drag_px` ([Vector2]), `panel_opacity`, `dialog` and
+## `import_dialog` (T-136 Part C2) only when the file gave them.
 var shots: Array[Dictionary] = []
 ## Empty when the file has no `perf` block; otherwise `camera`, `time_s`, `rate`, `duration_s`, `ui`, `preset`,
 ## `baseline` and, when given, `panel_opacity`.
@@ -108,12 +112,23 @@ func errors() -> PackedStringArray:
 func path_variables() -> PackedStringArray:
 	var names := PackedStringArray()
 	var pattern := RegEx.create_from_string(VARIABLE_PATTERN)
-	for entry in imports:
-		for text in _path_texts(entry):
-			for found in pattern.search_all(text):
-				if not names.has(found.get_string(1)):
-					names.append(found.get_string(1))
+	for text in _all_path_texts():
+		for found in pattern.search_all(text):
+			if not names.has(found.get_string(1)):
+				names.append(found.get_string(1))
 	return names
+
+
+## Every path text that may name a variable: the import paths, and the files of the shots' import dialogs (T-136 Part C2).
+func _all_path_texts() -> PackedStringArray:
+	var texts := PackedStringArray()
+	for entry in imports:
+		texts.append_array(_path_texts(entry))
+	for shot in shots:
+		if shot.has("import_dialog"):
+			for file: Variant in shot["import_dialog"]["files"]:
+				texts.append(String(file))
+	return texts
 
 
 ## The names of [method path_variables] whose value in `values` (name -> text) is missing or empty.
@@ -135,6 +150,13 @@ func expand_import_paths(values: Dictionary) -> void:
 			for path: Variant in entry["paths"]:
 				expanded.append(expand_variables(String(path), values))
 			entry["paths"] = expanded
+	for shot in shots:
+		if shot.has("import_dialog"):
+			var block: Dictionary = shot["import_dialog"]
+			var files: Array = []
+			for file: Variant in block["files"]:
+				files.append(expand_variables(String(file), values))
+			block["files"] = files
 
 
 static func expand_variables(text: String, values: Dictionary) -> String:
@@ -323,6 +345,8 @@ func _read_shots(raw_shots: Array) -> void:
 
 		var shot := {"name": shot_name, "settle_frames": DEFAULT_SETTLE_FRAMES, "ui": DEFAULT_UI, "preset": DEFAULT_PRESET}
 		_read_ui(label, raw, shot, true)
+		if raw.has("import_dialog"):
+			_read_import_dialog(label, raw, shot)
 		var camera := _read_camera(label, raw)
 		if camera != "":
 			shot["camera"] = camera
@@ -406,6 +430,76 @@ func _read_ui(label: String, raw: Dictionary, target: Dictionary, allow_dialog: 
 		for key in ["preset", "panel_opacity", "dialog"]:
 			if raw.has(key):
 				_errors.append("%s: %s needs \"ui\": \"visible\"" % [label, key])
+
+
+## T-136 Part C2: the `import_dialog` block of a shot. It needs the visible shell with the `import` dialog, and a step. The
+## online step takes no files; the others take the files they import. `settings` (only on the settings and result steps)
+## holds `horizontal_crs`, a CRS text, and `clip`, which may only be "none"; `crs_query` (settings step only) is typed into
+## the horizontal CRS field; `provider` (online step only) chooses an online source of `import.formats`. The stored block has
+## `step`, `files` (an array, which may hold `${NAME}` variables), and the optional `settings`, `crs_query` and `provider`.
+func _read_import_dialog(label: String, raw: Dictionary, target: Dictionary) -> void:
+	var block: Variant = raw["import_dialog"]
+	if not (block is Dictionary):
+		_errors.append("%s: import_dialog must be an object" % label)
+		return
+	var values := block as Dictionary
+	_reject_unknown_keys(label + ": import_dialog", values, _IMPORT_DIALOG_KEYS)
+	if String(target.get("dialog", "")) != "import" or String(target.get("ui", DEFAULT_UI)) != "visible":
+		_errors.append('%s: import_dialog needs "ui": "visible" and "dialog": "import"' % label)
+	var step: Variant = values.get("step")
+	if not (step is String) or not IMPORT_STEPS.has(step):
+		_errors.append("%s: import_dialog step must be one of %s, got %s" % [label, ", ".join(IMPORT_STEPS), JSON.stringify(step)])
+		return
+	var files: Array = []
+	if values.has("files"):
+		if values["files"] is Array and not (values["files"] as Array).is_empty():
+			for entry: Variant in values["files"]:
+				if entry is String and not (entry as String).is_empty():
+					files.append(entry)
+				else:
+					_errors.append("%s: import_dialog files must be non-empty strings" % label)
+		else:
+			_errors.append("%s: import_dialog files must be a non-empty array of paths" % label)
+	if step == "online" and not files.is_empty():
+		_errors.append("%s: the online step takes no files" % label)
+	if step != "online" and files.is_empty():
+		_errors.append("%s: import_dialog step %s needs files" % [label, step])
+	var settings := {}
+	if values.has("settings"):
+		if not (values["settings"] is Dictionary):
+			_errors.append("%s: import_dialog settings must be an object" % label)
+		else:
+			_read_import_settings(label, values["settings"] as Dictionary, settings)
+		if step != "settings" and step != "result":
+			_errors.append("%s: import_dialog settings need the settings or result step" % label)
+	var crs_query: Variant = values.get("crs_query")
+	if crs_query != null:
+		if not (crs_query is String) or (crs_query as String).is_empty():
+			_errors.append("%s: import_dialog crs_query must be a non-empty string" % label)
+		elif step != "settings":
+			_errors.append("%s: import_dialog crs_query needs the settings step" % label)
+	var provider: Variant = values.get("provider")
+	if provider != null:
+		if not (provider is String) or (provider as String).is_empty():
+			_errors.append("%s: import_dialog provider must be a non-empty string" % label)
+		elif step != "online":
+			_errors.append("%s: import_dialog provider needs the online step" % label)
+	target["import_dialog"] = {"step": step, "files": files, "settings": settings, "crs_query": crs_query, "provider": provider}
+
+
+## The `settings` of an `import_dialog` block: a CRS text, and the clip "none" (the one clip a test shot needs).
+func _read_import_settings(label: String, raw: Dictionary, target: Dictionary) -> void:
+	_reject_unknown_keys(label + ": import_dialog settings", raw, _IMPORT_SETTINGS_KEYS)
+	if raw.has("horizontal_crs"):
+		if raw["horizontal_crs"] is String and not (raw["horizontal_crs"] as String).is_empty():
+			target["horizontal_crs"] = raw["horizontal_crs"]
+		else:
+			_errors.append("%s: horizontal_crs must be a non-empty string" % label)
+	if raw.has("clip"):
+		if raw["clip"] == "none":
+			target["clip"] = "none"
+		else:
+			_errors.append('%s: import_dialog settings clip must be "none", got %s' % [label, JSON.stringify(raw["clip"])])
 
 
 ## `[dx, dy]` in pixels as a [Vector2], or null after recording why it is not one.

@@ -15,6 +15,17 @@ const _EMPTY_TEXT := "Nothing of this data lies inside the clip — widen the cl
 const _NO_PROJECT_TEXT := "Open or create a project first — imported data belongs to a project"
 const _TITLE_BAR_PX := 36
 const _BUFFER_MAX_TEXT := "The buffer must be at most 5000 m"
+const _NO_CRS_TEXT := "The project has no coordinate system yet — import an alignment first"
+const _ONLINE_ALIGNMENT_TEXT := "An online source is cut to a corridor around an alignment — import an alignment first"
+const _NO_EARLIER_TEXT := "No earlier source of this kind and format"
+const _FILE_NO_CRS_TEXT := "This file declares no coordinate system — choose one"
+const _PROVIDER_CLIP_TEXT := "An online source is always clipped: a corridor or a box, not the whole file."
+const _FILE_CLIP_TEXT := "The part of the file that is imported. None imports everything the file holds."
+const _PROVIDERS_FAILED_TEXT := "The online sources could not be listed — the backend did not answer."
+const _PROVIDERS_NONE_TEXT := "The backend lists no online sources."
+const _SUGGESTED_TEXT := "Suggested from the file names; check it."
+const _PLAIN_ATTRIBUTION_TEXT := "Shown in Data sources."
+const _PLAIN_LICENCE_TEXT := "The terms the data is shared under."
 
 
 ## A pause or a reply that the test releases with `fired.emit()`.
@@ -146,7 +157,7 @@ static func _raster_report() -> IpcEnvelope:
 static func _run_ok(added: int = 3) -> IpcEnvelope:
 	return _res({
 		"source_id": "src-1", "name": "Kralupy DMR", "effective_crs": "EPSG:5514",
-		"transformation": "no transformation needed", "transformation_accuracy_m": null,
+		"transformation": "none", "transformation_accuracy_m": 0.0,
 		"added": added, "changed": 0, "unchanged": 0, "removed": 0, "warnings": [],
 	})
 
@@ -394,19 +405,52 @@ func test_busy_retries_with_backoff() -> void:
 	assert_int(dialog.step()).is_equal(ImportDialog.STEP_RESULT)
 
 
-func test_crs_required_returns_to_settings_and_focuses_the_crs_field() -> void:
+## Review decision 3: with a horizontal CRS already chosen, the backend's `E_CRS_REQUIRED` is about the project, so the
+## dialog shows the project's sentence on the Source step and does not send the user back to Settings.
+func test_crs_required_from_an_import_stays_out_of_settings() -> void:
 	var backend := _backend()
 	backend.reply("import.inspect", [_las_report("EPSG:5514")])
-	backend.reply("import.run", [_err("E_CRS_REQUIRED", "no CRS")])
+	backend.reply("import.run", [_err("E_CRS_REQUIRED", "project has no CRS; import an alignment first")])
 	var dialog := _dialog(backend)
 	dialog.popup_centered()
 	await _to_settings(dialog)
 	await dialog.go_next()
 
+	assert_int(dialog.step()).is_equal(ImportDialog.STEP_SOURCE)
+	assert_str(dialog.error_text()).is_equal(_NO_CRS_TEXT)
+	assert_bool(dialog.settings_error_shown()).is_false()
+
+
+## A file that declares no CRS, with no horizontal CRS chosen, is the one case that goes back to Settings and focuses the CRS
+## field. The import itself cannot reach it through the gate on Settings, so the reply is delivered to the error router.
+func test_a_file_without_a_crs_returns_to_settings_and_focuses_the_crs_field() -> void:
+	var backend := _backend()
+	backend.reply("import.inspect", [_las_report(null)])
+	var dialog := _dialog(backend)
+	dialog.popup_centered()
+	await _to_settings(dialog)
+	dialog._fail_import(_err("E_CRS_REQUIRED", "the source declares no CRS"))
+
 	assert_int(dialog.step()).is_equal(ImportDialog.STEP_SETTINGS)
-	assert_str(dialog.error_text()).is_equal("This file declares no coordinate system — choose one")
+	assert_str(dialog.error_text()).is_equal(_FILE_NO_CRS_TEXT)
 	assert_bool(dialog.horizontal_picker().line_edit().has_focus()) \
 		.append_failure_message("the CRS field did not take the focus").is_true()
+
+
+## Review decision 3, the gate: a project without a coordinate system cannot start an import, and the reason says so.
+func test_the_source_step_needs_a_project_coordinate_system() -> void:
+	Session.set_project_info({"project_id": "p-test"})
+	var backend := _backend()
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	var dialog := _dialog(backend)
+	dialog.prepare([])
+	dialog.set_files(PackedStringArray([_FILE_LAS]))
+	_assert_disabled_with_reason(dialog, _NO_CRS_TEXT)
+	await dialog.go_next()
+	assert_int(backend.count("import.inspect")).append_failure_message("Next inspected without a project CRS").is_equal(0)
+
+	Session.set_project_info({"project_id": "p-test", "crs": "EPSG:5514"})
+	assert_bool(dialog.primary_button().disabled).append_failure_message("a project CRS did not enable Next").is_false()
 
 
 func test_file_filters_come_from_import_formats() -> void:
@@ -720,6 +764,89 @@ func test_no_project_disables_next_with_a_reason() -> void:
 	assert_bool(dialog.hint_label().visible).append_failure_message("the hint still shows once the project is open").is_false()
 
 
+## Review decision 1: choosing a re-import source names the new objects after it, unless the user has typed a name.
+func test_reimport_keeps_the_sources_name() -> void:
+	var backend := _backend()
+	backend.reply("source.list", [_res({"sources": [_source("src-1", "Kralupy DMR", "", "unknown")]})])
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	backend.reply("import.run", [_run_ok()])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	assert_str(dialog.name_field().text).is_equal("a")
+
+	dialog.choose_reimport(1)
+	assert_str(dialog.name_field().text).is_equal("Kralupy DMR")
+	dialog.choose_reimport(0)
+	assert_str(dialog.name_field().text).is_equal("a")
+
+	dialog.name_field().text = "My name"
+	dialog.name_field().text_changed.emit("My name")
+	dialog.choose_reimport(1)
+	assert_str(dialog.name_field().text).is_equal("My name")
+	await dialog.go_next()
+	var run: Dictionary = backend.params_of("import.run")[0]
+	assert_str(String(run["name"])).is_equal("My name")
+	assert_str(String(run["reimport_of"])).is_equal("src-1")
+
+
+## Review decision 2: an import in the same dialog clears its report, so the next Next inspects again and the re-import
+## selector lists the source that was just made.
+func test_a_reimport_after_an_import_inspects_again() -> void:
+	var backend := _backend()
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	backend.reply("import.run", [_run_ok()])
+	backend.reply("source.list", [_res({"sources": []}), _res({"sources": [_source("src-1", "Kralupy DMR", "", "unknown")]})])
+	var dialog := _dialog(backend)
+	dialog.popup_centered()
+	await _to_settings(dialog)
+	await dialog.go_next()
+	assert_int(dialog.step()).is_equal(ImportDialog.STEP_RESULT)
+
+	dialog.hide()
+	dialog.prepare([])
+	dialog.set_files(PackedStringArray([_FILE_LAS]))
+	await dialog.go_next()
+	await dialog.go_next()
+	assert_int(dialog.step()).is_equal(ImportDialog.STEP_SETTINGS)
+	assert_int(backend.count("import.inspect")).append_failure_message("the same files were not inspected again").is_equal(2)
+	assert_int(dialog.reimport_choice().item_count).append_failure_message("the new source is not listed").is_equal(2)
+
+
+## Review decision 4: the window stays on a 1280 x 720 screen when the CRS hint line appears after the fit.
+func test_the_window_stays_on_screen_when_the_hint_appears() -> void:
+	var backend := _backend()
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	var dialog := _dialog(backend)
+	dialog.screen_rect = Rect2i(0, 0, 1280, 720)
+	dialog.popup_centered()
+	await _to_settings(dialog)
+	await _frames(3)
+	assert_bool(dialog.hint_label().visible).is_false()
+
+	var field := dialog.horizontal_picker().line_edit()
+	field.text = ""
+	field.text_changed.emit("")
+	await _frames(3)
+	assert_bool(dialog.hint_label().visible).is_true()
+	assert_int(dialog.size.y).append_failure_message("the window grew past 90 percent of 720 px when the hint appeared").is_less_equal(648)
+	_assert_inside_1280_by_720(dialog, "settings, with the CRS hint")
+
+
+## Review decision 5: an online source is cut to a corridor, so a project without alignments cannot import one.
+func test_an_online_source_needs_an_alignment() -> void:
+	var backend := _online_backend()
+	backend.reply("import.inspect", [_provider_report("las", "terrain", {"sheets": 2, "bytes": 1500000}, [])])
+	var dialog := _dialog(backend)
+	dialog.prepare([])
+	dialog.choose_provider("cuzk-dmr5g")
+	_assert_disabled_with_reason(dialog, _ONLINE_ALIGNMENT_TEXT)
+	await dialog.go_next()
+	assert_int(backend.count("import.inspect")).append_failure_message("Next inspected an online source with no alignment").is_equal(0)
+
+	dialog.prepare(_one_alignment(0.0, 1000.0))
+	assert_bool(dialog.primary_button().disabled).append_failure_message("an alignment did not enable Next").is_false()
+
+
 func test_every_step_fits_a_1280_by_720_screen() -> void:
 	var backend := _backend()
 	backend.reply("import.inspect", [_las_report(null)])
@@ -971,7 +1098,7 @@ func test_every_disabled_primary_has_a_reason() -> void:
 	var backend := _backend()
 	var dialog := _dialog(backend)
 	dialog.prepare([])
-	_assert_disabled_with_reason(dialog, "Choose one or more files first")
+	_assert_disabled_with_reason(dialog, "Choose one or more files, or an online source, first")
 
 	backend.reply("import.inspect", [_err("E_BAD_PARAMS", "")])
 	dialog.set_files(PackedStringArray([_FILE_LAS]))
@@ -1323,3 +1450,472 @@ func test_hiding_during_the_source_lookup_reopens_at_step_four() -> void:
 	await _frames(3)
 	assert_int(dialog.step()).is_equal(ImportDialog.STEP_RESULT)
 	assert_bool(dialog.is_busy()).is_false()
+
+
+# --- T-136 Part C2: online sources, re-import, attribution and licence ----------------------------------------------
+
+const _DMR_CLIP := {"type": "corridor", "buffer_m": 250.0, "alignment_ids": []}
+const _SUGGESTED_CLIP := {"type": "corridor", "buffer_m": 250.0, "alignment_ids": [], "station_from": null, "station_to": null}
+
+
+## The readers and the two online sources the live backend lists, in the shape `import.formats` gives.
+static func _online_formats() -> IpcEnvelope:
+	return _res({
+		"readers": [
+			{"format_id": "las", "kinds": ["terrain"], "suffixes": [".las", ".laz", ".zip"]},
+			{"format_id": "geotiff", "kinds": ["terrain", "imagery"], "suffixes": [".tif", ".tiff"]},
+		],
+		"providers": [
+			{
+				"provider_id": "cuzk-dmr5g",
+				"title": "ČÚZK DMR 5G",
+				"description": "Bare-ground height points from the national laser scan.",
+				"kinds": ["terrain"],
+				"licence": "CC BY 4.0",
+				"attribution": "© ČÚZK",
+				"notices": ["Keep the attribution with the data."],
+				"default_query": {"clip": _DMR_CLIP.duplicate(true), "max_total_mb": 500.0},
+			},
+			{
+				"provider_id": "cuzk-ortho-sheets",
+				"title": "ČÚZK orthophoto sheets",
+				"description": "Orthophoto sheets, one map sheet at a time.",
+				"kinds": ["imagery"],
+				"licence": "CC BY 4.0",
+				"attribution": "© ČÚZK",
+				"notices": [],
+				"default_query": {"clip": _DMR_CLIP.duplicate(true), "max_total_mb": 200.0},
+			},
+		],
+	})
+
+
+func _online_backend() -> FakeBackend:
+	var backend := _backend()
+	backend.reply("import.formats", [_online_formats()])
+	return backend
+
+
+## The report of an online source: its counts and warnings, its suggested clip and its licence.
+static func _provider_report(format_id: String, kind: String, counts: Dictionary, warnings: Array) -> IpcEnvelope:
+	return _res({
+		"format_id": format_id,
+		"kind": kind,
+		"declared_crs": "EPSG:5514",
+		"extent": [-746900.0, -1025200.0, -746500.0, -1025000.0],
+		"counts": counts,
+		"suggested_settings": {
+			"horizontal_crs": "EPSG:5514", "vertical_crs": null, "coordinate_order": "auto", "linear_unit_m": 1.0,
+			"clip": _SUGGESTED_CLIP.duplicate(true), "point_classes": null, "display_resolution_m": null, "nodata": null,
+		},
+		"licence_hint": "CC BY 4.0",
+		"warnings": warnings,
+	})
+
+
+## A LAS report whose file names suggest the ČÚZK attribution and licence (F53).
+static func _hinted_report() -> IpcEnvelope:
+	var report := _las_report("EPSG:5514")
+	report.result["attribution_hint"] = "© ČÚZK"
+	report.result["licence_hint"] = "CC BY 4.0"
+	return report
+
+
+## One existing source as `source.list` lists it: a terrain source in LAS.
+static func _source(source_id: String, source_name: String, attribution: String, licence: String) -> Dictionary:
+	return {
+		"id": source_id, "kind": "terrain", "name": source_name, "format_id": "las", "object_count": 12,
+		"imported_at": "2026-11-01T10:00:00", "attribution": attribution, "licence": licence,
+	}
+
+
+func test_online_source_sets_kind_and_default_query() -> void:
+	var backend := _online_backend()
+	backend.reply("import.inspect", [_provider_report("las", "terrain", {"sheets": 2, "bytes": 1500000}, [])])
+	backend.reply("import.run", [_run_ok()])
+	var dialog := _dialog(backend)
+	dialog.prepare(_one_alignment(0.0, 1000.0))
+	assert_bool(dialog.online_button().disabled).is_false()
+	dialog.show_online_sources()
+	assert_bool(dialog.provider_scroll().visible).is_true()
+	assert_object(dialog.provider_button("cuzk-dmr5g")).is_not_null()
+	dialog.choose_provider("cuzk-dmr5g")
+
+	assert_str(dialog.provider_id()).is_equal("cuzk-dmr5g")
+	assert_str(dialog.kind()).is_equal("terrain")
+	assert_dict(dialog.provider_query()).is_equal({"clip": _DMR_CLIP, "max_total_mb": 500.0})
+	assert_bool(dialog.import_as_row().visible).is_false()
+	assert_bool(dialog.primary_button().disabled).is_false()
+
+	await dialog.go_next()
+	var inspect: Dictionary = backend.params_of("import.inspect")[0]
+	assert_bool(inspect.has("paths")).is_false()
+	assert_str(String(inspect["provider"])).is_equal("cuzk-dmr5g")
+	assert_dict(inspect["query"]).is_equal({"clip": _DMR_CLIP, "max_total_mb": 500.0})
+	assert_array(Array(dialog.report_texts())).contains(["Keep the attribution with the data."])
+
+	await dialog.go_next()
+	assert_bool(dialog.clip_choice().is_item_disabled(ImportDialog.CLIP_NONE)).is_true()
+	_type(dialog.buffer_field(), "300")
+	await dialog.go_next()
+	var run: Dictionary = backend.params_of("import.run")[0]
+	assert_str(String(run["provider"])).is_equal("cuzk-dmr5g")
+	assert_str(String(run["kind"])).is_equal("terrain")
+	assert_bool(run.has("paths")).is_false()
+	assert_bool(run.has("format_id")).is_false()
+	assert_float(float(run["query"]["clip"]["buffer_m"])).is_equal(300.0)
+	assert_float(float(run["query"]["max_total_mb"])).is_equal(500.0)
+
+
+func test_bulk_orthophoto_shows_its_size_warning() -> void:
+	var backend := _online_backend()
+	var warnings := [
+		"3 sheet(s), 250.0 MB to download",
+		"the selection is 250.0 MB, over max_total_mb 200: the import will be refused unless the limit is raised",
+	]
+	backend.reply("import.inspect", [_provider_report("geotiff", "imagery", {"sheets": 3, "bytes": 250000000}, warnings)])
+	backend.reply("import.run", [_run_ok()])
+	var dialog := _dialog(backend)
+	dialog.prepare(_one_alignment(0.0, 1000.0))
+	dialog.choose_provider("cuzk-ortho-sheets")
+	assert_str(dialog.kind()).is_equal("imagery")
+
+	await dialog.go_next()
+	assert_array(Array(dialog.report_texts())).contains(["3 sheets, 250.0 MB to download", warnings[1]])
+	await dialog.go_next()
+	assert_bool(dialog.max_total_row().visible).is_true()
+	assert_float(dialog.max_total_field().value()).is_equal(200.0)
+	assert_str(dialog.max_total_note().text).contains("At inspection, the clip needed 250.0 MB to download.")
+	assert_bool(dialog.attribution_row().visible).is_false()
+	assert_bool(dialog.licence_row().visible).is_false()
+
+	_type(dialog.max_total_field(), "0")
+	_assert_disabled_with_reason(dialog, "The download limit must be above 0 MB")
+	_type(dialog.max_total_field(), "300")
+	await dialog.go_next()
+	var run: Dictionary = backend.params_of("import.run")[0]
+	assert_str(String(run["kind"])).is_equal("imagery")
+	assert_float(float(run["query"]["max_total_mb"])).is_equal(300.0)
+
+
+func test_choosing_files_drops_the_online_source() -> void:
+	var backend := _online_backend()
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	var dialog := _dialog(backend)
+	dialog.prepare([])
+	dialog.choose_provider("cuzk-dmr5g")
+	dialog.set_files(PackedStringArray([_FILE_LAS]))
+	assert_str(dialog.provider_id()).is_equal("")
+	assert_bool(dialog.import_as_row().visible).is_true()
+	assert_bool(dialog.primary_button().disabled).is_false()
+	await dialog.go_next()
+	assert_bool(backend.params_of("import.inspect")[0].has("provider")).is_false()
+
+
+func test_reimport_of_sends_the_source_id() -> void:
+	var backend := _backend()
+	backend.reply("source.list", [_res({"sources": [_source("src-9", "Kralupy DMR", "© ČÚZK", "CC BY 4.0")]})])
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	backend.reply("import.run", [_run_ok()])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	assert_int(dialog.reimport_choice().item_count).is_equal(2)
+	dialog.choose_reimport(1)
+	await dialog.go_next()
+	var run: Dictionary = backend.params_of("import.run")[0]
+	assert_str(String(run["reimport_of"])).is_equal("src-9")
+
+
+func test_attribution_fields_prefill_from_hints_and_are_sent() -> void:
+	var backend := _backend()
+	backend.reply("import.inspect", [_hinted_report()])
+	backend.reply("import.run", [_run_ok()])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	assert_str(dialog.attribution_field().text).is_equal("© ČÚZK")
+	assert_str(dialog.licence_field().text).is_equal("CC BY 4.0")
+	assert_bool(dialog.attribution_row().visible).is_true()
+	await dialog.go_next()
+	var run: Dictionary = backend.params_of("import.run")[0]
+	assert_str(String(run["attribution"])).is_equal("© ČÚZK")
+	assert_str(String(run["licence"])).is_equal("CC BY 4.0")
+
+
+func test_reimport_prefills_attribution_and_licence() -> void:
+	var backend := _backend()
+	backend.reply("source.list", [_res({"sources": [
+		_source("src-1", "Kralupy DMR", "© Kraj", "ODbL"),
+		_source("src-2", "Older DMR", "", "unknown"),
+	]})])
+	backend.reply("import.inspect", [_hinted_report()])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	assert_str(dialog.attribution_field().text).is_equal("© ČÚZK")
+	assert_str(dialog.licence_field().text).is_equal("CC BY 4.0")
+
+	dialog.choose_reimport(1)
+	assert_str(dialog.attribution_field().text).is_equal("© Kraj")
+	assert_str(dialog.licence_field().text).is_equal("ODbL")
+
+	# A source with no attribution gives back the hint, and its unknown placeholder licence is shown as empty.
+	dialog.choose_reimport(2)
+	assert_str(dialog.attribution_field().text).is_equal("© ČÚZK")
+	assert_str(dialog.licence_field().text).is_equal("CC BY 4.0")
+
+	# A value the user typed wins over the prefill of a re-import.
+	dialog.attribution_field().text = "Mine"
+	dialog.attribution_field().text_changed.emit("Mine")
+	dialog.choose_reimport(1)
+	assert_str(dialog.attribution_field().text).is_equal("Mine")
+	assert_str(dialog.licence_field().text).is_equal("ODbL")
+
+
+func test_an_empty_attribution_or_licence_is_not_sent() -> void:
+	var backend := _backend()
+	backend.reply("import.inspect", [_hinted_report()])
+	backend.reply("import.run", [_run_ok()])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	dialog.attribution_field().text = ""
+	dialog.attribution_field().text_changed.emit("")
+	dialog.licence_field().text = "  "
+	dialog.licence_field().text_changed.emit("  ")
+	await dialog.go_next()
+	var run: Dictionary = backend.params_of("import.run")[0]
+	assert_bool(run.has("attribution")).is_false()
+	assert_bool(run.has("licence")).is_false()
+
+
+func test_the_no_data_row_is_hidden_for_imagery() -> void:
+	var imagery := _backend()
+	imagery.reply("import.inspect", [_raster_report()])
+	var imagery_dialog := _dialog(imagery)
+	await _to_settings(imagery_dialog, PackedStringArray([_FILE_TIF]))
+	assert_str(imagery_dialog.kind()).is_equal("imagery")
+	assert_bool(imagery_dialog.nodata_row().visible).is_false()
+	assert_bool(imagery_dialog.resolution_row().visible).is_true()
+
+	var terrain := _backend()
+	terrain.reply("import.inspect", [_geotiff_report(null)])
+	var terrain_dialog := _dialog(terrain)
+	await _to_settings(terrain_dialog, PackedStringArray([_FILE_TIF]))
+	assert_bool(terrain_dialog.nodata_row().visible).is_true()
+
+
+## The backend's placeholder licence of a source is "not stated" on the Result page, not the word "unknown".
+func test_the_result_says_not_stated_for_the_placeholder_licence() -> void:
+	var backend := _backend()
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	backend.reply("import.run", [_run_ok()])
+	backend.reply("source.get", [_res({"licence": "unknown", "attribution": ""})])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	await dialog.go_next()
+	var texts := Array(dialog.result_texts())
+	var index := texts.find("Licence")
+	assert_int(index).is_greater_equal(0)
+	assert_str(String(texts[index + 1])).is_equal("Not stated")
+
+
+## Review decision 13: a provider's import sends no attribution and no licence, even when the fields hold text.
+func test_a_provider_run_sends_no_attribution_or_licence() -> void:
+	var backend := _online_backend()
+	backend.reply("import.inspect", [_provider_report("las", "terrain", {"sheets": 2, "bytes": 1500000}, [])])
+	backend.reply("import.run", [_run_ok()])
+	var dialog := _dialog(backend)
+	dialog.prepare(_one_alignment(0.0, 1000.0))
+	dialog.choose_provider("cuzk-dmr5g")
+	await dialog.go_next()
+	await dialog.go_next()
+	dialog.attribution_field().text = "Typed"
+	dialog.attribution_field().text_changed.emit("Typed")
+	dialog.licence_field().text = "ODbL"
+	dialog.licence_field().text_changed.emit("ODbL")
+	await dialog.go_next()
+	var run: Dictionary = backend.params_of("import.run")[0]
+	assert_bool(run.has("attribution")).append_failure_message("a provider import sent an attribution").is_false()
+	assert_bool(run.has("licence")).append_failure_message("a provider import sent a licence").is_false()
+
+
+## Review decision 13: the notices of the chosen online source are shown, and the others' are closed.
+func test_the_chosen_providers_notices_are_shown() -> void:
+	var backend := _online_backend()
+	var dialog := _dialog(backend)
+	dialog.prepare([])
+	dialog.choose_provider("cuzk-dmr5g")
+	assert_bool(dialog.provider_notices_visible("cuzk-dmr5g")).is_true()
+	assert_array(Array(dialog.provider_list_texts())).contains(["Keep the attribution with the data."])
+	dialog.choose_provider("cuzk-ortho-sheets")
+	assert_bool(dialog.provider_notices_visible("cuzk-dmr5g")).is_false()
+
+
+## Review decision 13: a provider without a download limit hides the Download limit row.
+func test_a_provider_without_a_download_limit_hides_its_row() -> void:
+	var formats := _online_formats()
+	((formats.result["providers"] as Array)[0]["default_query"] as Dictionary).erase("max_total_mb")
+	var backend := _backend()
+	backend.reply("import.formats", [formats])
+	backend.reply("import.inspect", [_provider_report("las", "terrain", {"sheets": 2, "bytes": 1500000}, [])])
+	var dialog := _dialog(backend)
+	dialog.prepare(_one_alignment(0.0, 1000.0))
+	dialog.choose_provider("cuzk-dmr5g")
+	await dialog.go_next()
+	await dialog.go_next()
+	assert_bool(dialog.max_total_row().visible).append_failure_message("the download limit shows without a limit").is_false()
+
+
+## Review decision 7: the online rows are radio choices, all in one group.
+func test_the_online_rows_are_radio_choices_in_one_group() -> void:
+	var backend := _online_backend()
+	var dialog := _dialog(backend)
+	dialog.prepare([])
+	dialog.show_online_sources()
+	var first := dialog.provider_button("cuzk-dmr5g")
+	var second := dialog.provider_button("cuzk-ortho-sheets")
+	assert_bool(first is CheckBox).append_failure_message("an online source is not a radio choice").is_true()
+	assert_object(first.button_group).is_not_null()
+	assert_bool(first.button_group == second.button_group).append_failure_message("the online rows are in different groups").is_true()
+
+
+## Review decision 7: when `import.formats` fails, the online list says so in one sentence.
+func test_an_online_list_that_failed_says_so() -> void:
+	var backend := _backend()
+	backend.reply("import.formats", [_err("E_INTERNAL", "boom")])
+	var dialog := _dialog(backend)
+	dialog.prepare([])
+	dialog.show_online_sources()
+	assert_int(dialog.provider_count()).is_equal(0)
+	assert_array(Array(dialog.provider_list_texts())).contains_exactly([_PROVIDERS_FAILED_TEXT])
+
+
+## Review decision 7: when the backend lists no online sources, the list says so in one sentence.
+func test_an_online_list_with_no_source_says_so() -> void:
+	var backend := _backend()
+	var dialog := _dialog(backend)
+	dialog.prepare([])
+	dialog.show_online_sources()
+	assert_int(dialog.provider_count()).is_equal(0)
+	assert_array(Array(dialog.provider_list_texts())).contains_exactly([_PROVIDERS_NONE_TEXT])
+
+
+## Review decision 6: an online source replaces the Clip help, and a file keeps it.
+func test_an_online_source_replaces_the_clip_help() -> void:
+	var online_backend := _online_backend()
+	online_backend.reply("import.inspect", [_provider_report("las", "terrain", {"sheets": 2, "bytes": 1500000}, [])])
+	var online := _dialog(online_backend)
+	online.prepare(_one_alignment(0.0, 1000.0))
+	online.choose_provider("cuzk-dmr5g")
+	await online.go_next()
+	assert_str(online.clip_note().text).is_equal(_PROVIDER_CLIP_TEXT)
+
+	var backend := _backend()
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	var file := _dialog(backend)
+	await _to_settings(file)
+	assert_str(file.clip_note().text).is_equal(_FILE_CLIP_TEXT)
+
+
+## Review decision 8: the file-name suggestion is named only while it fills the field; otherwise the plain notes show.
+func test_attribution_and_licence_notes_say_where_the_value_came_from() -> void:
+	var hinted := _backend()
+	hinted.reply("import.inspect", [_hinted_report()])
+	var suggested := _dialog(hinted)
+	await _to_settings(suggested)
+	assert_str(suggested.attribution_note().text).is_equal(_SUGGESTED_TEXT)
+	assert_str(suggested.licence_note().text).is_equal(_SUGGESTED_TEXT)
+	suggested.attribution_field().text = "Mine"
+	suggested.attribution_field().text_changed.emit("Mine")
+	assert_str(suggested.attribution_note().text).is_equal(_PLAIN_ATTRIBUTION_TEXT)
+
+	var plain := _backend()
+	var unhinted := _las_report("EPSG:5514")
+	unhinted.result["licence_hint"] = null
+	plain.reply("import.inspect", [unhinted])
+	var typed := _dialog(plain)
+	await _to_settings(typed)
+	assert_str(typed.attribution_note().text).is_equal(_PLAIN_ATTRIBUTION_TEXT)
+	assert_str(typed.licence_note().text).is_equal(_PLAIN_LICENCE_TEXT)
+
+
+## Review decision 12: with no file chosen, the Source step says so under its buttons.
+func test_the_source_step_says_nothing_is_chosen_yet() -> void:
+	var backend := _backend()
+	var dialog := _dialog(backend)
+	dialog.prepare([])
+	assert_str(dialog.source_summary()).is_equal("Nothing chosen yet.")
+
+
+## Review decision 12: the re-import selector lists only sources of the same kind and format.
+func test_reimport_of_lists_only_sources_of_the_same_kind_and_format() -> void:
+	var backend := _backend()
+	var same := _source("src-1", "Kralupy DMR", "", "unknown")
+	var other_format := _source("src-2", "Raster", "", "unknown")
+	other_format["format_id"] = "geotiff"
+	var other_kind := _source("src-3", "Ortho", "", "unknown")
+	other_kind["kind"] = "imagery"
+	backend.reply("source.list", [_res({"sources": [same, other_format, other_kind]})])
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	assert_int(dialog.reimport_choice().item_count).is_equal(2)
+	assert_str(dialog.reimport_choice().get_item_text(1)).is_equal("Kralupy DMR · 12 objects")
+
+
+## Review decision 12: a count of one reads "1 object".
+func test_reimport_labels_count_objects_in_the_singular_and_plural() -> void:
+	var backend := _backend()
+	var one := _source("src-1", "One", "", "unknown")
+	one["object_count"] = 1
+	backend.reply("source.list", [_res({"sources": [one, _source("src-2", "Many", "", "unknown")]})])
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	assert_str(dialog.reimport_choice().get_item_text(1)).is_equal("One · 1 object")
+	assert_str(dialog.reimport_choice().get_item_text(2)).is_equal("Many · 12 objects")
+
+
+## Review decision 12: a disabled "Re-import of" gives its reason.
+func test_a_disabled_reimport_says_why() -> void:
+	var backend := _backend()
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	assert_bool(dialog.reimport_choice().disabled).is_true()
+	assert_str(dialog.reimport_note().text).is_equal(_NO_EARLIER_TEXT)
+
+
+## Review decision 12: `source.list` goes through the busy retry, like the other requests.
+func test_the_source_list_waits_out_a_busy_backend() -> void:
+	var backend := _backend()
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	backend.reply("source.list", [_err("E_BUSY"), _res({"sources": [_source("src-1", "Kralupy DMR", "", "unknown")]})])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	assert_int(backend.count("source.list")).append_failure_message("source.list was not asked again").is_equal(2)
+	assert_int(backend.delays.size()).append_failure_message("the busy reply was not waited out").is_equal(1)
+	assert_int(dialog.reimport_choice().item_count).is_equal(2)
+
+
+## Review decision 12: one object or one point reads in the singular.
+func test_a_count_of_one_reads_in_the_singular() -> void:
+	var backend := _backend()
+	var report := _las_report("EPSG:5514")
+	report.result["counts"] = {"points": 1}
+	backend.reply("import.inspect", [report])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	assert_array(Array(dialog.report_texts())).contains(["1 point"])
+
+
+## Review decision 12: a result with no transformation says "None needed".
+func test_the_result_says_none_needed_without_a_transformation() -> void:
+	var backend := _backend()
+	backend.reply("import.inspect", [_las_report("EPSG:5514")])
+	backend.reply("import.run", [_run_ok()])
+	var dialog := _dialog(backend)
+	await _to_settings(dialog)
+	await dialog.go_next()
+	var texts := Array(dialog.result_texts())
+	var index := texts.find("Transformation")
+	assert_int(index).is_greater_equal(0)
+	assert_str(String(texts[index + 1])).is_equal("None needed")

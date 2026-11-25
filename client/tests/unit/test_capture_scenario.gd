@@ -573,3 +573,91 @@ func test_perf_first_must_be_boolean() -> void:
 		),
 		"perf: first must be true or false"
 	)
+
+
+## T-136 Part C2: the `import_dialog` block of a shot is read, and its sample files take the samples variable.
+func test_an_import_dialog_block_is_read_and_its_files_expand() -> void:
+	var scenario := _shot(
+		'{"name": "a", "camera": "orbit", "ui": "visible", "dialog": "import", "import_dialog": {"step": "settings", "files": ["${COYPU_TEST_SAMPLES}/a.tif"], "settings": {"horizontal_crs": "EPSG:5514", "clip": "none"}, "crs_query": "Krovak"}}'
+	)
+	assert_array(scenario.errors()).is_empty()
+	var block: Dictionary = scenario.shots[0]["import_dialog"]
+	assert_str(String(block["step"])).is_equal("settings")
+	assert_str(String(block["settings"]["horizontal_crs"])).is_equal("EPSG:5514")
+	assert_str(String(block["settings"]["clip"])).is_equal("none")
+	assert_str(String(block["crs_query"])).is_equal("Krovak")
+	assert_str(scenario.path_variables()[0]).is_equal("COYPU_TEST_SAMPLES")
+	assert_int(scenario.unset_variables({}).size()).is_equal(1)
+	scenario.expand_import_paths({"COYPU_TEST_SAMPLES": "/opt/samples"})
+	assert_str(String(scenario.shots[0]["import_dialog"]["files"][0])).is_equal("/opt/samples/a.tif")
+
+
+func test_an_import_dialog_block_needs_the_import_dialog_and_a_consistent_step() -> void:
+	var visible := '"ui": "visible", "dialog": "import", '
+	_assert_error_mentions(
+		_shot('{"name": "a", "camera": "orbit", "import_dialog": {"step": "report", "files": ["x.tif"]}}'),
+		'needs "ui": "visible" and "dialog": "import"'
+	)
+	_assert_error_mentions(
+		_shot('{"name": "a", "camera": "orbit", %s"import_dialog": {"files": ["x.tif"]}}' % visible),
+		"step must be one of"
+	)
+	_assert_error_mentions(
+		_shot('{"name": "a", "camera": "orbit", %s"import_dialog": {"step": "online", "files": ["x.tif"]}}' % visible),
+		"the online step takes no files"
+	)
+	_assert_error_mentions(
+		_shot('{"name": "a", "camera": "orbit", %s"import_dialog": {"step": "report"}}' % visible),
+		"import_dialog step report needs files"
+	)
+	_assert_error_mentions(
+		_shot('{"name": "a", "camera": "orbit", %s"import_dialog": {"step": "report", "files": ["x.tif"], "settings": {"clip": "none"}}}' % visible),
+		"settings need the settings or result step"
+	)
+	_assert_error_mentions(
+		_shot('{"name": "a", "camera": "orbit", %s"import_dialog": {"step": "result", "files": ["x.tif"], "crs_query": "x"}}' % visible),
+		"crs_query needs the settings step"
+	)
+	_assert_error_mentions(
+		_shot('{"name": "a", "camera": "orbit", %s"import_dialog": {"step": "report", "files": ["x.tif"], "colour": 1}}' % visible),
+		"unknown key 'colour'"
+	)
+	_assert_error_mentions(
+		_shot('{"name": "a", "camera": "orbit", %s"import_dialog": {"step": "settings", "files": ["x.tif"], "settings": {"clip": "bbox"}}}' % visible),
+		'clip must be "none"'
+	)
+
+
+## T-136 Part C2 (review decision 7): the `provider` key chooses an online source, and only on the online step.
+func test_an_import_dialog_provider_is_read_for_the_online_step() -> void:
+	var visible := '"ui": "visible", "dialog": "import", '
+	var scenario := _shot(
+		'{"name": "a", "camera": "orbit", %s"import_dialog": {"step": "online", "provider": "cuzk-dmr5g"}}' % visible
+	)
+	assert_array(scenario.errors()).is_empty()
+	assert_str(String(scenario.shots[0]["import_dialog"]["provider"])).is_equal("cuzk-dmr5g")
+	_assert_error_mentions(
+		_shot('{"name": "a", "camera": "orbit", %s"import_dialog": {"step": "report", "files": ["x.tif"], "provider": "cuzk-dmr5g"}}' % visible),
+		"provider needs the online step"
+	)
+	_assert_error_mentions(
+		_shot('{"name": "a", "camera": "orbit", %s"import_dialog": {"step": "online", "provider": ""}}' % visible),
+		"provider must be a non-empty string"
+	)
+
+
+## T-136 Part C2: the nine import shots of ui_shell are valid, and each is a visible shot with the import dialog.
+func test_the_ui_shell_import_shots_are_valid() -> void:
+	var text := FileAccess.get_file_as_string("res://tools/capture/scenarios/ui_shell.json")
+	var scenario := Scenario.parse(text)
+	assert_array(scenario.errors()).is_empty()
+	var names := PackedStringArray()
+	for shot in scenario.shots:
+		if shot.has("import_dialog"):
+			names.append(String(shot["name"]))
+			assert_str(String(shot["dialog"])).is_equal("import")
+	assert_int(names.size()).is_equal(9)
+	assert_bool(names.has("import_long_crs_engineering")).is_true()
+	assert_bool(names.has("import_online_engineering")).is_true()
+	assert_bool(names.has("import_online_sandbox")).is_true()
+	assert_bool(scenario.path_variables().has("COYPU_CAPTURE_SAMPLES")).is_true()

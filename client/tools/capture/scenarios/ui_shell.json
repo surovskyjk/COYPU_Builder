@@ -93,6 +93,116 @@
       "ui": "visible",
       "preset": "sandbox",
       "dialog": "data_sources"
+    },
+    {
+      "name": "import_online_engineering",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "engineering",
+      "dialog": "import",
+      "import_dialog": {"step": "online", "provider": "cuzk-dmr5g"}
+    },
+    {
+      "name": "import_online_sandbox",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "sandbox",
+      "dialog": "import",
+      "import_dialog": {"step": "online", "provider": "cuzk-dmr5g"}
+    },
+    {
+      "name": "import_report_engineering",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "engineering",
+      "dialog": "import",
+      "import_dialog": {"step": "report", "files": ["${COYPU_CAPTURE_SAMPLES}/sample_terrain_nocrs.tif"]}
+    },
+    {
+      "name": "import_report_sandbox",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "sandbox",
+      "dialog": "import",
+      "import_dialog": {"step": "report", "files": ["${COYPU_CAPTURE_SAMPLES}/sample_terrain_nocrs.tif"]}
+    },
+    {
+      "name": "import_settings_engineering",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "engineering",
+      "dialog": "import",
+      "import_dialog": {
+        "step": "settings",
+        "files": ["${COYPU_CAPTURE_SAMPLES}/sample_terrain_nocrs.tif"],
+        "settings": {"horizontal_crs": "EPSG:5514", "clip": "none"}
+      }
+    },
+    {
+      "name": "import_settings_sandbox",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "sandbox",
+      "dialog": "import",
+      "import_dialog": {
+        "step": "settings",
+        "files": ["${COYPU_CAPTURE_SAMPLES}/sample_terrain_nocrs.tif"],
+        "settings": {"horizontal_crs": "EPSG:5514", "clip": "none"}
+      }
+    },
+    {
+      "name": "import_result_engineering",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "engineering",
+      "dialog": "import",
+      "import_dialog": {
+        "step": "result",
+        "files": ["${COYPU_CAPTURE_SAMPLES}/sample_terrain_nocrs.tif"],
+        "settings": {"horizontal_crs": "EPSG:5514", "clip": "none"}
+      }
+    },
+    {
+      "name": "import_result_sandbox",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "sandbox",
+      "dialog": "import",
+      "import_dialog": {
+        "step": "result",
+        "files": ["${COYPU_CAPTURE_SAMPLES}/sample_terrain_nocrs.tif"],
+        "settings": {"horizontal_crs": "EPSG:5514", "clip": "none"}
+      }
+    },
+    {
+      "name": "import_long_crs_engineering",
+      "camera": "orbit",
+      "time_s": 208.0,
+      "settle_frames": 60,
+      "ui": "visible",
+      "preset": "engineering",
+      "dialog": "import",
+      "import_dialog": {
+        "step": "settings",
+        "files": ["${COYPU_CAPTURE_SAMPLES}/sample_terrain_nocrs.tif"],
+        "crs_query": "Krovak East North"
+      }
     }
   ],
   "perf": {

@@ -120,3 +120,50 @@ func test_uint8_blob_decodes_to_its_raw_bytes_without_a_warning() -> void:
 	var index: PackedByteArray = response.blobs.get("source_index")
 	assert_that(index).is_equal(raw)
 	assert_int(index.size()).is_equal(6)
+
+
+## F51, encode side. Each value is built from its IEEE-754 bits: Godot's decimal parser does not round correctly, so a
+## round trip through text would prove nothing. -FLT_MAX is the float32 no-data value; 0.3048006096 is the US survey foot in
+## metres, a linear unit the settings carry.
+static func _nodata_value() -> float:
+	return PackedByteArray([0x00, 0x00, 0x00, 0xe0, 0xff, 0xff, 0xef, 0xc7]).decode_double(0)
+
+
+static func _foot_value() -> float:
+	return PackedByteArray([0x70, 0x1a, 0x82, 0x6a, 0xda, 0x81, 0xd3, 0x3f]).decode_double(0)
+
+
+static func _header_text(frame: PackedByteArray) -> String:
+	return frame.slice(4, 4 + frame.decode_u32(0)).get_string_from_utf8()
+
+
+## The number token written after `"key":` in a header.
+static func _token_after(header: String, key: String) -> String:
+	var found := RegEx.create_from_string('"%s":(-?[0-9.eE+\\-]+)' % key).search(header)
+	return "" if found == null else found.get_string(1)
+
+
+## The header keeps each value as an exact text: `-3.4028234663852886e+38` and `0.3048006096` are the shortest decimal texts
+## that a correctly rounded parser maps back to the same float64 (checked with Python's float()). Godot's default text for
+## the first is `-340282346638528860000000000000000000000.0`, which is not that form.
+func test_encoded_header_keeps_full_precision_for_float32_nodata() -> void:
+	var frame := IpcEnvelope.encode("9", "req", "import.run", {"settings": {"nodata": _nodata_value(), "linear_unit_m": _foot_value()}})
+	var header := _header_text(frame)
+
+	assert_str(_token_after(header, "nodata")).is_equal("-3.4028234663852886e+38")
+	assert_str(_token_after(header, "linear_unit_m")).is_equal("0.3048006096")
+
+
+## Review decision 13: a third is the one double whose default text differs from its full-precision text. Its bits are
+## 0x3fd5555555555555 (checked with Python: struct.pack('<d', 1/3)); the shortest text that reads back to them is 0.3333333333333333.
+static func _third_value() -> float:
+	return PackedByteArray([0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0xd5, 0x3f]).decode_double(0)
+
+
+func test_encoded_header_keeps_full_precision_for_one_third() -> void:
+	var third := _third_value()
+	var frame := IpcEnvelope.encode("10", "req", "import.run", {"settings": {"linear_unit_m": third}})
+	var header := _header_text(frame)
+
+	assert_str(_token_after(header, "linear_unit_m")).is_equal("0.3333333333333333")
+	assert_str(JSON.stringify({"value": third})).is_not_equal("{\"value\":0.3333333333333333}")
