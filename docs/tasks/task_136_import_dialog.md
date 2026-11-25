@@ -756,6 +756,13 @@ tests in `test_ui_preset.gd` / `test_terrain_field.gd`, and `ui_shell.json` / `t
   - in the popover, under the imagery source they belong to, or under a "Warnings" line when they name no
     source.
   A listing without warnings clears them.
+- **The no-CRS warning** (from C2's review, finding 10). The import inspect report shows the backend's
+  warning "the source declares no coordinate reference system; set horizontal_crs in the import settings…"
+  under the dialog's own red notice. The warning repeats the notice and names a protocol field.
+  - Reword the backend warning without the protocol name.
+  - The dialog does not list it again when the red notice is shown. Match it by a stable warning code or
+    prefix, never by the whole sentence.
+  - This is a backend file in C3's deliverables.
 - **Acceptance (C3).**
   - Tests:
     - `test_swatch_colour_matches_the_overlay`;
@@ -770,8 +777,10 @@ tests in `test_ui_preset.gd` / `test_terrain_field.gd`, and `ui_shell.json` / `t
 | `client/tests/unit/test_import_dialog.gd` | the cases below |
 | `client/tests/integration/test_import_dialog_live.gd` | new — live backend, synthetic data, the test-server providers |
 | `client/tools/capture/scenarios/ui_shell.json` | import-dialog shots |
-| `client/ipc/envelope.gd`, `client/tests/unit/test_ipc_envelope.gd` | F51: encode headers at full precision (`JSON.stringify(header, "", true, true)`); a unit test shows that the encoded header parses back (`JSON.parse_string`) to the same float64 for −3.4028234663852886e38 and 0.3048006096 |
-| `backend/src/coypu_builder/io/terrain/raster.py`, `io/imagery/raster_image.py`, a backend test | F51, decode side: Godot reads the suggested float32 nodata as the neighbouring double and sends it back 1 ulp off. Cast a confirmed `nodata` to the raster's dtype before masking, and record the cast value. A test shows that a nodata 1 ulp above FLT_MAX still masks the file's FLT_MAX cells and is recorded as FLT_MAX |
+| `client/ipc/envelope.gd`, `client/tests/unit/test_ipc_envelope.gd` | F51: encode headers at full precision (`JSON.stringify(header, "", true, true)`); the test is specified in the C2 clarifications below |
+| ~~backend F51 decode side~~ | done in C1 (`4b440c6`) |
+| `tools/write_import_samples.py` | new, see the C2 clarifications: writes the sample files the live test and the capture import |
+| `tools/capture.ps1`, `client/tools/capture/capture_driver.gd`, `client/tools/capture/scenario.gd`, `client/tests/unit/test_capture_scenario.gd` | the `import_dialog` shot block, see the C2 clarifications |
 
 ### Contract (Part C)
 
@@ -803,11 +812,142 @@ tests in `test_ui_preset.gd` / `test_terrain_field.gd`, and `ui_shell.json` / `t
    temporary folder outside the repository):
    - files → inspect → set EPSG:5514 → import produces a source;
    - a second run as a re-import reports unchanged objects, with their GUIDs kept;
-   - an online-source import against the test-server providers works the same way.
-3. **Capture:** the six shots exist. The text is legible and the Czech diacritics render. The reviewer
-   judges the flow as a first-time user would meet it.
+   - the online-source step lists the live backend's providers, and choosing one sets the kind and the
+     default query. The test stops before inspect, which would reach the network (C2 clarification 2).
+3. **Capture:** the eight shots of C2 clarification 4 exist. The text is legible and the Czech diacritics
+   render. The reviewer judges the flow as a first-time user would meet it.
 4. **No regressions:** both suites are green on Windows and on Linux CI, with no previously passing test
    removed, skipped or weakened.
+
+### Clarifications (Part C2, 2026-11-24, before the worker)
+
+1. **Sample files.** `tools/write_import_samples.py <out_dir>` writes three small files with rasterio and numpy,
+   from a smooth analytic surface. Nothing is copied from real data. The live test and the capture both use it.
+   - `sample_terrain_nocrs.tif`: float32, 64 × 64 cells of 2 m, at S-JTSK-like coordinates (E about
+     −742 000, N about −1 040 000). It has **no CRS**, so inspect shows the no-CRS notice. Nodata is
+     −3.4028234663852886e38, and one 8 × 8 corner holds nodata cells.
+   - `sample_terrain_5514.tif`: the same grid, with EPSG:5514 declared.
+   - `sample_ortho_5514.tif`: 3-band uint8 imagery over the same extent, with EPSG:5514 declared.
+   - The script refuses an `out_dir` inside the repository. It is run through
+     `uv run --directory backend python -X utf8 ../tools/write_import_samples.py <dir>`. CI's client job
+     already runs `uv sync --extra gis`.
+   - The live test runs it with `OS.execute` (`UvLocator`) into its own temporary folder, and removes the folder
+     in `after()`.
+2. **Online sources, live.** Backend tests reach their local test servers by monkeypatching, which a backend
+   started by Godot cannot do. So the live test stops before a provider inspect, which would reach the network.
+   - Provider imports end to end stay covered by T-133 and T-134's pytest suites and by the Kralupy capture.
+   - The dialog's provider flow is covered by unit tests with a stubbed backend: inspect, settings, run, and
+     `max_total_mb`.
+3. **F51, encode side.**
+   - Godot does not parse decimal text with correct rounding, so a test that round trips text through
+     `JSON.parse_string` proves nothing. Build each value from its IEEE-754 bits with
+     `PackedByteArray.decode_double` instead:
+     - FLT_MAX as a double, little-endian `000000e0ffffefc7`;
+     - 0.3048006096, little-endian `701a826ada81d33f`.
+   - Encode a header carrying both values and assert that each number token is an exact form, one that a
+     correctly rounded parser maps back to those bits.
+     - The known forms are `-3.4028234663852886e+38` (both repr and `%.17g`), and `0.3048006096` (repr) or
+       `0.30480060959999999` (`%.17g`).
+     - If Godot 4.7.2 emits another form, check it with Python (`float(token).hex()`), add it with a comment,
+       and report it.
+   - Report what Godot emits for a negative value. Its full-precision path takes a `log10` of the value.
+4. **Capture shots.**
+   - Add an `import_dialog` shot block to the driver: `{"files": [...], "step": "online" | "report" |
+     "settings" | "result", "settings": {"horizontal_crs": "EPSG:5514"}, "crs_query": "..."}`.
+   - The driver steps through the dialog's public seams (`set_files`, `go_next`, the pickers) and waits while
+     `is_busy()` is true. Its timeouts come from `request_timeout_sec`.
+   - `capture.ps1` writes the samples into a temporary folder before Godot starts. It hands that folder to
+     Godot as `COYPU_CAPTURE_SAMPLES`, set for that process only, and deletes the folder in `finally`. The
+     scenario names files as `${COYPU_CAPTURE_SAMPLES}/sample_terrain_nocrs.tif`. `ui_shell` never needs
+     `COYPU_DATA`.
+   - `scenario.gd` validates the block; `test_capture_scenario.gd` covers it.
+   - The eight shots are:
+
+     | Shot | What it shows |
+     |---|---|
+     | `import_online_engineering` | the online-source list |
+     | `import_report_engineering`, `import_report_sandbox` | the inspect report of `sample_terrain_nocrs.tif`, with the no-CRS notice |
+     | `import_settings_engineering`, `import_settings_sandbox` | Settings, with EPSG:5514 chosen |
+     | `import_result_engineering`, `import_result_sandbox` | the result |
+     | `import_long_crs_engineering` | the horizontal picker's popup open on a long name, for example a `crs_query` of "Krovak East North" |
+
+     Judge the long-name popup on the GPU, and fix it if it runs past the screen edge.
+5. **The "No data" row** is hidden when the kind is imagery (C1 decision 8). Test it in `test_import_dialog.gd`.
+6. **Re-import.**
+   - Choosing a source in "Re-import of" prefills Attribution and Licence from that source's `source.list`
+     entry (`attribution`, `licence`). The unknown-licence placeholder prefills as empty.
+   - The user's own edits win over the prefill.
+   - Test: `test_reimport_prefills_attribution_and_licence`.
+7. **Attribution and Licence fields.**
+   - Prefill order: the re-import source, then `attribution_hint` / `licence_hint`, then empty.
+   - An empty field is not sent. The backend then keeps the previous values (C1).
+   - Plain labels: "Attribution", "Licence", with a hint under them: "Shown in Data sources. Suggested from the
+     file names; check it."
+
+### Review decisions (Part C2, 2026-11-24)
+
+**Verdict: pass with findings.** Nothing corrupts data. The fix round, which goes to a fresh worker because
+the first one's context is spent, covers:
+
+1. **A re-import keeps the source's name.**
+   - Track `_name_edited`, set from `text_changed`.
+   - Choosing a source in "Re-import of" sets Name to that source's name while Name is unedited. Choosing
+     "— none —" restores the automatic name.
+   - Test: `test_reimport_keeps_the_sources_name`. A name the user typed wins.
+2. **"Re-import of" refreshes after an import in the same dialog.** The app reuses the dialog.
+   - Clear the report at the end of a successful `_finish_import`, so the next Next inspects again and reloads
+     `source.list`.
+   - Test: import, hide, `prepare`, the same files, Next twice. `import.inspect` was called twice, and the
+     selector lists the new source.
+3. **A project without a CRS.**
+   - The Source step's Next is disabled while `Session.crs()` is empty, with the reason "The project has no
+     coordinate system yet — import an alignment first".
+   - `E_CRS_REQUIRED` from inspect or import, while `Session.crs()` is empty or a horizontal CRS is chosen,
+     shows that sentence and does not send the user back to Settings.
+   - Tests: the gate, and the error case.
+4. **The height cap holds when the hint line appears.**
+   - `_refresh_buttons` calls `_fit_later()` when the hint's visibility or text changes.
+   - Also call it when the file dialog hides the provider list.
+   - Test: at 1280 × 720, typing into the CRS field leaves `size.y <= 648`.
+5. **An online source in a project without alignments.**
+   - The Source step's Next is disabled with "An online source is cut to a corridor around an alignment —
+     import an alignment first".
+   - A box clip for that case is not planned now.
+6. **The Clip help for online sources.** `PROVIDER_CLIP_NOTE` replaces the Clip help while an online source is
+   chosen.
+7. **The online list.**
+   - Provider rows become `CheckBox` rows in one `ButtonGroup`, which draws radio marks. The title is stronger
+     than the description. The chosen provider's notices read as a notice, not as more description.
+   - "Nothing chosen yet." sits under the Files / Online source buttons.
+   - The page prompt mentions online sources.
+   - If `import.formats` fails or lists no providers, the list says so in one sentence.
+   - Capture: `import_online_engineering` shows a chosen provider, and a new `import_online_sandbox` shows
+     the same in Sandbox. That makes nine shots.
+8. **The Attribution and Licence hints.**
+   - "Suggested from the file names; check it." shows only when a hint filled the field.
+   - Otherwise Attribution says "Shown in Data sources." and Licence has its own short hint.
+   - The row order stays as it is.
+9. **Kind note.** Say "go back to the Source step", so no lone "1." wraps.
+10. **The duplicate no-CRS warning** is accepted for C2. Its fix belongs to C3 (see C3's contract).
+11. **The No data help.** Drop "The value is kept exactly as the file gives it". The display shows Godot's
+    parse, and the backend casts float32 (C1).
+12. **Smaller fixes.**
+    - The download note says the size is for the clip at inspection.
+    - `provider_query()`'s doc says where the clip is merged.
+    - `source.list` goes through `_request_with_retry`.
+    - A disabled "Re-import of" gives its reason: "No earlier source of this kind and format".
+    - Counts read "1 object" or "2 objects".
+    - The result reads "None needed" when no transformation was applied.
+13. **Tests to add.**
+    - A provider `import.run` carries no `attribution` or `licence`.
+    - "Re-import of" lists only sources of the same kind and format.
+    - A provider without `max_total_mb` hides the Download limit row.
+    - The chosen provider's notices are shown.
+    - The F51 test gains 1/3, whose default text differs from its full-precision text.
+    - The capture driver records an error for an empty online list and for a failed inspect on a `report`
+      shot.
+14. **Docs.** `client/README.md`: Online source is live, and the scenario format documents `dialog: "import"`
+    and the `import_dialog` block.
 
 ## Invariants
 
