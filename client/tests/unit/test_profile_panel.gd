@@ -132,6 +132,19 @@ func _wide_profile(count: int, gap_from: int, gap_to: int) -> Dictionary:
 	}
 
 
+## The profile of [method _profile] with every row covered by a surface model only (flags 9, no ground), from the Copernicus GLO-30
+## source, which is index 1 of the source names here.
+func _surface_only_profile() -> Dictionary:
+	var profile := _profile()
+	profile["ground_h"] = PackedFloat64Array([NAN, NAN, NAN, NAN, NAN])
+	profile["flags"] = PackedByteArray([9, 9, 9, 9, 9])
+	profile["source"] = PackedByteArray([1, 1, 1, 1, 1])
+	profile["source_names"] = ["ČÚZK DMR 5G", "Copernicus GLO-30"]
+	profile["cut_area"] = PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 0.0])
+	profile["no_ground_spans"] = [[13000.0, 13040.0]]
+	return profile
+
+
 ## Relative luminance and the contrast ratio of two colours, as WCAG 2 defines them.
 func _contrast(a: Color, b: Color) -> float:
 	var la := _luminance(a)
@@ -232,12 +245,12 @@ func test_no_ground_rows_read_no_ground_and_are_not_drawn_as_ground() -> void:
 	var stations := PackedFloat64Array([0.0, 10.0, 20.0, 30.0, 40.0])
 	var ground := PackedFloat64Array([5.0, NAN, 7.0, 8.0, 9.0])
 	var flags := PackedByteArray([0, 1, 0, 0, 0])
-	var runs := ProfilePanel.valid_runs(stations, ground, flags, 0, 4)
+	var runs := ProfilePanel.sampled_runs(stations, ground, flags, _rows(0, 4))
 	assert_int(runs.size()).is_equal(2)
 	assert_int((runs[0] as PackedVector2Array).size()).is_equal(1)
 	assert_int((runs[1] as PackedVector2Array).size()).is_equal(3)
 	# The flag, not the NaN, makes the gap: a flagged row that holds a height is not drawn as ground either.
-	var flagged_with_height := ProfilePanel.valid_runs(stations, PackedFloat64Array([5.0, 6.0, 7.0, 8.0, 9.0]), flags, 0, 4)
+	var flagged_with_height := ProfilePanel.sampled_runs(stations, PackedFloat64Array([5.0, 6.0, 7.0, 8.0, 9.0]), flags, _rows(0, 4))
 	assert_int(flagged_with_height.size()).append_failure_message("a flagged row with a height is drawn as ground").is_equal(2)
 	assert_int((flagged_with_height[0] as PackedVector2Array).size()).is_equal(1)
 	for run: Variant in runs:
@@ -256,17 +269,58 @@ func test_no_ground_rows_read_no_ground_and_are_not_drawn_as_ground() -> void:
 	).is_false()
 
 
+## Rows at 0, 10, 20, 30 and 40 m: the rail is level at 175 m, the formation 0.8 m below it (174.2 m), and the ground falls 1 m per
+## 10 m from 176 m. The ground is above the formation up to 18 m, so the cut is the area between them over 0 to 18 m: the integral of
+## 1.8 − 0.1 s is 16.2 m². Beyond 18 m the fill is the integral of 0.1 s − 1.8 over 18 to 40 m: 24.2 m². Both are exact, as the
+## ground is linear.
 func test_cut_and_fill_are_shaded_where_their_areas_are_positive() -> void:
-	var cut_only := ProfilePanel.band_polygons(0.0, 2.0, 10.0, 2.0, 0.0, 0.0, true)
-	assert_int(cut_only.size()).is_equal(1)
-	assert_int(ProfilePanel.band_polygons(0.0, 2.0, 10.0, 2.0, 0.0, 0.0, false).size()).is_equal(0)
-	var fill_only := ProfilePanel.band_polygons(0.0, -1.0, 10.0, -1.0, 0.0, 0.0, false)
-	assert_int(fill_only.size()).is_equal(1)
-	assert_int(ProfilePanel.band_polygons(0.0, -1.0, 10.0, -1.0, 0.0, 0.0, true).size()).is_equal(0)
-	var cut_piece: PackedVector2Array = ProfilePanel.band_polygons(0.0, 1.0, 10.0, -1.0, 0.0, 0.0, true)[0]
-	assert_float(cut_piece[2].x).is_equal_approx(5.0, 1e-9)
-	assert_float(cut_piece[1].y).is_equal_approx(1.0, 1e-9)
-	assert_int(ProfilePanel.band_polygons(0.0, 1.0, 10.0, -1.0, 0.0, 0.0, false).size()).is_equal(1)
+	var stations := PackedFloat64Array([0.0, 10.0, 20.0, 30.0, 40.0])
+	var rail := PackedFloat64Array([175.0, 175.0, 175.0, 175.0, 175.0])
+	var flags := PackedByteArray([0, 0, 0, 0, 0])
+	var ground := PackedFloat64Array([176.0, 175.0, 174.0, 173.0, 172.0])
+	var cut := ProfilePanel.band_runs(stations, ground, flags, rail, 0.8, _rows(0, 4), true)
+	var fill := ProfilePanel.band_runs(stations, ground, flags, rail, 0.8, _rows(0, 4), false)
+	assert_int(cut.size()).append_failure_message("one run of cut").is_equal(1)
+	assert_int(fill.size()).append_failure_message("one run of fill").is_equal(1)
+	assert_float(_area(cut[0])).append_failure_message("the cut is %f m²" % _area(cut[0])).is_equal_approx(16.2, 1e-3)
+	assert_float(_area(fill[0])).append_failure_message("the fill is %f m²" % _area(fill[0])).is_equal_approx(24.2, 1e-3)
+	# The cut's vertices are the ground at the first row (176 m), the ground at 10 m, and the crossing at 18 m on the formation.
+	var cut_points: PackedVector2Array = cut[0]
+	assert_bool(_has_near(cut_points, Vector2(18.0, 174.2))).append_failure_message("no crossing at 18 m: %s" % str(cut_points)).is_true()
+	assert_bool(_has_near(cut_points, Vector2(0.0, 176.0))).append_failure_message("no ground vertex at 0 m: %s" % str(cut_points)).is_true()
+	# With the ground under the formation everywhere there is no cut, and with it above there is no fill.
+	var below := PackedFloat64Array([173.0, 173.0, 173.0, 173.0, 173.0])
+	assert_int(ProfilePanel.band_runs(stations, below, flags, rail, 0.8, _rows(0, 4), true).size()).is_equal(0)
+	assert_int(ProfilePanel.band_runs(stations, below, flags, rail, 0.8, _rows(0, 4), false).size()).is_equal(1)
+	var above := PackedFloat64Array([176.0, 176.0, 176.0, 176.0, 176.0])
+	assert_int(ProfilePanel.band_runs(stations, above, flags, rail, 0.8, _rows(0, 4), false).size()).is_equal(0)
+	assert_int(ProfilePanel.band_runs(stations, above, flags, rail, 0.8, _rows(0, 4), true).size()).is_equal(1)
+
+
+## The area of a polygon by the shoelace formula.
+func _area(polygon: PackedVector2Array) -> float:
+	var twice := 0.0
+	for k in polygon.size():
+		var a := polygon[k]
+		var b := polygon[(k + 1) % polygon.size()]
+		twice += a.x * b.y - b.x * a.y
+	return absf(twice) * 0.5
+
+
+## Vertices are float32 in the engine, so a point matches a float64 one to about 1e-5.
+func _has_near(points: PackedVector2Array, point: Vector2) -> bool:
+	for q: Vector2 in points:
+		if q.distance_to(point) < 1e-4:
+			return true
+	return false
+
+
+## The row indices first to last, ascending.
+func _rows(first: int, last: int) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for i in range(first, last + 1):
+		out.append(i)
+	return out
 
 
 func test_exaggeration_scales_the_vertical_range() -> void:
@@ -292,11 +346,19 @@ func test_row_range_takes_one_row_either_side_of_the_window() -> void:
 
 
 func test_ticks_hatching_and_hatch_bounds() -> void:
-	var ticks := ProfilePanel.nice_ticks(12.7, 17.5, 6)
+	# 4.8 km in 500 px, at least 60 px a tick: 0.5 km gives 52 px, so the step is 1 km.
+	var km_step := ProfilePanel.spaced_step(12.7, 17.5, 500.0, 60.0, [1.0, 2.0, 5.0])
+	assert_float(km_step).is_equal_approx(1.0, 1e-9)
+	var ticks := ProfilePanel.ticks_at(12.7, 17.5, km_step)
 	assert_array(Array(ticks)).is_equal([13.0, 14.0, 15.0, 16.0, 17.0])
-	var metres := ProfilePanel.nice_ticks(0.0, 1000.0, 6)
+	# 1 km in 600 px, at least 110 px a tick: 100 m gives 60 px and 200 m gives 120 px.
+	var metre_step := ProfilePanel.spaced_step(0.0, 1000.0, 600.0, 110.0, [1.0, 2.0, 5.0])
+	assert_float(metre_step).is_equal_approx(200.0, 1e-9)
+	var metres := ProfilePanel.ticks_at(0.0, 1000.0, metre_step)
 	assert_int(metres.size()).is_equal(6)
 	assert_float(metres[1] - metres[0]).is_equal_approx(200.0, 1e-9)
+	assert_int(ProfilePanel.ticks_at(0.0, 1000.0, 0.0).size()).is_equal(0)
+	assert_float(ProfilePanel.spaced_step(5.0, 5.0, 500.0, 60.0, [1.0, 2.0, 5.0])).is_equal(0.0)
 	assert_int(ProfilePanel.km_decimals(1000.0)).is_equal(3)
 	assert_int(ProfilePanel.km_decimals(5000.0)).is_equal(2)
 	assert_int(ProfilePanel.km_decimals(0.0)).is_equal(1)
@@ -351,6 +413,11 @@ func test_no_alignment_and_no_terrain_messages() -> void:
 	await get_tree().process_frame
 	assert_int(panel.state()).is_equal(ProfilePanel.State.READY)
 	assert_str(panel.status_label().text).is_equal(ProfilePanel.NO_TERRAIN_TEXT)
+	assert_bool(panel.status_label().visible).is_true()
+
+	# T-137 Part C, review item 6: a line that only a surface model covers says so, with the model's name, and not "no terrain".
+	panel.show_profile(_surface_only_profile(), _ALIGNMENT)
+	assert_str(panel.status_label().text).is_equal(_surface_only_text("Copernicus GLO-30"))
 	assert_bool(panel.status_label().visible).is_true()
 
 
@@ -649,7 +716,7 @@ func test_each_run_of_cut_is_one_polygon() -> void:
 			expected += 1
 		inside = cut_here
 	assert_int(expected).is_greater_equal(20)
-	var polygons := ProfilePanel.band_runs(stations, ground, flags, profile["rail_h"], 0.8, 0, stations.size() - 1, true)
+	var polygons := ProfilePanel.band_runs(stations, ground, flags, profile["rail_h"], 0.8, _rows(0, stations.size() - 1), true)
 	assert_int(polygons.size()).append_failure_message("%d polygons for %d runs of cut" % [polygons.size(), expected]).is_equal(expected)
 
 
@@ -670,11 +737,11 @@ func test_degenerate_crossings_give_no_polygon_the_engine_refuses() -> void:
 	var checked := 0
 	for i in offsets.size() - 1:
 		for cut: bool in [true, false]:
-			for piece: Variant in ProfilePanel.band_polygons(stations[i], ground[i], stations[i + 1], ground[i + 1], formation, formation, cut):
+			for piece: Variant in ProfilePanel.band_runs(stations, ground, flags, rail, 0.8, _rows(i, i + 1), cut):
 				_assert_drawable(piece)
 				checked += 1
 	for cut: bool in [true, false]:
-		for polygon: Variant in ProfilePanel.band_runs(stations, ground, flags, rail, 0.8, 0, offsets.size() - 1, cut):
+		for polygon: Variant in ProfilePanel.band_runs(stations, ground, flags, rail, 0.8, _rows(0, offsets.size() - 1), cut):
 			_assert_drawable(polygon)
 			checked += 1
 	assert_int(checked).is_greater(0)
@@ -768,8 +835,10 @@ func test_tick_decimals_follow_the_step() -> void:
 	assert_int(ProfilePanel.tick_decimals(1000.0)).is_equal(0)
 	assert_int(ProfilePanel.tick_decimals(2.5)).append_failure_message("a 2.5 m step shows 2.5, one decimal").is_equal(1)
 	assert_int(ProfilePanel.tick_decimals(25.0)).append_failure_message("a 25 m step shows 25, no decimal").is_equal(0)
-	assert_float(ProfilePanel.tick_step(160.0, 280.0, 6)).is_equal_approx(20.0, 1e-9)
-	assert_int(ProfilePanel.tick_decimals(ProfilePanel.tick_step(180.0, 183.0, 6))).is_equal(1)
+	# 120 m in 600 px: 10 m gives 50 px, under 60 px a tick, and 20 m gives 100 px.
+	assert_float(ProfilePanel.spaced_step(160.0, 280.0, 600.0, 60.0, [1.0, 2.0, 2.5, 5.0])).is_equal_approx(20.0, 1e-9)
+	# 3 m in 150 px: 0.25 m gives 12.5 px, under 20 px a tick, and 0.5 m gives 25 px.
+	assert_int(ProfilePanel.tick_decimals(ProfilePanel.spaced_step(180.0, 183.0, 150.0, 20.0, [1.0, 2.0, 2.5, 5.0]))).is_equal(1)
 	var panel := _make_panel()
 	await get_tree().process_frame
 	panel.show_profile(_profile(), _ALIGNMENT)
@@ -971,6 +1040,231 @@ func test_each_no_ground_label_sits_on_a_plate() -> void:
 				covered = covered or plate.encloses(texts[k])
 			assert_bool(covered).append_failure_message("no plate covers the no-ground label").is_true()
 	assert_int(found).append_failure_message("no no-ground label was drawn").is_greater(0)
+
+
+## T-137 Part C: a row covered by a surface model only (flag 9) reads "Ground surface model only" and names that model as its source.
+## The ground rows beside it read as before.
+func test_surface_model_only_rows_read_surface_model_only() -> void:
+	var profile := _profile()
+	profile["ground_h"] = PackedFloat64Array([192.0, 192.0, NAN, 190.0, 190.0])
+	profile["flags"] = PackedByteArray([0, 0, 9, 0, 0])
+	profile["source"] = PackedByteArray([0, 0, 1, 0, 0])
+	profile["source_names"] = ["ČÚZK DMR 5G", "Copernicus GLO-30"]
+	var panel := _make_panel()
+	await get_tree().process_frame
+	panel.show_profile(profile, _ALIGNMENT)
+	panel.set_cursor(13020.0)
+	assert_str(panel.readout_label("ground").text).is_equal("Ground surface model only")
+	assert_str(panel.readout_label("difference").text).is_equal("Ground − rail —")
+	assert_str(panel.readout_label("source").text).is_equal("Source Copernicus GLO-30")
+	assert_bool(panel.summary()["readout"]["surface_model"]).is_true()
+	# Halfway between a ground row and the surface-only row the nearer row is the surface one.
+	panel.set_cursor(13015.0)
+	assert_str(panel.readout_label("ground").text).is_equal("Ground surface model only")
+	panel.set_cursor(13005.0)
+	assert_str(panel.readout_label("ground").text).is_equal("Ground 192.00 m")
+	assert_str(panel.readout_label("source").text).is_equal("Source ČÚZK DMR 5G")
+	assert_bool(panel.summary()["readout"]["surface_model"]).is_false()
+
+
+## Redrawing after a cursor move computes the vertical range once: the readout's factor label and the drawing share it.
+func test_the_vertical_range_is_computed_once_per_redraw() -> void:
+	var panel := _make_panel()
+	await get_tree().process_frame
+	panel.show_profile(_wide_profile(1800, 100, 120), _ALIGNMENT)
+	panel.set_window_index(0)
+	await get_tree().process_frame
+	var computes := panel.vertical_computes()
+	var draws := panel.draw_count()
+	panel.set_cursor(14150.0)
+	await get_tree().process_frame
+	assert_int(panel.draw_count()).append_failure_message("the cursor move did not redraw").is_greater(draws)
+	assert_int(panel.vertical_computes() - computes).append_failure_message(
+		"the vertical range was computed %d times for one cursor move" % (panel.vertical_computes() - computes)
+	).is_equal(1)
+
+
+## Item 12: the legend's swatches take the theme's colours after a switch of preset, as the theme arrives after they are built.
+func test_legend_swatches_take_the_theme_colours_after_a_switch() -> void:
+	var shell := await _make_shell()
+	var panel := shell.profile_panel()
+	for preset_id: StringName in [UiPreset.SANDBOX, UiPreset.ENGINEERING]:
+		shell.apply_preset(preset_id)
+		await get_tree().process_frame
+		await get_tree().process_frame
+		# The legend's items are cut, fill and no ground, in that order; each is a row whose first child is its swatch.
+		var items := panel.legend_items()
+		var keys := ["cut", "fill", "no_ground"]
+		for index in keys.size():
+			var key: String = keys[index]
+			var swatch := (items[index] as Control).get_child(0) as ColorRect
+			var expected := panel.get_theme_color(StringName(key), &"ProfilePanel")
+			assert_bool(swatch.color.is_equal_approx(expected)).append_failure_message(
+				"%s: the %s swatch is %s, not the theme's %s" % [preset_id, key, swatch.color, expected]
+			).is_true()
+	shell.select_bottom_tab(&"timeline")
+
+
+## Item 12: a narrow, then wide, resize leaves the controls row as tall as its children, so the plot takes the full height.
+func test_the_plot_keeps_its_height_after_a_narrow_then_wide_resize() -> void:
+	var panel := ProfilePanel.new()
+	panel.custom_minimum_size = Vector2(0.0, 240.0)
+	add_child(panel)
+	auto_free(panel)
+	panel.size = Vector2(1000.0, 240.0)
+	await get_tree().process_frame
+	for width: float in [640.0, 560.0, 1000.0]:
+		panel.size = Vector2(width, 240.0)
+		await get_tree().process_frame
+		await get_tree().process_frame
+	var controls := panel.controls_row()
+	var bottom := 0.0
+	for child: Node in controls.get_children():
+		var item := child as Control
+		if item != null and item.is_visible_in_tree():
+			bottom = maxf(bottom, item.position.y + item.size.y)
+	assert_float(controls.size.y).append_failure_message("the controls row is %f px tall, its children end at %f" % [controls.size.y, bottom]).is_equal_approx(bottom, 0.5)
+	assert_float(panel.plot_rect().position.y).is_equal_approx(bottom + ProfilePanel.GAP_PX, 0.5)
+
+
+## Item 12: at stations of about 13 000 m, a sliver of a 10 m segment, cut by the formation at a fraction t from 1e-6 to 1 − 1e-6, is
+## either dropped by the drawing or triangulates. The engine refuses the fill sliver at t = 0.999 (about 5e-4 px² in a 1 km window)
+## when the floor is 1e-6 px².
+func test_slivers_at_13000_m_are_dropped_or_drawable() -> void:
+	var formation := 175.0 - 0.8
+	var fractions := [1e-6, 1e-5, 1e-4, 1e-3, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.9999, 0.99999, 0.999999]
+	var plot := Rect2(0.0, 0.0, 1000.0, 200.0)
+	var stations := PackedFloat64Array([13000.0, 13010.0])
+	var rail := PackedFloat64Array([175.0, 175.0])
+	var flags := PackedByteArray([0, 0])
+	var checked := 0
+	for window_m: float in [1000.0, 5000.0]:
+		var window := Vector2(13000.0 - (window_m - 10.0) * 0.5, 13000.0 - (window_m - 10.0) * 0.5 + window_m)
+		for vertical: Vector2 in [Vector2(170.0, 180.0), Vector2(formation - 0.5, formation + 1.5)]:
+			for t: float in fractions:
+				# The ground is 1 m above the formation at the first row, and falls to the crossing at fraction t of the segment.
+				var ground := PackedFloat64Array([formation + 1.0, formation - (1.0 - t) / t])
+				for cut: bool in [true, false]:
+					for polygon: PackedVector2Array in ProfilePanel.band_runs(stations, ground, flags, rail, 0.8, _rows(0, 1), cut):
+						var pixels := ProfilePanel.shading_pixels(polygon, window, plot, vertical)
+						if pixels.is_empty():
+							continue
+						_assert_drawable(pixels)
+						checked += 1
+	assert_int(checked).is_greater(0)
+
+
+## Item 12: the shading is drawn over the sampled rows, so a whole-line window of 1 800 rows hands the engine about one row per pixel
+## column of the plot, with the run ends kept, not one vertex per row.
+func test_the_shading_is_drawn_over_the_sampled_rows() -> void:
+	var panel := _make_panel()
+	await get_tree().process_frame
+	var profile := _wide_profile(1800, 100, 120)
+	panel.show_profile(profile, _ALIGNMENT)
+	panel.set_window_index(2)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var plot_w := panel.plot_rect().size.x
+	var states := ProfilePanel.row_states(profile["flags"], profile["ground_h"], profile["cut_area"], profile["fill_area"])
+	# Two vertices a row (its ground and its formation) on the drawn rows, and two crossings for each run end pair.
+	var bound := 2.0 * (plot_w + 1.0 + 2.0 * ProfilePanel.run_end_rows(states, 0, 1799).size())
+	assert_int(panel.shading_vertex_count()).is_greater(0)
+	assert_float(float(panel.shading_vertex_count())).append_failure_message(
+		"%d shading vertices for a %f px plot" % [panel.shading_vertex_count(), plot_w]
+	).is_less_equal(bound)
+
+
+func _surface_only_text(model: String) -> String:
+	return ProfilePanel.SURFACE_ONLY_TEXT % model
+
+
+## T-137 Part C, review item 6: a line with no bare ground says which surface model covers it, or "no terrain" when none does.
+## A mixed line of flags 1 and 9 says the model's. In each of these the whole-line hatching is off, and a partial span stays hatched.
+func test_the_status_of_a_line_without_bare_ground_names_the_model_or_says_no_terrain() -> void:
+	var panel := _make_panel()
+	await get_tree().process_frame
+	var none := _profile()
+	none["ground_h"] = PackedFloat64Array([NAN, NAN, NAN, NAN, NAN])
+	none["flags"] = PackedByteArray([1, 1, 1, 1, 1])
+	none["source"] = PackedByteArray([255, 255, 255, 255, 255])
+	panel.show_profile(none, _ALIGNMENT)
+	await get_tree().process_frame
+	assert_str(panel.status_label().text).is_equal(ProfilePanel.NO_TERRAIN_TEXT)
+	assert_bool(panel.drawn_strings().has(ProfilePanel.NO_GROUND_LABEL)).append_failure_message("the whole line is hatched").is_false()
+
+	panel.show_profile(_surface_only_profile(), _ALIGNMENT)
+	await get_tree().process_frame
+	assert_str(panel.status_label().text).is_equal(_surface_only_text("Copernicus GLO-30"))
+	assert_bool(panel.drawn_strings().has(ProfilePanel.NO_GROUND_LABEL)).append_failure_message("the surface-only line is hatched").is_false()
+
+	var mixed := _surface_only_profile()
+	mixed["flags"] = PackedByteArray([1, 9, 1, 9, 9])
+	mixed["source"] = PackedByteArray([255, 1, 255, 1, 1])
+	panel.show_profile(mixed, _ALIGNMENT)
+	await get_tree().process_frame
+	assert_str(panel.status_label().text).append_failure_message("a mixed 1 and 9 line").is_equal(_surface_only_text("Copernicus GLO-30"))
+	assert_bool(panel.drawn_strings().has(ProfilePanel.NO_GROUND_LABEL)).append_failure_message("the mixed line is hatched").is_false()
+
+	# With some bare ground the status is empty, and a span of no ground beside it is hatched and labelled.
+	panel.show_profile(_wide_profile(1800, 100, 120), _ALIGNMENT)
+	panel.set_window_index(0)
+	panel.set_cursor(14100.0)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	assert_str(panel.status_label().text).is_equal("")
+	assert_bool(panel.drawn_strings().has(ProfilePanel.NO_GROUND_LABEL)).append_failure_message("a partial span is not hatched").is_true()
+
+
+## T-137 Part C, review item 7: on a row with no bare ground the cut and the fill read a dash, not 0.0 m².
+func test_cut_and_fill_read_a_dash_on_a_row_with_no_bare_ground() -> void:
+	var panel := _make_panel()
+	await get_tree().process_frame
+	panel.show_profile(_profile(), _ALIGNMENT)
+	panel.set_cursor(13020.0)
+	assert_str(panel.readout_label("cut").text).is_equal("Cut —")
+	assert_str(panel.readout_label("fill").text).is_equal("Fill —")
+	panel.set_cursor(13005.0)
+	assert_str(panel.readout_label("cut").text).is_equal("Cut 18.0 m²")
+	assert_str(panel.readout_label("fill").text).is_equal("Fill 0.0 m²")
+	panel.show_profile(_surface_only_profile(), _ALIGNMENT)
+	panel.set_cursor(13010.0)
+	assert_str(panel.readout_label("cut").text).is_equal("Cut —")
+	assert_str(panel.readout_label("fill").text).is_equal("Fill —")
+
+
+## T-137 Part C, review item 5: ground within a few millimetres of the formation over hundreds of pixels gives only polygons that
+## triangulate, and none thinner than the thickness floor (its area over its x-extent, in pixels).
+func test_razor_thin_shading_is_dropped() -> void:
+	var formation := 175.0 - 0.8
+	var stations := PackedFloat64Array()
+	var rail := PackedFloat64Array()
+	var ground := PackedFloat64Array()
+	var flags := PackedByteArray()
+	for i in 501:
+		stations.append(13000.0 + 10.0 * i)
+		rail.append(175.0)
+		# Always 1 to 3 mm above the formation: one long cut polygon, 1000 px wide at this scale, about 2e-4 to 6e-4 px thick.
+		ground.append(formation + 0.002 + 0.001 * sin(0.7 * float(i)))
+		flags.append(0)
+	var plot := Rect2(0.0, 0.0, 1000.0, 200.0)
+	var window := Vector2(13000.0, 18000.0)
+	var vertical := Vector2(formation - 500.0, formation + 500.0)
+	var seen := 0
+	for cut: bool in [true, false]:
+		for polygon: PackedVector2Array in ProfilePanel.band_runs(stations, ground, flags, rail, 0.8, _rows(0, 500), cut):
+			var pixels := ProfilePanel.shading_pixels(polygon, window, plot, vertical)
+			seen += 1
+			if pixels.is_empty():
+				continue
+			_assert_drawable(pixels)
+			var lo := pixels[0].x
+			var hi := pixels[0].x
+			for point: Vector2 in pixels:
+				lo = minf(lo, point.x)
+				hi = maxf(hi, point.x)
+			var thickness := ProfilePanel.polygon_area(pixels) / (hi - lo)
+			assert_float(thickness).append_failure_message("a kept polygon is %f px thick" % thickness).is_greater_equal(ProfilePanel.THICKNESS_MIN_PIXELS)
+	assert_int(seen).append_failure_message("no band polygon was made to test").is_greater(0)
 
 
 func _entry(alignment_id: String) -> Dictionary:

@@ -81,11 +81,22 @@ most 10 000 samples per side (`max_half_width_m / sample_spacing_m`).
 
 | Bit | Meaning |
 |---|---|
-| 1 | no ground under the centreline. It comes alone: both areas are 0 and `ground_h` is NaN |
+| 1 | no ground under the centreline. It comes alone, or with 8: both areas are 0 and `ground_h` is NaN |
 | 2 | no daylight point in the ground that exists on a side. This also holds where the ground ends before `max_half_width_m`, for example at a clip edge, and then comes with flag 4. It does not mean steep terrain |
 | 4 | partial: some ground across the section is missing. A pair with a NaN end is skipped; a side whose edge has no ground is skipped entirely |
+| 8 | a surface model covers the centreline at a flag-1 station (F57). Flag 1 comes alone, or with 8, and never 8 alone |
 
 A section with ground on only one side is flagged 4, and its areas use only the ground that exists.
+
+## Surface models
+
+A surface model (for example Copernicus GLO-30) follows treetops, rooftops and water surfaces, so it is not
+ground. Earthworks sample bare-ground surfaces only: `alignment.ground_profile` calls the stack with
+`bare_ground=True`, which skips every surface whose source is marked `surface_model` (`import-framework.md`).
+Where no bare ground covers the centreline but a surface model does, the station is flag 1 with flag 8, and
+`source` names that surface model. Its `ground_h` stays NaN and its areas stay 0, so volumes and no-ground spans
+treat it exactly as flag 1. The result therefore says why there is no ground, and the surface model's height
+never becomes a cut or fill. The terrain tiles, the source map and the overlay still use surface models.
 
 ## Volumes and no-ground spans
 
@@ -103,7 +114,8 @@ A section with ground on only one side is flagged 4, and its areas use only the 
 ## Source
 
 `source` is the index of the stack surface that answered at the centreline, from
-`TerrainStack.heights_and_source` (`-1` where none did). On the wire it is `<u1`, with 255 for none, and it
+`TerrainStack.heights_and_source` (`-1` where none did); on a flag-8 station it is the surface model's index,
+the only answer there. On the wire it is `<u1`, with 255 for none, and it
 indexes `source_ids`. `source_names` gives the dataset names in the same order, and `attributions` maps each
 source id to its attribution. `terrain_revision` is the revision the profile was computed on, the key the
 client caches it under.

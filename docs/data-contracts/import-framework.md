@@ -34,6 +34,7 @@ guessed. The project must also have a CRS (open it with one, or import an alignm
 | `point_classes` | Point-cloud classification codes to keep; `null` = all. Used by point-cloud readers. |
 | `display_resolution_m` | Target resolution of display tiles; recorded for T-132. |
 | `nodata` | Value that marks a missing height. Must be finite: NaN and infinity cannot ride the JSON wire and a NaN would make the stored settings unequal to themselves, so a reader handles a NaN marker in a raster natively. |
+| `surface_model` | `false` by default. `true` says the source is a surface model (it includes vegetation and buildings), not bare ground. It is recorded with the dataset and round-trips like the other settings. Earthworks sample bare ground only, so a surface model is display terrain (F57). A provider declares its data as a surface model (its class attribute `surface_model`), and the import records `true` whatever the request sent; for example Copernicus GLO-30 is always one, and `inspect` suggests it. |
 
 Invalid values (an unknown `coordinate_order`, a non-positive or non-finite unit, resolution, `nodata`, buffer
 or box bound, an empty box) raise `ValueError` when the settings are constructed, which the handlers map to

@@ -508,7 +508,7 @@ Bake two swept rails plus one default ballast prism for one alignment, chunked a
 
 **Stability**: `experimental`  ·  **Changes state**: no
 
-Sample the terrain analysis surface under one alignment: the ground line under the centreline beside the rail profile, and the cut and fill area per station from a formation template (level across, 1.5:1 slopes by default). Stations are `station_from`, every round chainage (a multiple of `spacing_m`) strictly between, and `station_to` (the extent by default); they must lie inside the alignment. A request over the work budget (12 000 000 terrain samples or 100 000 stations) is `E_BAD_PARAMS`. Volumes are by average end area and never bridge a station with no ground; `no_ground_spans` reports the first and last such station of each run (water, a bridge). Read-only, and it runs off the event loop.
+Sample the terrain analysis surface, bare ground only, under one alignment: the ground line under the centreline beside the rail profile, and the cut and fill area per station from a formation template (level across, 1.5:1 slopes by default). Stations are `station_from`, every round chainage (a multiple of `spacing_m`) strictly between, and `station_to` (the extent by default); they must lie inside the alignment. A request over the work budget (12 000 000 terrain samples or 100 000 stations) is `E_BAD_PARAMS`. Volumes are by average end area and never bridge a station with no ground; `no_ground_spans` reports the first and last such station of each run (water, a bridge). Read-only, and it runs off the event loop.
 
 **Params**
 
@@ -544,11 +544,11 @@ Sample the terrain analysis surface under one alignment: the ground line under t
 |---|---|---|---|
 | `station` | `<f8` | `(n,)` | Absolute station along the alignment [m]. |
 | `rail_h` | `<f8` | `(n,)` | Profile elevation at the centreline (the rail) [m]. |
-| `ground_h` | `<f8` | `(n,)` | Ground under the centreline [m]; NaN where there is none (flag 1). |
-| `source` | `<u1` | `(n,)` | Index into `source_ids` of the source that gave the centreline ground; 255 where none did. |
+| `ground_h` | `<f8` | `(n,)` | Ground under the centreline [m]; NaN where there is none (flags 1 and 9). |
+| `source` | `<u1` | `(n,)` | Index into `source_ids`: the source that gave the centreline ground, or on flag 9 the surface model at the centreline; 255 where none did. |
 | `cut_area` | `<f8` | `(n,)` | Cut area of the section [m^2]; 0 where there is no ground. |
 | `fill_area` | `<f8` | `(n,)` | Fill area of the section [m^2]; 0 where there is no ground. |
-| `flags` | `<u1` | `(n,)` | Bits: 1 = no ground under the centreline (alone); 2 = no daylight point in the ground that exists on a side, which also holds where the ground ends before the section's limit (with 4); 4 = ground missing somewhere across the section (the areas use only the ground there is). |
+| `flags` | `<u1` | `(n,)` | Bits: 1 = no bare ground under the centreline, alone or with 8; 8 = a surface model covers the centreline, always with 1 (flag 9 is both); 2 = no daylight point in the ground that exists on a side, which also holds where the ground ends before the section's limit (with 4); 4 = ground missing somewhere across the section (the areas use only the ground there is). |
 
 **Errors**: `E_BAD_PARAMS`, `E_NO_SESSION`, `E_NO_PROJECT`, `E_NOT_FOUND`, `E_INTERNAL`, `E_BUSY`
 

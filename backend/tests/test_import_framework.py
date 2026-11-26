@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import numpy as np
 import pytest
 import shapely
@@ -242,6 +243,25 @@ def test_reconcile_against_nothing_adds_everything_with_uuid4_hex():
 def test_reconcile_refuses_duplicate_previous_keys():
     with pytest.raises(ValueError, match="duplicate"):
         reconcile((ObjectRecord("a", "1", "h"), ObjectRecord("a", "2", "h")), {})
+
+
+def test_import_settings_dto_defaults_match_the_domain(tmp_path):
+    """F57: `surface_model` defaults to False on the wire struct and in the domain.
+
+    A file import records False unless the settings say otherwise, and True round-trips through the struct,
+    the domain and JSON."""
+    from coypu_builder.protocol.messages import ImportSettingsDTO
+    from coypu_builder.server import handlers
+
+    assert handlers._settings_from_dto(ImportSettingsDTO()) == ImportSettings()
+    assert handlers._settings_to_dto(ImportSettings()) == ImportSettingsDTO()
+    assert ImportSettings().surface_model is False and ImportSettingsDTO().surface_model is False
+    assert _import(_file(tmp_path)).dataset.settings.surface_model is False
+    flagged = msgspec.json.decode(b'{"surface_model": true}', type=ImportSettingsDTO)
+    assert handlers._settings_from_dto(flagged).surface_model is True
+    dto = handlers._settings_to_dto(ImportSettings(surface_model=True))
+    echoed = msgspec.json.decode(msgspec.json.encode(dto))
+    assert echoed["surface_model"] is True
 
 
 def test_settings_validate_themselves():
@@ -844,6 +864,7 @@ async def test_inspect_run_list_get_over_the_wire(server_url, tmp_path):
             "imported_at": summary["imported_at"],
             "attribution": "",
             "licence": "synthetic (CC0)",
+            "surface_model": False,
         }
 
         got = await _call(ws, "4", "source.get", {"source_id": run["source_id"]})

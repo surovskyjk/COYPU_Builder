@@ -1086,6 +1086,34 @@ async def test_copernicus_surface_and_datum_warnings_are_stored_without_an_inspe
         assert cop.SURFACE_WARNING in got.result["warnings"] and cop.DATUM_WARNING in got.result["warnings"]
 
 
+def test_copernicus_import_is_always_a_surface_model(cog):
+    """F57: the provider declares `surface_model`, so the import records it whatever the request sent, and
+    `inspect` suggests it."""
+    requested = ImportSettings(horizontal_crs="EPSG:4326", vertical_crs="EPSG:3855", surface_model=False)
+    outcome = _import_cop(settings=requested)
+    assert outcome.dataset.settings.surface_model is True
+    assert outcome.dataset.settings.horizontal_crs == "EPSG:4326"
+    _, report = inspect_provider("copernicus-glo30", BBOX_QUERY, KROVAK, {})
+    assert report.suggested.surface_model is True
+
+
+async def test_copernicus_surface_model_is_recorded_and_listed_over_the_wire(server_url, cog):
+    params = {
+        "provider": "copernicus-glo30",
+        "query": BBOX_QUERY,
+        "kind": "terrain",
+        "settings": {"horizontal_crs": "EPSG:4326", "vertical_crs": "EPSG:3855", "surface_model": False},
+    }
+    async with connect(server_url) as ws:
+        await _open(ws)
+        run = await _run(ws, "1", params)
+        listed, _t, _s = await _call(ws, "2", "source.list")
+        (entry,) = listed.result["sources"]
+        assert entry["surface_model"] is True
+        got, _t, _s = await _call(ws, "3", "source.get", {"source_id": run["source_id"]})
+        assert got.result["settings"]["surface_model"] is True
+
+
 def test_range_file_reads_more_than_the_block_cache_holds():
     data = np.random.default_rng(11).bytes(16 << 20)
 
@@ -1186,8 +1214,8 @@ def test_a_user_file_beats_a_provider_of_the_same_band():
     finer = StackSource("finer provider", surface, 1.4, 3, from_provider=True)
     assert [s.source_id for s in order_sources([user, finer])] == ["finer provider", "user"]
     snapshot = _snapshot(
-        ("provider", "provider grid", [_coarse_grid(offset=0.0)], None, 30.0, 2, True),
-        ("user", "user grid", [_coarse_grid()], None, 30.0, 1, False),
+        ("provider", "provider grid", [_coarse_grid(offset=0.0)], None, 30.0, 2, True, False),
+        ("user", "user grid", [_coarse_grid()], None, 30.0, 1, False, False),
     )
     stack, _coverage, _warnings = handlers._build_terrain(snapshot)
     assert stack.source_ids == ("user", "provider")
@@ -1240,6 +1268,12 @@ def test_a_single_surface_is_source_zero_where_it_has_data():
     assert (tile.source_index[valid] == 0).all() and (tile.source_index[~valid] == NO_SOURCE_BYTE).all()
 
 
+def test_a_snapshot_entry_without_the_surface_model_flag_is_refused():
+    """F57: a snapshot entry has eight fields, the last the surface-model flag. Seven fields is a bug."""
+    with pytest.raises(ValueError):
+        handlers._build_terrain((("fine", "fine", [_fine_points()], None, None, 1, False),))
+
+
 def _snapshot(*entries):
     return tuple(entries)
 
@@ -1249,8 +1283,9 @@ SEAM = re.compile(r"mean ([0-9.]+) m, 95th percentile ([0-9.]+) m over (\d+) poi
 
 def test_the_height_step_at_a_seam_is_reported_as_mean_and_95th_percentile():
     snapshot = _snapshot(
-        ("fine", "fine survey", [_fine_points()], None, None, 1, False),
-        ("coarse", "coarse grid", [_coarse_grid()], None, None, 2, False),  # imported later, but coarser
+        ("fine", "fine survey", [_fine_points()], None, None, 1, False, False),
+        # imported later, but coarser
+        ("coarse", "coarse grid", [_coarse_grid()], None, None, 2, False, False),
     )
     stack, coverage, warnings = handlers._build_terrain(snapshot)
     assert stack.source_ids == ("fine", "coarse") and len(coverage) == 2
@@ -1264,8 +1299,8 @@ def test_the_height_step_at_a_seam_is_reported_as_mean_and_95th_percentile():
 def test_sources_that_do_not_meet_have_no_seam_and_a_skipped_source_is_still_reported():
     far = TerrainGrid(-740000.0, -1020000.0, 30.0, 30.0, np.full((20, 20), 300.0))
     snapshot = _snapshot(
-        ("fine", "fine", [_fine_points()], None, None, 1, False),
-        ("far", "far grid", [far], None, None, 2, False),
+        ("fine", "fine", [_fine_points()], None, None, 1, False, False),
+        ("far", "far grid", [far], None, None, 2, False, False),
         (
             "thin",
             "thin",
@@ -1273,6 +1308,7 @@ def test_sources_that_do_not_meet_have_no_seam_and_a_skipped_source_is_still_rep
             None,
             None,
             3,
+            False,
             False,
         ),
     )

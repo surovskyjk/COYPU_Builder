@@ -370,15 +370,24 @@ class TerrainStack:
     """Surfaces by precedence, highest first: the height at a point is the first one that has data there.
 
     `source_ids`, when given, names the source of each surface (one per surface, same order), so that
-    `heights_and_source` can say which source answered."""
+    `heights_and_source` can say which source answered. `surface_model`, when given, marks each surface that
+    is a surface model (F57). Without it no surface is one, and the tuple is filled with False to match
+    `surfaces`."""
 
     surfaces: tuple[TerrainSurface, ...]
     source_ids: tuple[str, ...] = ()
+    surface_model: tuple[bool, ...] = ()
 
     def __post_init__(self) -> None:
         if self.source_ids and len(self.source_ids) != len(self.surfaces):
             raise ValueError(
                 f"source_ids names {len(self.source_ids)} sources for {len(self.surfaces)} surfaces"
+            )
+        if not self.surface_model:
+            object.__setattr__(self, "surface_model", (False,) * len(self.surfaces))
+        elif len(self.surface_model) != len(self.surfaces):
+            raise ValueError(
+                f"surface_model flags {len(self.surface_model)} for {len(self.surfaces)} surfaces"
             )
 
     def warm_up(self) -> None:
@@ -388,13 +397,17 @@ class TerrainStack:
             if warm is not None:
                 warm()
 
-    def heights_and_source(self, e, n) -> tuple[np.ndarray, np.ndarray]:
+    def heights_and_source(self, e, n, *, bare_ground: bool = False) -> tuple[np.ndarray, np.ndarray]:
         """`(heights, source_index)`: the first surface's value at each point and the index of that surface in
-        `surfaces` (`NO_SOURCE`, -1, where none has data). Both are shaped like the broadcast inputs."""
+        `surfaces` (`NO_SOURCE`, -1, where none has data). Both are shaped like the broadcast inputs.
+        With `bare_ground`, the surfaces marked as surface models are skipped (earthworks, F57); the indices
+        still index `surfaces`."""
         e_flat, n_flat, shape = _query(e, n)
         out = np.full(e_flat.shape, np.nan)
         index = np.full(e_flat.shape, NO_SOURCE, dtype=np.int16)
         for number, surface in enumerate(self.surfaces):
+            if bare_ground and self.surface_model[number]:
+                continue
             missing = np.nonzero(np.isnan(out))[0]
             if missing.size == 0:
                 break
@@ -476,6 +489,7 @@ class StackSource:
     from_provider: bool = (
         False  # a generic provider (ADR 0009 decision 6): a user's own file beats it in a band
     )
+    surface_model: bool = False  # a surface model: display terrain only, skipped by bare-ground queries (F57)
 
 
 def order_sources(sources: Sequence[StackSource]) -> list[StackSource]:
@@ -487,7 +501,11 @@ def order_sources(sources: Sequence[StackSource]) -> list[StackSource]:
 def stack_from_sources(sources: Sequence[StackSource]) -> TerrainStack:
     """A `TerrainStack` of `sources` in precedence order, remembering which source each surface is."""
     ordered = order_sources(sources)
-    return TerrainStack(tuple(s.surface for s in ordered), tuple(s.source_id for s in ordered))
+    return TerrainStack(
+        tuple(s.surface for s in ordered),
+        tuple(s.source_id for s in ordered),
+        tuple(s.surface_model for s in ordered),
+    )
 
 
 def surface_for_source(

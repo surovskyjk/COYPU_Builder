@@ -16,9 +16,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import laspy
 import msgspec
 import numpy as np
 import pytest
+from scipy.spatial import cKDTree
 from websockets.asyncio.client import connect
 
 from coypu_builder import PROTOCOL_VERSION
@@ -49,6 +51,7 @@ from coypu_builder.domain.geometry import (
 from coypu_builder.domain.lrs import frames
 from coypu_builder.domain.sources import ImportSettings, SourceKind
 from coypu_builder.domain.terrain_surface import NO_SOURCE, TerrainStack, tin_from_points
+from coypu_builder.io.mesh.terrain_tiles import lattice
 from coypu_builder.io.providers import cache as provider_cache
 from coypu_builder.io.providers import register_builtin_providers
 from coypu_builder.io.sources.runner import run_provider_import
@@ -57,7 +60,7 @@ from coypu_builder.protocol.messages import Envelope, FormationTemplateDTO
 from coypu_builder.server import handlers, serve
 from coypu_builder.server.codec import decode_frame, encode_frame, unpack_blob
 from coypu_builder.server.session import ProjectState, SourceEntry, TerrainCache
-from fixtures.synthetic.terrain import sample_irregular
+from fixtures.synthetic.terrain import sample_irregular, surface
 
 FIXTURES = Path(__file__).parent / "fixtures"
 KRALUPY_XML = FIXTURES / "kralupy" / "kralupy_neratovice_092.xml"
@@ -591,6 +594,178 @@ async def test_a_project_without_terrain_has_no_ground_anywhere(server_url, kral
         assert reply.result["no_ground_spans"] == [[start, start + 100.0]]
         flags = unpack_blob(tail, next(ref for ref in reply.blobs if ref.name == "flags"))
         assert (flags == FLAG_NO_GROUND).all()
+
+
+def _corridor_points(
+    alignment, start: float, stop: float, width: float, spacing: float, seed: int, lift: float = 0.0
+) -> np.ndarray:
+    """Synthetic terrain within `width` of the centreline, kept only where the nearest centreline point lies
+    between stations `start` and `stop`, so a stretch of the line has data and the rest has none. `lift`
+    raises the surface, as a surface model stands above the ground."""
+    dense = np.arange(alignment.station_start, alignment.station_start + 1200.0, 1.0)
+    centre = frames(alignment, dense, pivot=RotationPivot.CENTERLINE).origin[:, :2]
+    low, high = centre.min(axis=0) - width, centre.max(axis=0) + width
+    points = sample_irregular((low[0], low[1], high[0], high[1]), spacing, seed)
+    distance, nearest = cKDTree(centre).query(points[:, :2])
+    station = dense[nearest]
+    keep = (distance <= width) & (station >= start) & (station <= stop)
+    points = points[keep]
+    points[:, 2] += lift
+    return points
+
+
+def _las(path: Path, points: np.ndarray) -> str:
+    header = laspy.LasHeader(point_format=6, version="1.4")
+    header.scales = [1e-6] * 3
+    header.offsets = [float(np.round(points[:, 0].mean())), float(np.round(points[:, 1].mean())), 150.0]
+    las = laspy.LasData(header)
+    las.x, las.y, las.z = points[:, 0], points[:, 1], points[:, 2]
+    las.write(path)
+    return str(path)
+
+
+async def _project(ws, terrain: list[tuple[str, dict[str, Any]]]) -> tuple[str, list[str]]:
+    """A new project with the Kralupy line and the terrain files, imported in order.
+
+    Returns the alignment id and the source ids."""
+    created, _tail = await _call(ws, "p", "project.new", {"crs": "EPSG:5514"})
+    assert created.type == "res", created.error
+    imported, _tail = await _call(ws, "i", "import.landxml", {"path": str(KRALUPY_XML)})
+    assert imported.type == "res", imported.error
+    source_ids = []
+    for number, (path, settings) in enumerate(terrain):
+        run, _tail = await _call(
+            ws,
+            f"t{number}",
+            "import.run",
+            {"paths": [path], "kind": "terrain", "settings": settings},
+        )
+        assert run.type == "res", run.error
+        source_ids.append(run.result["source_id"])
+    return imported.result["alignments"][0]["alignment_id"], source_ids
+
+
+async def _profile(ws, alignment_id: str, start: float, stop: float):
+    reply, tail = await _call(
+        ws,
+        "gp",
+        "alignment.ground_profile",
+        {"alignment_id": alignment_id, "spacing_m": 10.0, "station_from": start, "station_to": stop},
+    )
+    assert reply.type == "res", reply.error
+    return reply.result, {ref.name: unpack_blob(tail, ref) for ref in reply.blobs}
+
+
+async def test_ground_profile_flags_surface_model_only_stations(server_url, tmp_path, kralupy):
+    """F57, over the wire. Bare ground covers the first 300 m of the line, and a surface model 5 m higher
+    covers the first kilometre. Past 320 m there is no bare ground under the centreline but a surface model
+    is there: flag 9, no ground, zero areas and the surface model's index. The totals and spans equal those of
+    the same project without the surface model. A terrain tile over the gap still shows the surface model."""
+    alignment = kralupy.alignment
+    start = alignment.station_start
+    bare = _las(tmp_path / "bare.las", _corridor_points(alignment, start, start + 300.0, 100.0, 6.0, seed=1))
+    model = _las(
+        tmp_path / "model.las",
+        _corridor_points(alignment, start, start + 1100.0, 150.0, 10.0, seed=2, lift=5.0),
+    )
+    bare_settings = {"horizontal_crs": "EPSG:5514"}
+    async with connect(server_url) as ws:
+        await _call(ws, "h", "session.hello", {"client": "pytest", "client_version": "0"})
+        alone_id, _ = await _project(ws, [(bare, bare_settings)])
+        without, without_blobs = await _profile(ws, alone_id, start, start + 1000.0)
+        both_id, (bare_id, model_id) = await _project(
+            ws, [(bare, bare_settings), (model, {**bare_settings, "surface_model": True})]
+        )
+        with_model, blobs = await _profile(ws, both_id, start, start + 1000.0)
+
+        listed, _tail = await _call(ws, "sl", "source.list")
+        listed_flags = {entry["id"]: entry["surface_model"] for entry in listed.result["sources"]}
+        assert listed_flags == {bare_id: False, model_id: True}
+        got, _tail = await _call(ws, "sg", "source.get", {"source_id": model_id})
+        assert got.result["settings"]["surface_model"] is True
+
+        stations = blobs["station"]
+        gap = stations > start + 320.0
+        near = stations <= start + 250.0
+        assert gap.any() and near.any()
+        assert (without_blobs["flags"][gap] == FLAG_NO_GROUND).all()
+        assert (blobs["flags"][gap] == FLAG_NO_GROUND | handlers.FLAG_SURFACE_MODEL).all()
+        assert np.isnan(blobs["ground_h"][gap]).all()
+        assert (blobs["cut_area"][gap] == 0.0).all() and (blobs["fill_area"][gap] == 0.0).all()
+        model_index = with_model["source_ids"].index(model_id)
+        assert (blobs["source"][gap] == model_index).all()
+        for name in ("flags", "ground_h", "source"):
+            assert np.array_equal(blobs[name][near], without_blobs[name][near], equal_nan=True), name
+        assert with_model["cut_volume_m3"] == without["cut_volume_m3"]
+        assert with_model["fill_volume_m3"] == without["fill_volume_m3"]
+        assert with_model["no_ground_spans"] == without["no_ground_spans"]
+        spans = with_model["no_ground_spans"]
+        assert spans and spans[0][0] <= start + 320.0 and spans[-1][1] >= start + 1000.0
+
+        centre = frames(alignment, np.array([start + 800.0]), pivot=RotationPivot.CENTERLINE).origin[0]
+        ix, iy = int(np.floor(centre[0] / 512.0)), int(np.floor(centre[1] / 512.0))
+        listing, _tail = await _call(ws, "tl", "terrain.tiles", {"level": 0})
+        assert listing.type == "res", listing.error
+        assert {"ix": ix, "iy": iy} in [{"ix": t["ix"], "iy": t["iy"]} for t in listing.result["tiles"]]
+        tile, tile_tail = await _call(
+            ws,
+            "tt",
+            "terrain.tile",
+            {"level": 0, "ix": ix, "iy": iy, "revision": listing.result["revision"]},
+        )
+        assert tile.type == "res", tile.error
+        heights = unpack_blob(tile_tail, tile.blobs[0])
+        info, _tail = await _call(ws, "pg", "project.get")
+        base_height = info.result["base_point"]["height"]  # the tile origin is relative to the base point
+        absolute = tile.result["tile_origin"][1] + base_height + heights
+        e, n = lattice(0, ix, iy)
+        valid = np.isfinite(absolute)
+        assert valid.sum() > 1000
+        np.testing.assert_allclose(absolute[valid], (surface(e, n) + 5.0)[valid], rtol=0.0, atol=0.1)
+
+
+async def test_flag_8_comes_only_with_flag_1_when_the_model_outranks_the_bare_source(
+    server_url, tmp_path, kralupy
+):
+    """F57, the review's case, over the wire. A finer surface model (3 m, 5 m higher) outranks a coarser
+    bare-ground source (10 m) wherever both cover the centreline. Bare ground covers the first 300 m and the
+    model the first 700 m. Flag 8 comes only on the flag-1 stations past 300 m: the bare-ground rows the model
+    covers too keep flags 0 and the bare source's index, and every row with flag 8 also has flag 1."""
+    alignment = kralupy.alignment
+    start = alignment.station_start
+    bare = _las(
+        tmp_path / "bare_coarse.las",
+        _corridor_points(alignment, start, start + 300.0, 100.0, 10.0, seed=3),
+    )
+    model = _las(
+        tmp_path / "model_fine.las",
+        _corridor_points(alignment, start, start + 700.0, 150.0, 3.0, seed=4, lift=5.0),
+    )
+    bare_settings = {"horizontal_crs": "EPSG:5514"}
+    async with connect(server_url) as ws:
+        await _call(ws, "h", "session.hello", {"client": "pytest", "client_version": "0"})
+        both_id, (bare_id, model_id) = await _project(
+            ws, [(bare, bare_settings), (model, {**bare_settings, "surface_model": True})]
+        )
+        with_model, blobs = await _profile(ws, both_id, start, start + 1000.0)
+
+    stations = blobs["station"]
+    flags = blobs["flags"]
+    ground = blobs["ground_h"]
+    source = blobs["source"]
+    surface = (flags & handlers.FLAG_SURFACE_MODEL) != 0
+    bare_rows = np.isfinite(ground)
+    assert bare_rows.any() and surface.any()
+    no_8 = (flags & handlers.FLAG_SURFACE_MODEL) == 0
+    has_1 = (flags & FLAG_NO_GROUND) != 0
+    assert (no_8 | has_1).all(), "flag 8 without flag 1"
+    assert (flags[bare_rows] == 0).all(), "a bare-ground row carries a flag"
+    assert (source[bare_rows] == with_model["source_ids"].index(bare_id)).all()
+    assert (flags[surface] == FLAG_NO_GROUND | handlers.FLAG_SURFACE_MODEL).all()
+    assert (source[surface] == with_model["source_ids"].index(model_id)).all()
+    assert np.isnan(ground[surface]).all()
+    assert stations[surface].min() >= start + 300.0 - 1e-6
+    assert stations[bare_rows].max() <= start + 300.0 + 1e-6
 
 
 async def test_session_ping_keeps_answering_while_the_ground_profile_samples(

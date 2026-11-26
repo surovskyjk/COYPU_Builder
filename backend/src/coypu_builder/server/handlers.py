@@ -24,9 +24,12 @@ from coypu_builder.domain.crs import (
     quaternion_from_matrix,
 )
 from coypu_builder.domain.earthworks import (
+    FLAG_NO_GROUND,
     FormationTemplate,
+    GroundProfile,
     check_work_budget,
     ground_profile,
+    section_line,
     station_grid,
 )
 from coypu_builder.domain.geometry.cant import RotationPivot
@@ -680,6 +683,7 @@ def _settings_from_dto(dto: ImportSettingsDTO) -> ImportSettings:
             point_classes=None if dto.point_classes is None else tuple(dto.point_classes),
             display_resolution_m=dto.display_resolution_m,
             nodata=dto.nodata,
+            surface_model=dto.surface_model,
         )
     except ValueError as exc:
         raise ProtocolError(ErrorCode.BAD_PARAMS, str(exc)) from exc
@@ -695,6 +699,7 @@ def _settings_to_dto(settings: ImportSettings) -> ImportSettingsDTO:
         point_classes=settings.point_classes,
         display_resolution_m=settings.display_resolution_m,
         nodata=settings.nodata,
+        surface_model=settings.surface_model,
     )
 
 
@@ -1010,6 +1015,7 @@ def handle_source_list(session: Session, params: dict[str, Any] | None) -> Handl
             imported_at=entry.dataset.imported_at,
             attribution=entry.dataset.attribution,
             licence=entry.dataset.licence,
+            surface_model=entry.dataset.settings.surface_model,
         )
         for entry in project.sources.values()
     )
@@ -1269,10 +1275,36 @@ def _profile_stations(alignment, req: GroundProfileParams) -> np.ndarray:
     return station_grid(start, end, req.spacing_m)
 
 
+FLAG_SURFACE_MODEL = 8  # bit 8 (F57): with flag 1, a surface model covers the centreline; earthworks skip it
+
+
+def _surface_model_marks(
+    stack: TerrainStack, alignment, stations: np.ndarray, profile: GroundProfile
+) -> tuple[np.ndarray, np.ndarray]:
+    """The profile's `source` and `flags`, with each flag-1 station under which a surface model answers at the
+    centreline given flag 8 and that surface model's index. The areas and volumes stay those of flag 1: the
+    earthworks sampled bare ground only (F57)."""
+    source = profile.source.copy()
+    flags = profile.flags.copy()
+    model = np.asarray(stack.surface_model, dtype=bool)
+    gap = np.nonzero(flags & FLAG_NO_GROUND)[0]
+    if gap.size == 0 or not model.any():
+        return source, flags
+    centre_e, centre_n, _across_e, _across_n, _rail_h = section_line(alignment, stations[gap])
+    heights, index = stack.heights_and_source(centre_e, centre_n)
+    covered = np.isfinite(heights) & (index >= 0)
+    covered[covered] = model[index[covered]]
+    rows = gap[covered]
+    flags[rows] |= FLAG_SURFACE_MODEL
+    source[rows] = index[covered]
+    return source, flags
+
+
 async def handle_alignment_ground_profile(session: Session, params: dict[str, Any] | None) -> HandlerResult:
     """Read-only, off the event loop. The terrain stack is the analysis surface of the revision current when
     the request was ordered (`_ensure_terrain`); the sampling runs in a worker thread (ADR 0003 addendum). The
-    work budget is checked before the terrain is built or queried."""
+    work budget is checked before the terrain is built or queried. Earthworks sample bare ground only; a
+    station that only a surface model covers is flag 1 with flag 8 (F57)."""
     project = _require_project(session)
     req = _convert(params, GroundProfileParams)
     entry = project.alignments.get(req.alignment_id)
@@ -1298,15 +1330,18 @@ async def handle_alignment_ground_profile(session: Session, params: dict[str, An
     )
 
     def work() -> HandlerResult:
-        profile = ground_profile(alignment, stack.heights_and_source, stations, template)
+        profile = ground_profile(
+            alignment, lambda e, n: stack.heights_and_source(e, n, bare_ground=True), stations, template
+        )
+        source, flags = _surface_model_marks(stack, alignment, stations, profile)
         blobs = {
             "station": profile.station,
             "rail_h": profile.rail_h,
             "ground_h": profile.ground_h,
-            "source": np.where(profile.source < 0, 255, profile.source).astype(np.uint8),
+            "source": np.where(source < 0, 255, source).astype(np.uint8),
             "cut_area": profile.cut_area,
             "fill_area": profile.fill_area,
-            "flags": profile.flags,
+            "flags": flags,
         }
         result = GroundProfileResult(
             alignment_id=req.alignment_id,
@@ -1358,10 +1393,11 @@ def _clip_test(coverage):
 
 
 def _terrain_snapshot(project: ProjectState) -> tuple[tuple, ...]:
-    """`(source_id, name, payloads, clip polygon, resolution_m, recency, from_provider)` of each terrain
-    source, oldest first: what a worker thread builds from, taken on the event loop so an import cannot change
-    the dicts under it. `recency` is the import order; precedence is decided from it, the resolution and
-    `from_provider` in `_build_terrain` (T-133, ADR 0009 decision 6)."""
+    """`(source_id, name, payloads, clip polygon, resolution_m, recency, from_provider, surface_model)` of
+    each terrain source, oldest first: what a worker thread builds from, taken on the event loop so an import
+    cannot change the dicts under it. `recency` is the import order; precedence is decided from it, the
+    resolution and `from_provider` in `_build_terrain` (T-133, ADR 0009 decision 6). `surface_model` is the
+    dataset's setting (F57)."""
     snapshot = []
     for recency, (source_id, entry) in enumerate(project.sources.items()):
         if entry.dataset.kind != SourceKind.TERRAIN:
@@ -1382,6 +1418,7 @@ def _terrain_snapshot(project: ProjectState) -> tuple[tuple, ...]:
                     entry.resolution_m,
                     recency,
                     from_provider,
+                    entry.dataset.settings.surface_model,
                 )
             )
     return tuple(snapshot)
@@ -1455,7 +1492,7 @@ def _build_terrain(snapshot) -> tuple[TerrainStack, tuple, tuple[str, ...]]:
     names: dict[str, str] = {}
     resolutions: dict[str, float | None] = {}
     areas: dict[str, object | None] = {}
-    for source_id, name, payloads, clip, resolution, recency, from_provider in snapshot:
+    for source_id, name, payloads, clip, resolution, recency, from_provider, surface_model in snapshot:
         try:
             surface = surface_for_source(payloads, inside=_clip_test(clip))
         except ValueError as exc:
@@ -1463,7 +1500,7 @@ def _build_terrain(snapshot) -> tuple[TerrainStack, tuple, tuple[str, ...]]:
             continue
         if resolution is None:
             resolution = source_resolution_m(payloads)  # a source that was set without an import
-        sources.append(StackSource(source_id, surface, resolution, recency, from_provider))
+        sources.append(StackSource(source_id, surface, resolution, recency, from_provider, surface_model))
         names[source_id], resolutions[source_id] = name, resolution
         area = _source_coverage(clip, surface.bounds())
         areas[source_id] = area

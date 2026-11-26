@@ -21,9 +21,11 @@ from coypu_builder.domain.terrain import TerrainGrid, TerrainPoints, TerrainTin
 from coypu_builder.domain.terrain_surface import (
     DEFAULT_MAX_EDGE_M,
     GridSurface,
+    StackSource,
     TerrainStack,
     TinSurface,
     _TriangleLocator,
+    stack_from_sources,
     surface_for_source,
     tin_from_points,
 )
@@ -564,3 +566,39 @@ def test_a_stack_holes_in_the_first_surface_fall_through():
     e = np.array([-746600.0 + 2.5 * 20.0 + 3.0, -746600.0 + 8.5 * 20.0])
     n = np.array([-1024700.0 - 2.5 * 20.0 - 3.0, -1024700.0 - 6.5 * 20.0])
     assert stack.heights(e, n).tolist() == [7.0, holed[6, 8]]
+
+
+def test_bare_ground_skips_surface_models():
+    """F57. A bare-ground TIN at 100 m over x < 50 and a surface model 5 m higher everywhere. With
+    `bare_ground` the gap (x >= 50) is NaN with index -1, and the TIN answers where it covers with its own
+    index. The default call gives the surface model's 105 m in the gap, index 1, as before. Indices still
+    index `surfaces`."""
+    bare_points = sample_irregular((0.0, 0.0, 50.0, 100.0), 4.0, seed=3)
+    bare_points[:, 2] = 100.0
+    bare = tin_from_points(bare_points)
+    model = GridSurface(TerrainGrid(-100.0, 200.0, 10.0, 10.0, np.full((30, 40), 105.0)))
+    stack = TerrainStack((bare, model), ("bare", "model"), (False, True))
+    assert stack.surface_model == (False, True)
+    e = np.array([10.0, 30.0, 60.0, 80.0])
+    n = np.full(4, 50.0)
+
+    heights, index = stack.heights_and_source(e, n, bare_ground=True)
+    np.testing.assert_allclose(heights[:2], [100.0, 100.0], rtol=0.0, atol=1e-9)
+    assert index[:2].tolist() == [0, 0]
+    assert np.isnan(heights[2:]).all() and index[2:].tolist() == [-1, -1]
+
+    heights, index = stack.heights_and_source(e, n)
+    np.testing.assert_allclose(heights, [100.0, 100.0, 105.0, 105.0], rtol=0.0, atol=1e-9)
+    assert index.tolist() == [0, 0, 1, 1]
+    np.testing.assert_array_equal(stack.heights(e, n), heights)
+    assert TerrainStack((bare, model)).surface_model == (False, False)
+    with pytest.raises(ValueError, match="surface_model"):
+        TerrainStack((bare, model), surface_model=(True,))
+
+
+def test_stack_from_sources_keeps_each_surface_model_flag_with_its_surface():
+    grid = GridSurface(TerrainGrid(-100.0, 200.0, 10.0, 10.0, np.full((30, 40), 105.0)))
+    model = StackSource("model", grid, 10.0, 1, surface_model=True)
+    bare = StackSource("bare", grid, 4.0, 2)
+    stack = stack_from_sources([model, bare])
+    assert stack.source_ids == ("bare", "model") and stack.surface_model == (False, True)

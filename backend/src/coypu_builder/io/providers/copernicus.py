@@ -403,6 +403,7 @@ class CopernicusGlo30Provider:
     attribution = ATTRIBUTION
     notices = (LIABILITY_NOTICE,)  # shown with the attribution wherever this source's data is (T-134)
     format_id = "geotiff"
+    surface_model = True  # the import records it so whatever the request sent (F57)
 
     def __init__(self) -> None:
         self.last_stats: dict[str, Any] = {}  # of the latest fetch: requests, bytes, windows, cache hits
@@ -443,7 +444,12 @@ class CopernicusGlo30Provider:
             declared_crs=HORIZONTAL_CRS,
             extent=bounds,
             counts={"tiles": len(tiles)},
-            suggested=ImportSettings(horizontal_crs=HORIZONTAL_CRS, vertical_crs=VERTICAL_CRS, clip=clip),
+            suggested=ImportSettings(
+                horizontal_crs=HORIZONTAL_CRS,
+                vertical_crs=VERTICAL_CRS,
+                clip=clip,
+                surface_model=self.surface_model,
+            ),
             licence_hint=self.licence,
             warnings=tuple(warnings),
         )

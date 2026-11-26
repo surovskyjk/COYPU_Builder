@@ -648,6 +648,8 @@ def run_provider_import(
     normal = _normalised_query(provider, query)
     if settings.clip is None and "clip" in normal:
         settings = replace(settings, clip=clip_from_query(normal, 250.0))
+    if getattr(provider, "surface_model", False):  # the flag describes the data, not a choice (F57)
+        settings = replace(settings, surface_model=True)
     directory = Path(cache_dir) if cache_dir is not None else provider_cache.provider_cache_dir(provider_id)
     cache = provider_cache.ProviderCache(directory)
     pending = f"pending:{uuid4().hex}"

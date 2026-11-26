@@ -44,15 +44,21 @@ const RAIL_WIDTH_PX := 3.0
 const CURSOR_WIDTH_PX := 1.5
 const FORMATION_DEPTH_M := 0.8
 const FLAG_NO_GROUND := 1
+## Flag 8 comes only with flag 1: the row has no bare ground, but a surface model covers it (T-137 Part C).
+const FLAG_SURFACE_MODEL := 8
 const SOURCE_NONE := 255
 ## Row states: what [method row_states] packs into one byte per row, and the run ends [method sample_rows] keeps.
 const STATE_GROUND := 1
 const STATE_CUT := 2
 const STATE_FILL := 4
 ## A polygon with less area than this, or a vertex this close to the one before it, is dropped (metres for the data, pixels for
-## the drawing).
+## the drawing). At stations of about 13 000 m the drawing's float32 vertices lose slivers thinner than about 1e-4 px, and the engine
+## refuses a polygon it cannot triangulate, so the pixel floor is 1e-2 px².
 const AREA_MIN_DATA := 1e-6
-const AREA_MIN_PIXELS := 1e-6
+const AREA_MIN_PIXELS := 1e-2
+## A drawn polygon whose area divided by its x-extent (its mean thickness) is under this is a sliver a few millimetres thick at the
+## drawing's scale, and is dropped (see [method shading_pixels]).
+const THICKNESS_MIN_PIXELS := 1e-3
 const EPS_DATA := 1e-9
 const EPS_PIXELS := 1e-4
 ## The no-ground label: its padding inside a span, its gap beside one, its plate's padding and alpha, and the clearance of two labels.
@@ -68,12 +74,15 @@ const NO_ALIGNMENT_TEXT := "Import an alignment to see its ground profile"
 const LOADING_TEXT := "Loading the ground profile…"
 const FAILED_TEXT := "The ground profile could not be computed"
 const NO_TERRAIN_TEXT := "No terrain covers this alignment — import terrain to see the ground"
+const SURFACE_ONLY_TEXT := "Only a surface model covers this alignment (%s) — import bare-ground terrain for cut and fill"
+const SURFACE_MODEL_FALLBACK_NAME := "surface model"
 const NO_GROUND_LABEL := "no ground data (e.g. water)"
 const NO_GROUND_READOUT := "no ground data"
 const LEGEND_CUT := "Cut"
 const LEGEND_FILL := "Fill"
 const LEGEND_NO_GROUND := "No ground data"
 const LEGEND_NO_GROUND_TOOLTIP := "No ground data, e.g. water under a bridge"
+const SURFACE_ONLY_READOUT := "surface model only"
 const IDEALISED_TEXT := "Vertical profile is idealised in this dataset"
 const RETRY_TEXT := "Retry"
 const MINUS := "−"
@@ -111,12 +120,21 @@ var _draw_calls := 0
 var _drawn_texts: Array[Rect2] = []
 var _drawn_strings := PackedStringArray()
 var _drawn_plates: Array[Rect2] = []
+## Bumped with each stored profile; the vertical range is memoised on it (see [method _view_vertical]).
+var _profile_serial := 0
+var _vertical_key: Array = []
+var _vertical_memo := Vector2.ZERO
+var _vertical_computes := 0
+## The vertices the last drawing handed to the engine as shading (see [method shading_vertex_count]).
+var _shading_vertices := 0
 
 var _controls: HFlowContainer
 var _window_choice: OptionButton
 var _exaggeration_choice: OptionButton
 var _factor_label: Label
 var _legend_items: Array[Control] = []
+## The legend's swatches by the theme colour key they show, so a theme change can refresh them.
+var _legend_swatches := {}
 var _readout: VBoxContainer
 var _readout_labels := {}
 var _idealised_note: Label
@@ -207,6 +225,7 @@ func show_profile(data: Dictionary, alignment_id: String) -> void:
 
 func _store_profile(data: Dictionary) -> void:
 	_profile = data
+	_profile_serial += 1
 	_states = PackedByteArray()
 	if not data.is_empty():
 		_states = row_states(data["flags"], data["ground_h"], data["cut_area"], data["fill_area"])
@@ -291,6 +310,21 @@ func factor_label() -> Label:
 ## The legend's items, in order (a swatch and a label each); they sit in the controls row with the selectors.
 func legend_items() -> Array:
 	return _legend_items
+
+
+## The row of the selectors and the legend: its height is the height of the rows it wraps to.
+func controls_row() -> Control:
+	return _controls
+
+
+## How many times the vertical range was computed: a cursor move and the redraw after it compute it once.
+func vertical_computes() -> int:
+	return _vertical_computes
+
+
+## The vertices of the shading the last drawing passed to the engine: the drawn rows, not the window's, bound it.
+func shading_vertex_count() -> int:
+	return _shading_vertices
 
 
 ## The vertical factor the drawing shows now: the chosen one, or the one the fitted range gives (0 when nothing is shown).
@@ -424,11 +458,12 @@ static func factor_text(chosen: float, span: float, window_m: float, plot_w: flo
 
 
 ## The readout at `station`: the rows either side of it, interpolated linearly. The ground and the difference are NaN, and
-## `has_ground` false, unless both rows have ground. The source is that of the nearer row.
+## `has_ground` false, unless both rows have ground. The source is that of the nearer row, and `surface_model` says whether that
+## row is covered by a surface model only (flag 8), which is what the ground line then reads.
 static func readout_at(profile: Dictionary, station: float) -> Dictionary:
 	var out := {
 		"station": station, "rail_h": NAN, "ground_h": NAN, "difference": NAN, "has_ground": false,
-		"cut_area": 0.0, "fill_area": 0.0, "source_name": "", "row": -1,
+		"cut_area": 0.0, "fill_area": 0.0, "source_name": "", "row": -1, "surface_model": false,
 	}
 	var stations: PackedFloat64Array = profile.get("station", PackedFloat64Array())
 	var count := stations.size()
@@ -457,19 +492,10 @@ static func readout_at(profile: Dictionary, station: float) -> Dictionary:
 		out["has_ground"] = true
 	var nearer := i if t < 0.5 else j
 	out["row"] = nearer
+	out["surface_model"] = not ground_ok and _surface_flagged(flags, nearer)
 	if nearer < sources.size() and sources[nearer] != SOURCE_NONE and sources[nearer] < names.size():
 		out["source_name"] = String(names[sources[nearer]])
 	return out
-
-
-## Maximal runs of rows with a value and no no-ground flag, as an array of PackedVector2Array in (station, value) data
-## coordinates, for the rows `first` to `last`. A NaN value or a flagged row ends a run, so no run holds a gap.
-static func valid_runs(stations: PackedFloat64Array, values: PackedFloat64Array, flags: PackedByteArray,
-		first: int, last: int) -> Array:
-	var indices := PackedInt32Array()
-	for i in range(maxi(first, 0), mini(last, stations.size() - 1) + 1):
-		indices.append(i)
-	return sampled_runs(stations, values, flags, indices)
 
 
 ## The maximal runs of usable values (a value and no no-ground flag) among the rows `indices`, ascending, as (station, value)
@@ -609,40 +635,14 @@ static func _clip_half_plane(polygon: PackedVector2Array, edge: float, keep_abov
 	return out
 
 
-## The polygons of one segment from (s0, g0) to (s1, g1) between the formation levels f0 and f1, on the cut side (ground above
-## the formation) or the fill side (below it). The segment is split where the ground crosses the formation, so each polygon
-## lies on one side. Each polygon is four (station, height) points, less any repeated vertex; a degenerate piece is dropped.
-static func band_polygons(s0: float, g0: float, s1: float, g1: float, f0: float, f1: float, cut: bool) -> Array:
-	var d0 := g0 - f0
-	var d1 := g1 - f1
-	var breaks := PackedFloat64Array([0.0, 1.0])
-	if d0 * d1 < 0.0:
-		breaks = PackedFloat64Array([0.0, d0 / (d0 - d1), 1.0])
-	var polygons: Array = []
-	for k in breaks.size() - 1:
-		var ta := breaks[k]
-		var tb := breaks[k + 1]
-		var mid_d := lerpf(d0, d1, (ta + tb) * 0.5)
-		if (cut and mid_d <= 0.0) or (not cut and mid_d >= 0.0):
-			continue
-		var sa := lerpf(s0, s1, ta)
-		var sb := lerpf(s0, s1, tb)
-		var piece := clean_polygon(PackedVector2Array([
-			Vector2(sa, lerpf(f0, f1, ta)), Vector2(sa, lerpf(g0, g1, ta)),
-			Vector2(sb, lerpf(g0, g1, tb)), Vector2(sb, lerpf(f0, f1, tb)),
-		]), AREA_MIN_DATA, EPS_DATA)
-		if not piece.is_empty():
-			polygons.append(piece)
-	return polygons
-
-
-## One polygon per maximal run of rows [first, last] where the ground is on the cut side of the formation (`cut`) or the fill
-## side, between the ground and the formation `rail - depth`. A run is cut where the ground crosses the formation, so the
+## One polygon per maximal run of the rows `indices` (ascending) where the ground is on the cut side of the formation (`cut`) or
+## the fill side, between the ground and the formation `rail - depth`. Consecutive indices are joined by a straight segment, so
+## the rows may be a sample of the window (see [method sample_rows]). A run is cut where the ground crosses the formation, so the
 ## polygon's edges are the ground and the formation between the crossings. Degenerate runs are dropped.
 static func band_runs(stations: PackedFloat64Array, ground: PackedFloat64Array, flags: PackedByteArray,
-		rail: PackedFloat64Array, depth: float, first: int, last: int, cut: bool) -> Array:
+		rail: PackedFloat64Array, depth: float, indices: PackedInt32Array, cut: bool) -> Array:
 	var polygons: Array = []
-	for span: Array in _band_spans(stations, ground, flags, rail, depth, first, last, cut):
+	for span: Array in _band_spans(stations, ground, flags, rail, depth, indices, cut):
 		var top: PackedVector2Array = span[0]
 		var bottom: PackedVector2Array = span[1]
 		var ring := top.duplicate()
@@ -657,19 +657,21 @@ static func band_runs(stations: PackedFloat64Array, ground: PackedFloat64Array, 
 ## The [top, bottom] point lists of each run of [band_runs]: the ground (or the formation, on the fill side) and the formation,
 ## at the crossings and the rows of the run.
 static func _band_spans(stations: PackedFloat64Array, ground: PackedFloat64Array, flags: PackedByteArray,
-		rail: PackedFloat64Array, depth: float, first: int, last: int, cut: bool) -> Array:
+		rail: PackedFloat64Array, depth: float, indices: PackedInt32Array, cut: bool) -> Array:
 	var spans: Array = []
 	var top := PackedVector2Array()
 	var bottom := PackedVector2Array()
 	var side := 1.0 if cut else -1.0
-	for i in range(maxi(first, 0), mini(last, stations.size() - 2) + 1):
+	for k in maxi(indices.size() - 1, 0):
+		var i := indices[k]
+		var i1 := indices[k + 1]
 		var s0 := stations[i]
-		var s1 := stations[i + 1]
+		var s1 := stations[i1]
 		var g0 := ground[i]
-		var g1 := ground[i + 1]
+		var g1 := ground[i1]
 		var f0 := rail[i] - depth
-		var f1 := rail[i + 1] - depth
-		if is_nan(g0) or is_nan(g1) or _flagged(flags, i) or _flagged(flags, i + 1):
+		var f1 := rail[i1] - depth
+		if is_nan(g0) or is_nan(g1) or _flagged(flags, i) or _flagged(flags, i1):
 			if top.size() >= 2:
 				spans.append([top, bottom])
 			top = PackedVector2Array()
@@ -740,27 +742,6 @@ static func hatch_bounds(stations: PackedFloat64Array, span_from: float, span_to
 	var before := maxi(first - 1, 0)
 	var after := mini(last + 1, count - 1)
 	return Vector2(stations[before], stations[after])
-
-
-## The step of the round ticks between `lo` and `hi`, about `target` of them: 1, 2 or 5 times a power of ten, the finest that gives
-## at most `target` + 1 ticks. Zero when the range is empty.
-static func tick_step(lo: float, hi: float, target: int) -> float:
-	var span := hi - lo
-	if not (span > 0.0) or is_inf(span):
-		return 0.0
-	var count := float(maxi(target, 1)) + 1.0
-	var raw := span / float(maxi(target, 1))
-	var magnitude: float = pow(10.0, floorf(log(raw) / log(10.0)))
-	for factor: float in [1.0, 2.0, 5.0, 10.0]:
-		var step: float = factor * magnitude
-		if span / step <= count:
-			return step
-	return 0.0
-
-
-## Round tick values between `lo` and `hi`, at the step of [method tick_step].
-static func nice_ticks(lo: float, hi: float, target: int) -> PackedFloat64Array:
-	return ticks_at(lo, hi, tick_step(lo, hi, target))
 
 
 ## The multiples of `step` between `lo` and `hi`, ascending; empty for a step of zero.
@@ -870,6 +851,10 @@ static func _flagged(flags: PackedByteArray, index: int) -> bool:
 	return index < flags.size() and (flags[index] & FLAG_NO_GROUND) != 0
 
 
+static func _surface_flagged(flags: PackedByteArray, index: int) -> bool:
+	return index < flags.size() and (flags[index] & FLAG_SURFACE_MODEL) != 0
+
+
 # --- building -----------------------------------------------------------------------------------------------------
 
 func _build() -> void:
@@ -904,11 +889,13 @@ func _build() -> void:
 	_factor_label.theme_type_variation = &"MutedLabel"
 	_factor_label.visible = false
 	_controls.add_child(_factor_label)
+	# The flow container sorts its children when it is laid out, so its minimum height is final only after that: lay out again then.
+	_controls.minimum_size_changed.connect(_on_controls_minimum_changed)
 
 	_legend_items.clear()
-	_add_legend_item(_colour("cut"), LEGEND_CUT, "")
-	_add_legend_item(_colour("fill"), LEGEND_FILL, "")
-	_add_legend_item(_colour("no_ground"), LEGEND_NO_GROUND, LEGEND_NO_GROUND_TOOLTIP)
+	_add_legend_item("cut", LEGEND_CUT, "")
+	_add_legend_item("fill", LEGEND_FILL, "")
+	_add_legend_item("no_ground", LEGEND_NO_GROUND, LEGEND_NO_GROUND_TOOLTIP)
 
 	_readout = VBoxContainer.new()
 	_readout.name = "Readout"
@@ -945,22 +932,35 @@ func _build() -> void:
 	add_child(_retry)
 
 
-func _add_legend_item(colour: Color, text: String, tooltip: String) -> void:
+func _add_legend_item(key: String, text: String, tooltip: String) -> void:
 	var row := HBoxContainer.new()
 	row.name = "Legend" + text.replace(" ", "")
 	row.add_theme_constant_override(&"separation", 4)
 	row.tooltip_text = tooltip
 	var swatch := ColorRect.new()
-	swatch.color = colour
+	swatch.color = _colour(key)
 	swatch.custom_minimum_size = Vector2(12.0, 12.0)
 	swatch.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	swatch.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(swatch)
+	_legend_swatches[key] = swatch
 	var label := Label.new()
 	label.text = text
 	row.add_child(label)
 	_legend_items.append(row)
 	_controls.add_child(row)
+
+
+## The theme arrives after the panel is built, so the swatches take their colours again with each theme change.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_THEME_CHANGED:
+		for key: String in _legend_swatches.keys():
+			var swatch: ColorRect = _legend_swatches[key]
+			swatch.color = _colour(key)
+
+
+func _on_controls_minimum_changed() -> void:
+	call_deferred(&"_layout")
 
 
 func _colour(item: String) -> Color:
@@ -1122,14 +1122,42 @@ func _update_status() -> void:
 		State.FAILED:
 			text = FAILED_TEXT if _error.is_empty() else "%s\n%s" % [FAILED_TEXT, _error]
 		State.READY:
-			text = NO_TERRAIN_TEXT if _no_ground_anywhere() else ""
+			text = _no_bare_ground_text()
 	_status.text = text
 	_status.visible = not text.is_empty()
 	_retry.visible = _state == State.FAILED
 	_layout()
 
 
-func _no_ground_anywhere() -> bool:
+## The status of a line with no bare ground in any row: the surface model's name when a surface model covers a row, else the
+## "no terrain" message. Empty when some row has bare ground.
+func _no_bare_ground_text() -> String:
+	var flags: PackedByteArray = _profile.get("flags", PackedByteArray())
+	if flags.is_empty():
+		return ""
+	var surface_row := -1
+	for i in flags.size():
+		if (flags[i] & FLAG_NO_GROUND) == 0:
+			return ""
+		if surface_row < 0 and (flags[i] & FLAG_SURFACE_MODEL) != 0:
+			surface_row = i
+	if surface_row < 0:
+		return NO_TERRAIN_TEXT
+	return SURFACE_ONLY_TEXT % _source_name_at(surface_row)
+
+
+## The name of the source of one row, or the fallback when the row names none.
+func _source_name_at(row: int) -> String:
+	var sources: PackedByteArray = _profile.get("source", PackedByteArray())
+	var names: Array = _profile.get("source_names", [])
+	if row < sources.size() and sources[row] != SOURCE_NONE and sources[row] < names.size():
+		return String(names[sources[row]])
+	return SURFACE_MODEL_FALLBACK_NAME
+
+
+## True when every row is flagged as having no ground, whatever else it carries: the hatching then covers the whole line, so
+## it is not drawn (the line is one span).
+func _every_row_flagged() -> bool:
 	var flags: PackedByteArray = _profile.get("flags", PackedByteArray())
 	if flags.is_empty():
 		return false
@@ -1153,11 +1181,20 @@ func _refresh_readout() -> void:
 	if bool(readout["has_ground"]):
 		_set_readout("ground", "Ground %.2f m" % float(readout["ground_h"]))
 		_set_readout("difference", "Ground − rail %s" % format_difference(float(readout["difference"])))
+	elif bool(readout["surface_model"]):
+		# The source line names the surface model, as it names every row's source.
+		_set_readout("ground", "Ground " + SURFACE_ONLY_READOUT)
+		_set_readout("difference", "Ground − rail —")
 	else:
 		_set_readout("ground", "Ground " + NO_GROUND_READOUT)
 		_set_readout("difference", "Ground − rail —")
-	_set_readout("cut", "Cut %.1f m²" % float(readout["cut_area"]))
-	_set_readout("fill", "Fill %.1f m²" % float(readout["fill_area"]))
+	# A row with no bare ground has no cut or fill to report, so its areas read "—", not 0.0 m².
+	if _flagged(_profile["flags"], int(readout["row"])):
+		_set_readout("cut", "Cut —")
+		_set_readout("fill", "Fill —")
+	else:
+		_set_readout("cut", "Cut %.1f m²" % float(readout["cut_area"]))
+		_set_readout("fill", "Fill %.1f m²" % float(readout["fill_area"]))
 	var source := String(readout["source_name"])
 	_set_readout("source", "Source " + (source if not source.is_empty() else "none"))
 	tooltip_text = "Terrain revision %d" % int(_profile.get("terrain_revision", -1))
@@ -1189,14 +1226,18 @@ func _refresh_factor_label() -> void:
 	_layout()
 
 
-## The vertical range the drawing uses now: the rows of the window, at the plot's size.
+## The vertical range the drawing uses now: the rows of the window, at the plot's size. It is memoised on the window, the plot, the
+## exaggeration and the stored profile, so the readout's label and the redraw that follows share one computation.
 func _view_vertical() -> Vector2:
 	var plot := plot_rect()
 	if _state != State.READY or plot.size.x <= 0.0 or plot.size.y <= 0.0:
 		return Vector2.ZERO
 	var window := _window_bounds()
-	var rows := row_range(_profile["station"], window.x, window.y)
-	return _vertical_extent(window, rows, plot)
+	var key := [window, plot.size, exaggeration(), _profile_serial]
+	if key != _vertical_key:
+		_vertical_key = key
+		_vertical_memo = _vertical_extent(window, row_range(_profile["station"], window.x, window.y), plot)
+	return _vertical_memo
 
 
 func _process(_delta: float) -> void:
@@ -1243,6 +1284,7 @@ func _draw() -> void:
 	_drawn_texts.clear()
 	_drawn_strings = PackedStringArray()
 	_drawn_plates.clear()
+	_shading_vertices = 0
 	if _state != State.READY or _profile.is_empty():
 		return
 	var plot := plot_rect()
@@ -1256,13 +1298,13 @@ func _draw() -> void:
 	var rows := row_range(stations, window.x, window.y)
 	if rows.y < rows.x:
 		return
-	var vertical := _vertical_extent(window, rows, plot)
+	var vertical := _view_vertical()
 	var depth := float(_formation_template().get("formation_depth_m", FORMATION_DEPTH_M))
 	var drawn := sample_rows(_states, rows.x, rows.y, plot.size.x)
 
 	_draw_grid(plot, window, vertical)
 	_draw_spans(plot, window, vertical, stations)
-	_draw_shading(plot, window, vertical, rows, rail, depth)
+	_draw_shading(plot, window, vertical, drawn, rail, depth)
 	for run: PackedVector2Array in sampled_runs(stations, ground, flags, drawn):
 		_draw_line(run, plot, window, vertical, _colour("ground"), GROUND_WIDTH_PX)
 	_draw_line(_line_points(stations, rail, 0.0, drawn), plot, window, vertical, _colour("rail"), RAIL_WIDTH_PX)
@@ -1281,6 +1323,7 @@ func _formation_template() -> Dictionary:
 ## The range the window's rows need: the rail, the formation and the usable ground of every row drawn, the one either side included,
 ## so that a line running out of the window stays inside the range too.
 func _vertical_extent(window: Vector2, rows: Vector2i, plot: Rect2) -> Vector2:
+	_vertical_computes += 1
 	var rail: PackedFloat64Array = _profile["rail_h"]
 	var ground: PackedFloat64Array = _profile["ground_h"]
 	var flags: PackedByteArray = _profile["flags"]
@@ -1299,17 +1342,17 @@ func _vertical_extent(window: Vector2, rows: Vector2i, plot: Rect2) -> Vector2:
 	return vertical_range(lo, hi, window.y - window.x, plot.size.x, plot.size.y, exaggeration())
 
 
-func _x_of(station: float, plot: Rect2, window: Vector2) -> float:
+static func _x_of(station: float, plot: Rect2, window: Vector2) -> float:
 	var span := maxf(window.y - window.x, 1e-9)
 	return plot.position.x + (station - window.x) / span * plot.size.x
 
 
-func _y_of(height: float, plot: Rect2, vertical: Vector2) -> float:
+static func _y_of(height: float, plot: Rect2, vertical: Vector2) -> float:
 	var span := maxf(vertical.y - vertical.x, 1e-9)
 	return plot.position.y + plot.size.y * (1.0 - (height - vertical.x) / span)
 
 
-func _to_pixels(data: PackedVector2Array, plot: Rect2, window: Vector2, vertical: Vector2) -> PackedVector2Array:
+static func _to_pixels(data: PackedVector2Array, plot: Rect2, window: Vector2, vertical: Vector2) -> PackedVector2Array:
 	var out := PackedVector2Array()
 	out.resize(data.size())
 	for i in data.size():
@@ -1317,19 +1360,47 @@ func _to_pixels(data: PackedVector2Array, plot: Rect2, window: Vector2, vertical
 	return out
 
 
-## One polygon per run of cut and per run of fill (see [method band_runs]), clipped to the window and dropped when degenerate in the
-## drawing's own units. The cut is drawn first, so a fill never covers it.
-func _draw_shading(plot: Rect2, window: Vector2, vertical: Vector2, rows: Vector2i, rail: PackedFloat64Array,
+## A band polygon of data as the drawing draws it: clipped to the window, in the plot's pixels, and empty when it is degenerate
+## there: too little area (see [constant AREA_MIN_PIXELS]) or too thin for its length (see [constant THICKNESS_MIN_PIXELS]).
+## What [method _draw_shading] hands to the engine.
+static func shading_pixels(polygon: PackedVector2Array, window: Vector2, plot: Rect2, vertical: Vector2) -> PackedVector2Array:
+	var clipped := clip_polygon_x(polygon, window.x, window.y)
+	var pixels := clean_polygon(_to_pixels(clipped, plot, window, vertical), AREA_MIN_PIXELS, EPS_PIXELS)
+	if pixels.is_empty():
+		return pixels
+	var lo := pixels[0].x
+	var hi := pixels[0].x
+	for point: Vector2 in pixels:
+		lo = minf(lo, point.x)
+		hi = maxf(hi, point.x)
+	if polygon_area(pixels) < THICKNESS_MIN_PIXELS * (hi - lo):
+		return PackedVector2Array()
+	return pixels
+
+
+## The area of a polygon by the shoelace formula, in its own units.
+static func polygon_area(points: PackedVector2Array) -> float:
+	var twice := 0.0
+	for i in points.size():
+		var a := points[i]
+		var b := points[(i + 1) % points.size()]
+		twice += a.x * b.y - b.x * a.y
+	return absf(twice) * 0.5
+
+
+## One polygon per run of cut and per run of fill (see [method band_runs]) over the drawn rows, clipped to the window. The cut is
+## drawn first, so a fill never covers it.
+func _draw_shading(plot: Rect2, window: Vector2, vertical: Vector2, drawn: PackedInt32Array, rail: PackedFloat64Array,
 		depth: float) -> void:
 	var stations: PackedFloat64Array = _profile["station"]
 	var ground: PackedFloat64Array = _profile["ground_h"]
 	var flags: PackedByteArray = _profile["flags"]
 	for cut_side: bool in [true, false]:
 		var colour := _colour("cut") if cut_side else _colour("fill")
-		for polygon: PackedVector2Array in band_runs(stations, ground, flags, rail, depth, rows.x, rows.y, cut_side):
-			var clipped := clip_polygon_x(polygon, window.x, window.y)
-			var pixels := clean_polygon(_to_pixels(clipped, plot, window, vertical), AREA_MIN_PIXELS, EPS_PIXELS)
+		for polygon: PackedVector2Array in band_runs(stations, ground, flags, rail, depth, drawn, cut_side):
+			var pixels := shading_pixels(polygon, window, plot, vertical)
 			if not pixels.is_empty():
+				_shading_vertices += pixels.size()
 				draw_colored_polygon(pixels, colour)
 
 
@@ -1354,7 +1425,7 @@ func _draw_line(points: PackedVector2Array, plot: Rect2, window: Vector2, vertic
 ## Spans of no ground in the window, hatched from the valid station before each to the one after it. Nothing is hatched when
 ## no ground exists anywhere, as then the whole line is one span.
 func _draw_spans(plot: Rect2, window: Vector2, vertical: Vector2, stations: PackedFloat64Array) -> void:
-	if _no_ground_anywhere():
+	if _every_row_flagged():
 		return
 	var font := get_theme_default_font()
 	var font_size := get_theme_default_font_size()

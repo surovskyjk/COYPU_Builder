@@ -82,6 +82,9 @@ class ImportSettings:
     point_classes: tuple[int, ...] | None = None  # point-cloud classification codes to keep; None = all
     display_resolution_m: float | None = None
     nodata: float | None = None
+    # A surface model (vegetation and buildings included), not bare ground: display terrain only. Earthworks
+    # sample bare-ground surfaces (F57). A provider declares it for its data (`surface_model` on the class).
+    surface_model: bool = False
 
     def __post_init__(self) -> None:
         if self.coordinate_order not in COORDINATE_ORDERS:
