@@ -545,6 +545,48 @@ and the result says why. The 3D terrain, the tiles, the source map and the overl
 7. No regressions: both suites are green, with no previously passing test removed, skipped or weakened.
    Goldens are unchanged, and `gen_protocol_docs.py --check` exits 0.
 
+### Review decisions (Part C, 2026-11-26)
+
+The review passed Part C with findings, and the same worker fixes them in the main tree. Each fix needs a test
+that fails without it.
+
+1. **The wire doc.** The `flags` BlobSpec in `protocol/messages.py` still says flag 1 comes "alone" and has
+   no bit 8. The `source` BlobSpec says "the source that gave the centreline ground", which is not true on
+   flag 9.
+   - Fix both: "1 = no bare ground under the centreline, alone or with 8"; "8 = a surface model covers the
+     centreline, always with 1"; and "on flag 9, the surface model at the centreline".
+   - Say "bare ground only" in the method's summary.
+   - Regenerate `docs/protocol/ipc.md`.
+2. **"Flag 8 never comes without flag 1" is untested.** Add a case where the surface model outranks the bare
+   source: a finer DSM over a coarser DTM, unit-level with a stub alignment, or a second wire project. Assert:
+   - `(flags & 8) == 0` wherever `ground_h` is finite;
+   - `flags & 8` implies `flags & 1`;
+   - rows with bare ground carry the bare source's index.
+3. **Strict snapshots.** Add the eighth element (`False`) to the hand-built snapshot tuples in
+   `test_terrain_providers.py`, and make `_build_terrain`'s unpacking strict: no `*flags` tolerance.
+4. **The vertical-extent counter.** It must count inside `_vertical_extent` itself, so a direct second call
+   from `_draw` fails `test_the_vertical_range_is_computed_once_per_redraw`.
+5. **Razor-thin polygons.** Drop a polygon whose mean thickness, its area divided by its x-extent, is under
+   1e-3 px.
+   - Test: a profile whose ground stays within a few millimetres of the formation across hundreds of
+     pixels.
+   - The test passes only when every polygon kept triangulates.
+6. **A line covered only by a surface model.**
+   - When every row has flag 1 and at least one has flag 8, show the status message "Only a surface model
+     covers this alignment (<its name>) — import bare-ground terrain for cut and fill".
+   - When every row has flag 1 and none has flag 8, keep "No terrain covers this alignment — import terrain
+     to see the ground".
+   - In both cases the whole-line hatching stays suppressed. Partial spans stay hatched.
+   - Test both messages and a mixed 1/9 line.
+7. **The readout on a row with no ground.** On a flag-1 or flag-9 row, the cut and fill read "—", not
+   "0.0 m²".
+8. **Accepted, or to the roadmap.**
+   - The span label still reads "no ground data (e.g. water)" over a surface-model span. That goes to the
+     F57 residue.
+   - A file re-import resets `surface_model` to the request's value. The future dialog checkbox must prefill
+     it from `source.get`. That also goes to the F57 residue.
+   - The ADR 0009 addendum is written by the architect.
+
 ## Invariants
 
 - Earthworks read only the analysis surface, never display tiles.

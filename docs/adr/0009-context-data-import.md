@@ -64,3 +64,16 @@ source, save and reopen, and IFC export in Phase 3.
   readers, are imported lazily inside their `io/` modules, like every other heavy optional dependency.
 - Phase 3's IFC export carries these GUIDs as `GlobalId`s, so context objects keep one identity from import
   to export.
+
+## Addendum (2026-11-26, T-137 C, F57): surface models are display terrain
+
+Decision 5 holds, but its analysis surface is not one stack for every query.
+
+- **The flag.** A terrain source can be a *surface model*: heights of treetops, rooftops and water surfaces,
+  for example Copernicus GLO-30. It is marked by `ImportSettings.surface_model`, and a provider whose data is
+  a surface model forces the flag.
+- **Display.** Surface models take part in display, draping and the source map as before, under decision 6's
+  precedence.
+- **Earthworks.** Ground queries for earthworks use bare ground only: `TerrainStack.heights_and_source(...,
+  bare_ground=True)`. A station that only a surface model covers has no ground for cut and fill, and is marked
+  as such: `alignment.ground_profile` flags 1 + 8.
