@@ -61,6 +61,9 @@ _FETCH_NOTES: ContextVar[list[str] | None] = ContextVar("fetch_notes", default=N
 # resolved coordinates are then in the East-North twin of the declared CRS, which is what gets reprojected.
 _KROVAK_EAST_NORTH = {5513: 5514, 2065: 5221, 8352: 8353}
 UNKNOWN_LICENCE = "unknown"
+# The start of the warning `inspect_source` adds to a source with no declared CRS. Clients match this prefix,
+# not the whole sentence, so the wording after it can change.
+NO_CRS_WARNING_PREFIX = "the source declares no coordinate reference system"
 
 
 class CrsRequired(Exception):
@@ -149,10 +152,7 @@ def inspect_source(
     with extraction_scope():
         report = _merge_reports(paths, [_inspect(reader, p) for p in paths])
     if report.declared_crs is None:
-        warning = (
-            "the source declares no coordinate reference system; set horizontal_crs in the import settings, "
-            "it will not be guessed"
-        )
+        warning = f"{NO_CRS_WARNING_PREFIX}; choose one in the import settings, it will not be guessed"
         if warning not in report.warnings:
             report = replace(report, warnings=(*report.warnings, warning))
     return reader, report

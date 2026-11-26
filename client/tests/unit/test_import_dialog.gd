@@ -1284,6 +1284,30 @@ func test_warnings_come_before_the_class_table() -> void:
 		assert_int(at).append_failure_message("%s is below the class table" % line).is_less(table)
 
 
+## T-136 Part C3: the backend's no-CRS warning is the red notice's sentence, so the report shows the notice once and skips
+## that warning, while a warning of another kind still shows.
+func test_no_crs_warning_is_not_repeated_under_the_notice() -> void:
+	var backend := _backend()
+	var report := _las_report(null)
+	report.result["warnings"] = [
+		ImportDialog.NO_CRS_WARNING_PREFIX + "; choose one in the import settings, it will not be guessed",
+		"other",
+	]
+	backend.reply("import.inspect", [report])
+	var dialog := _dialog(backend)
+	dialog.prepare([])
+	dialog.set_files(PackedStringArray([_FILE_LAS]))
+	await dialog.go_next()
+	assert_int(dialog.step()).is_equal(ImportDialog.STEP_INSPECT)
+
+	var texts := Array(dialog.report_texts())
+	assert_int(texts.count(ImportDialog.NO_CRS_NOTICE)).append_failure_message("the notice is not shown once").is_equal(1)
+	assert_array(texts).append_failure_message("the other warning is missing").contains(["other"])
+	for text: String in texts:
+		assert_bool(text.begins_with(ImportDialog.NO_CRS_WARNING_PREFIX)) \
+			.append_failure_message("the no-CRS warning is repeated: %s" % text).is_false()
+
+
 ## A report too long for either screen, so its scroll is capped and the cap is what this test measures.
 func test_report_scroll_follows_the_screen() -> void:
 	var backend := _backend()

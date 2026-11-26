@@ -46,6 +46,8 @@ var _terrain_request_override := Callable()
 var _source_boundaries := false
 ## The data sources of the terrain and imagery in view, published by [TerrainField] (T-135 Part B).
 var _data_sources: Array[Dictionary] = []
+## The imagery warnings of the last listing, published by [TerrainField] (T-136 Part C3); empty while none apply.
+var _imagery_warnings := PackedStringArray()
 
 var _entities := EntityRegistry.new()
 var _layers := LayerState.new()
@@ -333,6 +335,20 @@ func set_data_sources(entries: Array[Dictionary]) -> void:
 	for entry: Dictionary in entries:
 		copy.append(entry.duplicate(true))
 	_data_sources = copy
+	EventBus.data_sources_changed.emit()
+
+
+## The imagery warnings in view, as `imagery.tiles` gave them: plain sentences that name no source (T-136 Part C3).
+func imagery_warnings() -> PackedStringArray:
+	return _imagery_warnings
+
+
+## Replaces the imagery warnings (called by [TerrainField]). Stores a copy, and emits [signal EventBus.data_sources_changed]
+## only when the list changed.
+func set_imagery_warnings(warnings: PackedStringArray) -> void:
+	if warnings == _imagery_warnings:
+		return
+	_imagery_warnings = PackedStringArray(warnings)
 	EventBus.data_sources_changed.emit()
 
 

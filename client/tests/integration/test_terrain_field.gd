@@ -44,6 +44,9 @@ const _RIDGE_WIDTH := 35.0
 
 var _field: TerrainField
 var _camera: Camera3D
+var _messages: Array[String] = []  # the status-bar messages since _listen_for_status
+var _listing_warnings: Array = []  # the warnings the fake imagery listing answers with
+var _listing_mode := "ok"          # the fake imagery listing: "ok", "busy" or "mismatch"
 ## T-135 Part C (F52): the imagery replies a test holds. `released` is set in `after_test` too, so no held reply outlives
 ## its test.
 var _held: Dictionary = {"released": true}
@@ -69,6 +72,11 @@ func after_test() -> void:
 	_held["released"] = true
 	_terrain_gate["closed"] = false
 	Session.set_terrain_request_override(Callable())
+	if EventBus.status_message.is_connected(_record_status):
+		EventBus.status_message.disconnect(_record_status)
+	_messages.clear()
+	_listing_warnings = []
+	_listing_mode = "ok"
 	var none: Array[Dictionary] = []
 	Session.set_data_sources(none)
 	Session.set_source_boundaries(false)
@@ -80,6 +88,8 @@ func after_test() -> void:
 	if _camera != null:
 		_camera.queue_free()
 		_camera = null
+	# Last: showing the Imagery layer makes a field that still lives publish the warnings of its last listing again.
+	Session.set_imagery_warnings(PackedStringArray())
 
 
 func test_field_shows_the_expected_tiles_at_a_fixed_camera() -> void:
@@ -1476,3 +1486,157 @@ func _retried_other_than(asked: Dictionary, leaver: Vector3i) -> bool:
 		if key != leaver and int(asked[key]) >= 2:
 			return true
 	return false
+
+
+## T-136 Part C3: the imagery warnings of a listing. Two warnings give one status message (the first, and how many more
+## are in Data sources) and both lines in the popover under one heading. The same two with a new countdown give no new
+## message but the new text. A listing without warnings clears the popover and emits no message. The listings are fakes
+## through the Session seam, and the field lists them directly, so the test needs no backend.
+func test_imagery_warnings_show_once_and_clear() -> void:
+	Session.set_terrain_request_override(_fake_listing)
+	_listen_for_status()
+	var shell := await _popover_shell()
+	await _start_imagery_field()
+
+	var first := "ČÚZK is unreachable; retrying in 30 s"
+	var second := "A second warning"
+	_listing_warnings = [first, second]
+	await _field._list_imagery()
+	assert_array(_messages).append_failure_message("the first listing should give one message").is_equal([
+		first + " — 1 more in Data sources",
+	])
+	assert_array(Array(Session.imagery_warnings())).is_equal([first, second])
+	var texts := _label_texts(shell)
+	assert_array(texts).append_failure_message("the popover lacks the warnings").contains([
+		"Imagery warnings", first, second,
+	])
+
+	var countdown := "ČÚZK is unreachable; retrying in 12 s"
+	_listing_warnings = [countdown, second]
+	await _field._list_imagery()
+	assert_int(_messages.size()).append_failure_message("a changed countdown repeated the message").is_equal(1)
+	assert_array(Array(Session.imagery_warnings())).is_equal([countdown, second])
+	assert_array(_label_texts(shell)).contains([countdown, second])
+
+	_listing_warnings = []
+	await _field._list_imagery()
+	assert_int(_messages.size()).append_failure_message("clearing the warnings emitted a message").is_equal(1)
+	assert_bool(Session.imagery_warnings().is_empty()).is_true()
+	assert_bool(_label_texts(shell).has("Imagery warnings")).append_failure_message(
+		"the popover still shows the warnings"
+	).is_false()
+
+
+## T-136 Part C3, review: hiding the Imagery layer empties the warnings and shows no message; showing it again brings
+## them back, and that is no message either: the status bar reports a listing's warnings, not a layer's.
+func test_hiding_imagery_hides_its_warnings_without_a_message() -> void:
+	Session.set_terrain_request_override(_fake_listing)
+	_listen_for_status()
+	await _start_imagery_field()
+	var warning := "ČÚZK is unreachable; retrying in 30 s"
+	_listing_warnings = [warning]
+	await _field._list_imagery()
+	assert_int(_messages.size()).is_equal(1)
+
+	Session.layers().set_visible(TerrainField.IMAGERY_LAYER_ID, false)
+	await get_tree().process_frame
+	assert_bool(Session.imagery_warnings().is_empty()).append_failure_message("hidden imagery kept its warnings").is_true()
+	assert_int(_messages.size()).append_failure_message("hiding the layer emitted a message").is_equal(1)
+
+	Session.layers().set_visible(TerrainField.IMAGERY_LAYER_ID, true)
+	await get_tree().process_frame
+	assert_array(Array(Session.imagery_warnings())).append_failure_message("showing imagery did not bring the warnings back").is_equal([warning])
+	assert_int(_messages.size()).append_failure_message("showing the layer emitted a message").is_equal(1)
+
+
+## T-136 Part C3, review: a listing that fails keeps the warnings it had and emits nothing. An E_BUSY answer and a
+## revision that differs between the levels both leave the last listing's warnings in place.
+func test_a_failed_imagery_listing_keeps_the_warnings() -> void:
+	Session.set_terrain_request_override(_fake_listing)
+	_listen_for_status()
+	await _start_imagery_field()
+	var warning := "ČÚZK is unreachable; retrying in 30 s"
+	_listing_warnings = [warning]
+	await _field._list_imagery()
+	assert_int(_messages.size()).is_equal(1)
+
+	for mode in ["busy", "mismatch"]:
+		_listing_mode = mode
+		await _field._list_imagery()
+		assert_array(Array(Session.imagery_warnings())).append_failure_message(
+			"a %s listing changed the warnings" % mode
+		).is_equal([warning])
+		assert_int(_messages.size()).append_failure_message("a %s listing emitted a message" % mode).is_equal(1)
+
+
+## The fake `imagery.tiles` answers of the warnings tests: `_listing_warnings`, and `_listing_mode` ("ok", "busy", or
+## "mismatch", where the coarsest level has a different revision from the others). Every answer waits a frame, as the
+## backend does, so the paging lane never spins without yielding.
+func _fake_listing(method: String, params: Dictionary) -> IpcEnvelope:
+	await get_tree().process_frame
+	if method == "source.list":
+		return _listing_envelope([], {"sources": []})
+	if method != "imagery.tiles":
+		var refused := IpcEnvelope.new()
+		refused.type = "err"
+		refused.error = {"code": "E_NOT_FOUND", "message": "no such listing in this test"}
+		return refused
+	if _listing_mode == "busy":
+		var busy := IpcEnvelope.new()
+		busy.type = "err"
+		busy.error = {"code": "E_BUSY", "message": "busy in this test"}
+		return busy
+	var revision := 1 if _listing_mode == "ok" or int(params["level"]) == TerrainLod.MAX_LEVEL else 2
+	return _listing_envelope(_listing_warnings, {"revision": revision})
+
+
+## A new field over the fake listings, with the Imagery layer shown, settled for two frames.
+func _start_imagery_field() -> void:
+	_field = TerrainField.new()
+	get_tree().root.add_child(_field)
+	Session.layers().set_visible(TerrainField.IMAGERY_LAYER_ID, true)
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+
+## Records the status-bar messages from now on. The listener is disconnected in [method after_test].
+func _listen_for_status() -> void:
+	_messages.clear()
+	if not EventBus.status_message.is_connected(_record_status):
+		EventBus.status_message.connect(_record_status)
+
+
+func _record_status(text: String) -> void:
+	_messages.append(text)
+
+
+## A 1600 x 900 host with the shell in it, so the Data sources popover is built the way the app builds it.
+func _popover_shell() -> UiShell:
+	var host := Control.new()
+	host.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	host.size = Vector2(1600.0, 900.0)
+	get_tree().root.add_child(host)
+	auto_free(host)
+	var shell := (load("res://ui/shell/ui_shell.tscn") as PackedScene).instantiate() as UiShell
+	host.add_child(shell)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	return shell
+
+
+func _label_texts(shell: UiShell) -> Array:
+	var texts := []
+	for child in shell.data_sources_popover().find_children("*", "Label", true, false):
+		texts.append((child as Label).text)
+	return texts
+
+
+## An `imagery.tiles` (or `source.list`) answer with no tiles, the given warnings, and the given extra result fields.
+static func _listing_envelope(warnings: Array, extra: Dictionary = {}) -> IpcEnvelope:
+	var envelope := IpcEnvelope.new()
+	envelope.type = "res"
+	envelope.result = {
+		"revision": 1, "terrain_revision": -1, "tiles": [], "attributions": {}, "notices": {}, "warnings": warnings,
+	}
+	envelope.result.merge(extra)
+	return envelope

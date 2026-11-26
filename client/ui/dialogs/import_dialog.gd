@@ -50,6 +50,9 @@ const UNIT_SUFFIX := "m"
 const RESOLUTION_DEFAULT_M := 1.0
 const NODATA_DEFAULT := -9999.0
 const NO_CRS_NOTICE := "No coordinate system declared — choose one in Settings"
+## The start of the backend's warning for a source with no declared CRS (runner.NO_CRS_WARNING_PREFIX). The red notice says
+## the same, so the report skips that warning while it shows the notice.
+const NO_CRS_WARNING_PREFIX := "the source declares no coordinate reference system"
 const NO_PROJECT_REASON := "Open or create a project first — imported data belongs to a project"
 const NO_SOURCE_REASON := "Choose one or more files, or an online source, first"
 const NO_CRS_PROJECT_TEXT := "The project has no coordinate system yet — import an alignment first"
@@ -1879,6 +1882,8 @@ func _fill_report() -> void:
 		_report_box.add_child(_wrapped_label(NO_CRS_NOTICE, &"ErrorLabel"))
 	var warnings: Array = _report.get("warnings", [])
 	for warning: Variant in warnings:
+		if declared == null and String(warning).begins_with(NO_CRS_WARNING_PREFIX):
+			continue  # the red notice above says it
 		_report_box.add_child(_wrapped_label(String(warning)))
 	if not _sample_classes().is_empty():
 		_report_box.add_child(_class_table())

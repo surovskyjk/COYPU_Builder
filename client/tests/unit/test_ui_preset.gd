@@ -581,3 +581,114 @@ func test_popover_grows_with_its_entries_and_stops_at_the_cap() -> void:
 	assert_int(int(crowded)).append_failure_message("thirty entries stop short of the cap: %d px, cap %d px" % [crowded, cap]).is_greater_equal(cap - 16)
 	shell.close_data_sources()
 	Session.set_data_sources([] as Array[Dictionary])
+
+
+## T-136 Part C3: the swatch of a terrain entry is the colour the boundary overlay draws that source in. Its colour is
+## read from the palette and from [method TerrainMaterial.overlay_colour] alike, exactly. Imagery and unnamed sources
+## have no swatch.
+func test_swatch_colour_matches_the_overlay() -> void:
+	var shell := await _make_shell()
+	var entries: Array[Dictionary] = [
+		{"source_id": "a", "kind": "terrain", "name": "Fine", "attribution": "A", "notices": PackedStringArray(),
+			"licence": "", "overlay_index": 0},
+		{"source_id": "b", "kind": "terrain", "name": "Coarse", "attribution": "B", "notices": PackedStringArray(),
+			"licence": "", "overlay_index": 3},
+		{"source_id": "c", "kind": "terrain", "name": "Unnamed", "attribution": "C", "notices": PackedStringArray(),
+			"licence": "", "overlay_index": -1},
+		{"source_id": "d", "kind": "imagery", "name": "Ortho", "attribution": "D", "notices": PackedStringArray(),
+			"licence": "", "overlay_index": -1},
+	]
+	Session.set_data_sources(entries)
+	await get_tree().process_frame
+	var swatches := shell.data_sources_popover().find_children("*", "ColorRect", true, false)
+	assert_int(swatches.size()).append_failure_message("expected one swatch per terrain entry with an index").is_equal(2)
+	if swatches.size() != 2:
+		Session.set_data_sources([] as Array[Dictionary])
+		return
+	var palette := TerrainMaterial.palette_texture().get_image()
+	for pair: Array in [[0, swatches[0]], [3, swatches[1]]]:
+		var index: int = pair[0]
+		var colour := (pair[1] as ColorRect).color
+		assert_int(colour.to_rgba32()).append_failure_message(
+			"the swatch of index %d is not overlay_colour(%d)" % [index, index]
+		).is_equal(TerrainMaterial.overlay_colour(index).to_rgba32())
+		assert_int(colour.to_rgba32()).append_failure_message(
+			"the swatch of index %d is not the palette's pixel" % index
+		).is_equal(palette.get_pixel(index, 0).to_rgba32())
+	Session.set_data_sources([] as Array[Dictionary])
+
+
+## T-136 Part C3: a recorded licence of a file source shows as "Licensed under <licence>" once, and never for the
+## placeholder or when one of the entry's notices already states it (a provider's notice begins with its licence).
+func test_licence_line_is_shown_once_and_never_for_the_placeholder() -> void:
+	assert_str(UiShell.licence_line({"licence": "CC BY 4.0", "notices": PackedStringArray()})).is_equal(
+		"Licensed under CC BY 4.0"
+	)
+	assert_str(UiShell.licence_line({"licence": " CC BY 4.0 ", "notices": PackedStringArray()})).is_equal(
+		"Licensed under CC BY 4.0"
+	)
+	assert_str(UiShell.licence_line({"licence": "unknown", "notices": PackedStringArray()})).is_empty()
+	assert_str(UiShell.licence_line({"notices": PackedStringArray()})).is_empty()
+	assert_str(UiShell.licence_line({
+		"licence": "CC BY 4.0", "notices": PackedStringArray(["Licensed under CC BY 4.0, see the survey office."]),
+	})).is_empty()
+
+
+## The swatches are the same in the sandbox preset as in the engineering one, with the popover opened under it.
+func test_swatches_show_under_the_sandbox_preset() -> void:
+	var shell := await _make_shell()
+	shell.apply_preset(UiPreset.SANDBOX, 0.72)
+	var entries: Array[Dictionary] = [
+		{"source_id": "a", "kind": "terrain", "name": "Fine", "attribution": "A", "notices": PackedStringArray(),
+			"licence": "", "overlay_index": 0},
+		{"source_id": "b", "kind": "terrain", "name": "Coarse", "attribution": "B", "notices": PackedStringArray(),
+			"licence": "", "overlay_index": 1},
+	]
+	Session.set_data_sources(entries)
+	await get_tree().process_frame
+	shell.show_data_sources()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var swatches := shell.data_sources_popover().find_children("*", "ColorRect", true, false)
+	assert_int(swatches.size()).append_failure_message("the sandbox popover has %d swatches, not 2" % swatches.size()).is_equal(2)
+	for node in swatches:
+		var swatch := node as ColorRect
+		assert_vector(swatch.custom_minimum_size).append_failure_message("the swatch is not 12 x 12 px").is_equal(Vector2(12.0, 12.0))
+		assert_str(swatch.tooltip_text).is_equal(UiShell.SWATCH_TOOLTIP)
+		assert_bool(swatch.is_visible_in_tree()).append_failure_message("the swatch is not shown").is_true()
+	shell.close_data_sources()
+	Session.set_data_sources([] as Array[Dictionary])
+
+
+## T-136 Part C3, review: with imagery warnings and no entry, the status bar still opens the popover under the title
+## "Imagery warnings", and the popover lists the warnings without the empty sentence.
+func test_warnings_only_popover_is_reachable() -> void:
+	var shell := await _make_shell()
+	Session.set_data_sources([] as Array[Dictionary])
+	Session.set_imagery_warnings(PackedStringArray(["A warning that names no source"]))
+	await get_tree().process_frame
+	var button := shell.attribution_button()
+	assert_bool(button.visible).append_failure_message("the status bar hides the warnings-only popover").is_true()
+	assert_str(button.text).is_equal(UiShell.IMAGERY_WARNINGS_TITLE)
+	var texts := []
+	for child in shell.data_sources_popover().find_children("*", "Label", true, false):
+		texts.append((child as Label).text)
+	assert_array(texts).contains(["Imagery warnings", "A warning that names no source"])
+	assert_bool(texts.has(UiShell.POPOVER_EMPTY)).append_failure_message("the empty sentence shows with warnings").is_false()
+	Session.set_imagery_warnings(PackedStringArray())
+
+
+## The popover shows the licence line under the attribution of a file source, in the same entry as its notices.
+func test_popover_shows_the_licence_of_a_file_source() -> void:
+	var shell := await _make_shell()
+	var entries: Array[Dictionary] = [
+		{"source_id": "a", "kind": "terrain", "name": "DMR 5G", "attribution": "© ČÚZK",
+			"notices": PackedStringArray(), "licence": "CC BY 4.0", "overlay_index": 0},
+	]
+	Session.set_data_sources(entries)
+	await get_tree().process_frame
+	var texts := []
+	for child in shell.data_sources_popover().find_children("*", "Label", true, false):
+		texts.append((child as Label).text)
+	assert_array(texts).contains(["Licensed under CC BY 4.0"])
+	Session.set_data_sources([] as Array[Dictionary])

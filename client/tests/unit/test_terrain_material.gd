@@ -160,3 +160,36 @@ func test_boundary_material_source_map_texel_matches_its_vertex() -> void:
 	assert_int(roundi(source.get_pixelv(texel).r * 255.0)).append_failure_message(
 		"the boundary material's texel %s of vertex (%d, %d) does not hold its source index" % [str(texel), r, c]
 	).is_equal(7)
+
+
+## T-136 Part C3: the palette is the one table of overlay colours. Pixel `i` holds `overlay_colour(i)` exactly, so the
+## swatches and the shader's tints are the same colour, and the palette is built once and shared.
+func test_palette_pixels_are_the_overlay_colours() -> void:
+	var palette := TerrainMaterial.palette_texture()
+	assert_object(TerrainMaterial.palette_texture()).is_same(palette)
+	var image := palette.get_image()
+	assert_int(image.get_width()).is_equal(256)
+	assert_int(image.get_height()).is_equal(1)
+	assert_int(image.get_format()).is_equal(Image.FORMAT_RGB8)
+	for index in TerrainMaterial.NONE_INDEX:
+		assert_int(image.get_pixel(index, 0).to_rgba32()).append_failure_message(
+			"palette pixel %d is not overlay_colour(%d)" % [index, index]
+		).is_equal(TerrainMaterial.overlay_colour(index).to_rgba32())
+
+
+## T-136 Part C3: the shader reads the palette and computes no colour of its own. The literals are the old ones, which
+## were the second place the colours were computed.
+func test_shader_reads_the_palette_not_its_own_colours() -> void:
+	var code := TerrainMaterial.SHADER_CODE
+	assert_bool(code.contains("uniform sampler2D palette_tex : source_color, filter_nearest, repeat_disable;")).is_true()
+	assert_bool(code.contains("texelFetch(palette_tex, ivec2(int(here), 0), 0).rgb")).is_true()
+	for literal in ["hsv_to_rgb", "0.618034", "0.55", "0.9"]:
+		assert_bool(code.contains(literal)).append_failure_message(
+			"the shader still computes the overlay colours: %s" % literal
+		).is_false()
+	var job := {"jpeg": _marked_jpeg(), "alpha": PackedByteArray(), "source_index": _zeros(_SAMPLES)}
+	TerrainMaterial.decode_job(job)
+	var drawn := TerrainMaterial.for_images(job["albedo"], null, job["source_image"])
+	assert_object(drawn.get_shader_parameter("palette_tex")).is_same(TerrainMaterial.palette_texture())
+	var outlined := TerrainMaterial.for_boundaries(_zeros(_SAMPLES))
+	assert_object(outlined.get_shader_parameter("palette_tex")).is_same(TerrainMaterial.palette_texture())

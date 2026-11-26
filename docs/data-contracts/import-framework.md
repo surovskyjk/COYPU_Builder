@@ -80,7 +80,9 @@ Needs the backend's `gis` extra (shapely); without it the call fails with an err
   when several operations compete, so the applied one is identified from `TransformerGroup`;
 - overriding a declared CRS with a different one adds a warning to the import result and the record;
 - `import.inspect` always adds the "declares no coordinate reference system" warning when `declared_crs` is
-  null, in addition to whatever the reader reported.
+  null, in addition to whatever the reader reported. The warning starts with the prefix "the source declares no
+  coordinate reference system" (`NO_CRS_WARNING_PREFIX` in `io/sources/runner.py`). That prefix is stable for
+  clients, which match it rather than the whole sentence; the wording after it may change.
 
 ## Records and identity
 

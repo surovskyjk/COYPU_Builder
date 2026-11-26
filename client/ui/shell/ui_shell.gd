@@ -44,6 +44,14 @@ const POPOVER_WRAP_PX := 440
 const ATTRIBUTION_JOIN := " · "
 ## The muted line an entry with no attribution text shows in the popover.
 const NO_ATTRIBUTION_TEXT := "No attribution recorded for this file."
+## The licence line of an entry with a recorded licence (not the placeholder, and not already in its notices).
+const LICENCE_PREFIX := "Licensed under "
+const UNKNOWN_LICENCE := "unknown"
+## The swatch before a terrain entry's heading: its colour is the source boundaries overlay's colour for the source.
+const SWATCH_PX := 12
+const SWATCH_GAP_PX := 6
+const SWATCH_TOOLTIP := "Its colour in the source boundaries overlay"
+const IMAGERY_WARNINGS_TITLE := "Imagery warnings"
 const POPOVER_INTRO := "Where the terrain and imagery on screen come from."
 const POPOVER_EMPTY := "No terrain or imagery is shown, so there are no sources to list."
 const SOURCES_TOOLTIP := "Click to see where the terrain and imagery come from."
@@ -575,8 +583,11 @@ func _on_data_sources_changed() -> void:
 	if _status_sources == null:
 		return
 	var entries := Session.data_sources()
+	var warned := not Session.imagery_warnings().is_empty()
 	var summary := attribution_summary(entries)
-	var shown := not entries.is_empty()
+	if entries.is_empty() and warned:
+		summary = IMAGERY_WARNINGS_TITLE
+	var shown := not entries.is_empty() or warned
 	_status_sources_separator.visible = shown
 	_status_sources.visible = shown
 	_status_sources.text = summary
@@ -655,31 +666,84 @@ func _wrapped_label(text: String, variation: StringName) -> Label:
 	return label
 
 
-## Rebuilds the popover's entries from `Session.data_sources()`: the full attribution of each source, then its notices.
+## Rebuilds the popover's entries from `Session.data_sources()`: each source's heading and swatch, its full attribution,
+## its licence line, then its notices; the imagery warnings of `Session.imagery_warnings()` come last.
 func _refresh_data_popover() -> void:
 	if _popover_entries == null:
 		return
 	for child in _popover_entries.get_children():
 		_popover_entries.remove_child(child)
+		# A swatch row's ColorRect and Label are its children: freed with it, or they outlive the frame as orphans.
+		for inner in child.find_children("*", "", true, false):
+			inner.queue_free()
 		child.queue_free()
 	var entries := Session.data_sources()
-	if entries.is_empty():
+	if entries.is_empty() and Session.imagery_warnings().is_empty():
 		_popover_entries.add_child(_wrapped_label(POPOVER_EMPTY, &"HintLabel"))
-		return
 	for entry: Variant in entries:
 		var source := entry as Dictionary
 		if _popover_entries.get_child_count() > 0:
 			_popover_entries.add_child(HSeparator.new())
-		var heading := _wrapped_label(source_heading(source), &"HintLabel")
-		_popover_entries.add_child(heading)
+		_popover_entries.add_child(_heading_row(source))
 		var text := String(source.get("attribution", "")).strip_edges()
 		if text.is_empty():
 			_popover_entries.add_child(_wrapped_label(NO_ATTRIBUTION_TEXT, &"HintLabel"))
 		else:
 			_popover_entries.add_child(_wrapped_label(text, &""))
+		var licence := licence_line(source)
+		if not licence.is_empty():
+			_popover_entries.add_child(_wrapped_label(licence, &"HintLabel"))
 		var notices: PackedStringArray = source.get("notices", PackedStringArray())
 		for notice in notices:
 			_popover_entries.add_child(_wrapped_label(notice, &"HintLabel"))
+	_add_imagery_warnings()
+
+
+## The popover's heading for one entry, with the entry's swatch before it when it has an overlay index (a terrain source
+## the listing names). The heading's text starts at the same edge whether or not it has a swatch on its own row.
+func _heading_row(source: Dictionary) -> Control:
+	var heading := _wrapped_label(source_heading(source), &"HintLabel")
+	var index := int(source.get("overlay_index", -1))
+	if index < 0:
+		return heading
+	heading.custom_minimum_size.x = POPOVER_WRAP_PX - SWATCH_PX - SWATCH_GAP_PX
+	var swatch := ColorRect.new()
+	swatch.color = TerrainMaterial.overlay_colour(index)
+	swatch.custom_minimum_size = Vector2(SWATCH_PX, SWATCH_PX)
+	swatch.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	swatch.mouse_filter = Control.MOUSE_FILTER_PASS
+	swatch.tooltip_text = SWATCH_TOOLTIP
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override(&"separation", SWATCH_GAP_PX)
+	row.add_child(swatch)
+	row.add_child(heading)
+	return row
+
+
+## The licence line an entry shows: "Licensed under <licence>" for a recorded licence. Nothing for an empty licence, the
+## placeholder, or a licence that one of the entry's notices already states (a provider's notice begins with its licence).
+static func licence_line(source: Dictionary) -> String:
+	var licence := String(source.get("licence", "")).strip_edges()
+	if licence.is_empty() or licence == UNKNOWN_LICENCE:
+		return ""
+	var notices: PackedStringArray = source.get("notices", PackedStringArray())
+	for notice in notices:
+		if notice.contains(licence):
+			return ""
+	return LICENCE_PREFIX + licence
+
+
+## The imagery warnings of the last listing, under one heading after the entries (also when no entry is shown). Each
+## warning is a plain sentence that names no source, so none of them is placed under a source.
+func _add_imagery_warnings() -> void:
+	var warnings := Session.imagery_warnings()
+	if warnings.is_empty():
+		return
+	if _popover_entries.get_child_count() > 0:
+		_popover_entries.add_child(HSeparator.new())
+	_popover_entries.add_child(_wrapped_label(IMAGERY_WARNINGS_TITLE, &"HintLabel"))
+	for warning in warnings:
+		_popover_entries.add_child(_wrapped_label(warning, &""))
 
 
 func _on_camera_changed(mode: int) -> void:

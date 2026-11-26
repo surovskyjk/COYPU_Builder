@@ -18,10 +18,13 @@ extends ShaderMaterial
 ## - `show_boundaries`, `boundary_tint` (0.10) and `line_colour`: the overlay. Where a source index differs from
 ##   the one a pixel away (one screen pixel either side, from the derivatives), the pixel takes `line_colour`,
 ##   which gives a line about two pixels wide. Elsewhere each source's tint is mixed in at `boundary_tint`.
+## - `palette_tex`: the overlay palette ([method palette_texture]), set by every material. The tint of index `i` is
+##   the palette's pixel `i`, read as sRGB, so the tint on screen is the colour [method overlay_colour] gives.
 ##
 ## Overlay colours: source index `i` is the hue `fract(i * 0.618034)` (the golden ratio, so neighbouring indices
-## differ widely) at saturation 0.55 and value 0.9, in the same HSV-to-RGB formula as [method overlay_colour].
-## The line is [constant LINE_COLOUR] (white). Index 255 ("none") is never tinted.
+## differ widely) at saturation 0.55 and value 0.9, quantised to 8 bits per channel by [method overlay_colour]. The
+## shader never computes them: the palette image holds them, and the Data sources swatches read the same function,
+## so the two cannot drift apart. The line is [constant LINE_COLOUR] (white). Index 255 ("none") is never tinted.
 
 const IMAGE_SIZE := 512
 const SOURCE_SIZE := 129
@@ -31,6 +34,8 @@ const HUE_STEP := 0.618034
 const OVERLAY_SATURATION := 0.55
 const OVERLAY_VALUE := 0.9
 const NONE_INDEX := 255
+## The width of the overlay palette: one pixel per source index, and the pixel of [constant NONE_INDEX] is never read.
+const PALETTE_SIZE := 256
 ## The placeholder colour of the neutral tile material (see TerrainTile.neutral_material), for a tile whose
 ## boundaries show without imagery.
 const NEUTRAL_COLOUR := Color(0.46, 0.52, 0.44)
@@ -45,12 +50,7 @@ uniform sampler2D source_tex : filter_nearest, repeat_disable;
 uniform bool show_boundaries = false;
 uniform float boundary_tint = 0.1;
 uniform vec3 line_colour = vec3(1.0, 1.0, 1.0);
-
-vec3 hsv_to_rgb(vec3 c) {
-	vec4 k = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-	vec3 p = abs(fract(c.xxx + k.xyz) * 6.0 - k.www);
-	return c.z * mix(k.xxx, clamp(p - k.xxx, 0.0, 1.0), c.y);
-}
+uniform sampler2D palette_tex : source_color, filter_nearest, repeat_disable;
 
 float index_at(vec2 uv) {
 	return floor(texture(source_tex, (uv * 128.0 + 0.5) / 129.0).r * 255.0 + 0.5);
@@ -70,7 +70,7 @@ void fragment() {
 		bool edge = index_at(UV + dx) != here || index_at(UV - dx) != here
 			|| index_at(UV + dy) != here || index_at(UV - dy) != here;
 		if (here < 254.5) {
-			vec3 tint = hsv_to_rgb(vec3(fract(here * 0.618034), 0.55, 0.9));
+			vec3 tint = texelFetch(palette_tex, ivec2(int(here), 0), 0).rgb;
 			colour = mix(colour, tint, boundary_tint);
 		}
 		if (edge) {
@@ -83,6 +83,7 @@ void fragment() {
 """
 
 static var _shader: Shader
+static var _palette: ImageTexture
 
 
 ## The one shader resource every tile material shares.
@@ -93,9 +94,23 @@ static func shared_shader() -> Shader:
 	return _shader
 
 
-## The overlay colour of a source index, as the shader draws it (255 has none: see [constant NONE_INDEX]).
+## The overlay colour of a source index (255 has none: see [constant NONE_INDEX]). The HSV colour is quantised to 8 bits
+## per channel, so the palette image holds it exactly. This is the only place the overlay colours are computed.
 static func overlay_colour(index: int) -> Color:
-	return Color.from_hsv(fposmod(index * HUE_STEP, 1.0), OVERLAY_SATURATION, OVERLAY_VALUE)
+	var hsv := Color.from_hsv(fposmod(index * HUE_STEP, 1.0), OVERLAY_SATURATION, OVERLAY_VALUE)
+	return Color8(roundi(hsv.r * 255.0), roundi(hsv.g * 255.0), roundi(hsv.b * 255.0))
+
+
+## The overlay palette the shader reads: a 256 x 1 RGB8 image whose pixel `i` is [method overlay_colour] of `i`, for
+## every index below [constant NONE_INDEX]. Pixel 255 is black and never read. Built once and shared, like
+## [method shared_shader]; main thread only.
+static func palette_texture() -> ImageTexture:
+	if _palette == null:
+		var image := Image.create_empty(PALETTE_SIZE, 1, false, Image.FORMAT_RGB8)
+		for index in NONE_INDEX:
+			image.set_pixel(index, 0, overlay_colour(index))
+		_palette = ImageTexture.create_from_image(image)
+	return _palette
 
 
 ## Worker entry point (`WorkerThreadPool`). `job` carries `jpeg` (PackedByteArray), `alpha` (the alpha blob, empty
@@ -148,6 +163,7 @@ static func for_images(albedo: Image, alpha: Image, source: Image) -> TerrainMat
 		material.set_shader_parameter("alpha_tex", ImageTexture.create_from_image(alpha))
 	material.set_shader_parameter("boundary_tint", BOUNDARY_TINT)
 	material.set_shader_parameter("line_colour", Vector3(LINE_COLOUR.r, LINE_COLOUR.g, LINE_COLOUR.b))
+	material.set_shader_parameter("palette_tex", palette_texture())
 	material.set_shader_parameter("show_boundaries", false)
 	return material
 

@@ -24,7 +24,9 @@ extends Node3D
 ##
 ## Layers: `Session.layers()` ids [constant LAYER_ID] ("Terrain", hides the whole field) and [constant
 ## IMAGERY_LAYER_ID] ("Imagery", hiding it shows the neutral placeholder material). Source boundaries come from
-## [method Session.source_boundaries]; the attribution in view is published with [method Session.set_data_sources].
+## [method Session.source_boundaries]; the attribution in view is published with [method Session.set_data_sources],
+## with each terrain source's overlay index and licence, and the imagery warnings of the last listing with
+## [method Session.set_imagery_warnings].
 ##
 ## Terrain sources change in the backend (an import), which this field learns of through `E_NOT_FOUND` on a
 ## tile request, through a new project (`EventBus.project_changed`), through a reconnect, or when [method relist]
@@ -54,6 +56,8 @@ var _imagery_terrain_revision := -1
 var _attributions: Dictionary = {}   # source id -> attribution text, from imagery.tiles
 var _notices: Dictionary = {}        # source id -> PackedStringArray of licence notices, from imagery.tiles
 var _source_names: Dictionary = {}   # source id -> display name, from source.list (read once per terrain listing)
+var _source_licences: Dictionary = {}  # source id -> recorded licence ("" when none), from source.list
+var _imagery_warnings := PackedStringArray()  # the distinct warnings of the last imagery listing, in first-seen order
 var _decode_reported_revision := -1  # the imagery revision whose decode failure has been shown in the status bar
 var _tiles: Dictionary = {}          # Vector3i(level, ix, iy) -> TerrainTile, attached
 var _last_used: Dictionary = {}      # Vector3i -> frame number of the last selection that wanted it
@@ -247,6 +251,7 @@ func _on_layers_changed() -> void:
 	for key: Vector3i in _tiles.keys():
 		(_tiles[key] as TerrainTile).show_imagery(imagery_on)
 	_sources_dirty = true
+	_publish_imagery_warnings(false)
 
 
 func _on_source_boundaries_changed(on: bool) -> void:
@@ -399,17 +404,21 @@ func _list_terrain() -> void:
 		_free_all_tiles()
 
 
-## Reads `source.list` once per terrain or imagery listing, for the names the data sources are shown with. A failure keeps the
-## names read before; a source it does not name is shown by its kind alone.
+## Reads `source.list` once per terrain or imagery listing, for the names and recorded licences the data sources are shown
+## with. A failure keeps the names read before; a source it does not name is shown by its kind alone.
 func _read_source_names() -> void:
 	var envelope := await Session.fetch_source_list()
 	if envelope.type != "res":
 		return
 	var names := {}
+	var licences := {}
 	for source: Variant in envelope.result.get("sources", []):
 		var info: Dictionary = source
-		names[String(info.get("id", ""))] = String(info.get("name", ""))
+		var source_id := String(info.get("id", ""))
+		names[source_id] = String(info.get("name", ""))
+		licences[source_id] = String(info.get("licence", ""))
 	_source_names = names
+	_source_licences = licences
 	_sources_dirty = true
 
 
@@ -422,6 +431,7 @@ func _list_imagery() -> void:
 	var terrain_revision := -1
 	var attributions := {}
 	var notices := {}
+	var warnings := PackedStringArray()
 	var refused := []
 	for level in range(TerrainLod.MAX_LEVEL, -1, -1):
 		var envelope := await Session.fetch_imagery_tiles(level)
@@ -451,6 +461,10 @@ func _list_imagery() -> void:
 		elif listed_revision != revision:
 			_imagery_relist_wanted = true
 			return
+		# The backend builds the warnings from the whole imagery cache, not per level, so every level of a pass lists the
+		# same ones, a countdown differing by a second at most. The last level that answered keeps its list: a union would
+		# only duplicate them. The digits are not stripped to dedupe, which would merge distinct tile warnings.
+		warnings = PackedStringArray(envelope.result.get("warnings", []))
 		lists[level] = _index_imagery(envelope.result.get("tiles", []))
 	if not refused.is_empty():
 		EventBus.status_message.emit(_refusal_message("Imagery", refused))
@@ -463,6 +477,7 @@ func _list_imagery() -> void:
 	_imagery_terrain_revision = terrain_revision
 	_attributions = attributions
 	_notices = notices
+	_imagery_warnings = warnings
 	_imagery_failed.clear()
 	_busy_streak = 0
 	_sources_dirty = true
@@ -470,8 +485,29 @@ func _list_imagery() -> void:
 	await _read_source_names()
 	if _closing or not is_inside_tree():
 		return
+	_publish_imagery_warnings(true)
 	if terrain_revision != _revision:
 		_relist_wanted = true
+
+
+## Publishes the imagery warnings of the last listing to the Session: none while the Imagery layer is hidden, as no
+## imagery is credited then. The status bar gets one message when the warnings go from none to some, and only when
+## `announce` is set (a listing does, a layer change does not), so a countdown in a warning does not repeat it.
+func _publish_imagery_warnings(announce: bool) -> void:
+	var shown := _imagery_warnings if _imagery_visible() else PackedStringArray()
+	var was_none := Session.imagery_warnings().is_empty()
+	Session.set_imagery_warnings(shown)
+	if announce and was_none and not shown.is_empty():
+		EventBus.status_message.emit(_imagery_warnings_message(shown))
+
+
+## The status bar's sentence for the imagery warnings that have just appeared: the first, and how many more are in Data
+## sources.
+static func _imagery_warnings_message(warnings: PackedStringArray) -> String:
+	var text := warnings[0]
+	if warnings.size() > 1:
+		text += " — %d more in Data sources" % (warnings.size() - 1)
+	return text
 
 
 func _fetch(key: Vector3i) -> void:
@@ -785,6 +821,9 @@ func _data_source_entries() -> Array[Dictionary]:
 	return entries
 
 
+## One entry of [method Session.set_data_sources]. `overlay_index` is the source's position in the terrain listing, which
+## is the index [TerrainMaterial.overlay_colour] takes for its swatch; a terrain source the listing does not name, and
+## every imagery source, have -1 and no swatch. `licence` is the recorded one ("" when none).
 func _source_entry(source_id: String, kind: String) -> Dictionary:
 	return {
 		"source_id": source_id,
@@ -792,6 +831,8 @@ func _source_entry(source_id: String, kind: String) -> Dictionary:
 		"name": String(_source_names.get(source_id, "")),
 		"attribution": String(_attributions.get(source_id, "")),
 		"notices": _notices.get(source_id, PackedStringArray()),
+		"licence": String(_source_licences.get(source_id, "")),
+		"overlay_index": _source_ids.find(source_id) if kind == "terrain" else -1,
 	}
 
 

@@ -52,6 +52,7 @@ from coypu_builder.io.sources.registry import (
     register_reader,
 )
 from coypu_builder.io.sources.runner import (
+    NO_CRS_WARNING_PREFIX,
     CrsRequired,
     NoAlignments,
     UnknownAlignment,
@@ -265,6 +266,16 @@ def test_inspect_reports_a_missing_crs_with_a_warning(tmp_path):
     assert report.declared_crs is None
     assert any("no coordinate reference system" in w for w in report.warnings)
     assert report.counts["points"] == 1600
+
+
+def test_no_crs_warning_has_the_stable_prefix_and_no_protocol_name(tmp_path):
+    _reader, report = inspect_source(_file(tmp_path, declared=None))
+    warnings = [w for w in report.warnings if w.startswith(NO_CRS_WARNING_PREFIX)]
+    assert len(warnings) == 1
+    assert "horizontal_crs" not in warnings[0]
+    assert warnings[0] == (
+        f"{NO_CRS_WARNING_PREFIX}; choose one in the import settings, it will not be guessed"
+    )
 
 
 def test_import_without_any_crs_is_refused_and_with_one_it_succeeds(tmp_path):
