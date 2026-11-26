@@ -25,12 +25,13 @@ Two Kralupy facts shape the acceptance (ROADMAP F32, closed by the user's answer
 
 ## How this task runs
 
-Two parts, each its own worker order:
+Three parts, each its own worker order:
 
 | Part | What | Can start when |
 |---|---|---|
 | **A — backend** | `domain/earthworks.py`, `alignment.ground_profile`, the `profile_idealised` flag | T-136 Part A is committed |
 | **B — client** | the Profile tab, the cursor, the readout, the captures; assess M3's exit criteria | Part A and T-135 Part C are committed |
+| **C — surface models** | a source can be a surface model; earthworks skip it (F57); the readout says so | Part B is committed |
 
 ## Preconditions
 
@@ -330,6 +331,219 @@ driver as they stand. Where these items differ from the contract, they win.
     - `test_cli_parses_profile_idealised` and the new scenario keys in `test_capture_scenario.gd`.
 11. **M3 assessment.** The report assesses each M3 exit criterion in `ROADMAP.md` as met, partly met or not
     met, and gives the evidence (a test, a shot or a figure) for each.
+
+### Review decisions (Part B, 2026-11-26)
+
+The first build failed review on one blocker. A fresh worker fixes the items below. Each fix needs a test that
+fails without it.
+
+1. **Blocker: the panel stops hearing events after a preset switch.**
+   - `UiShell._place` moves the bottom dock with `reparent`. That runs `_exit_tree` and `_enter_tree`, but
+     not `_ready`. So the `EventBus` connections made in `_ready` and dropped in `_exit_tree` are lost for
+     good after a switch, or from start-up when Sandbox is the saved preset.
+   - Connect in `_enter_tree` and disconnect in `_exit_tree`, each guarded by `is_connected`.
+   - Test, in a shell:
+     - with the Profile tab visible, switch to Sandbox and emit `sources_changed("terrain")`: the panel
+       fetches again;
+     - switch back to Engineering and emit it again: the panel fetches again;
+     - after a switch, `project_changed` with a new project changes `alignment_id()`.
+2. **A stale result is accepted.**
+   - Bump the panel's generation when the alignment id changes and in `_on_inputs_changed`, including the
+     no-alignment branch.
+   - On completion, accept a result only when its alignment id is still the panel's.
+   - Test with a request override that delays its reply:
+     - the project closes while the fetch runs, and the panel ends in the no-alignment state;
+     - the alignment changes while the fetch runs, and the old data is not drawn under the new id.
+3. **Narrow windows.** The controls row and the labels must never draw into the readout column.
+   - The controls and the legend sit in an `HFlowContainer` no wider than the plot, so they wrap to a
+     second row when the plot is narrow.
+   - The legend's third item reads "No ground data", with the tooltip "No ground data, e.g. water under a
+     bridge".
+   - A span label goes inside a span only when `rect.size.x >= text_width + 12` and it ends before
+     `plot.end.x`. Otherwise it goes beside the span, where it fits, or is skipped.
+   - A label that would overlap the previous one is skipped.
+   - The label is drawn on a plate of the panel's background at 85 % alpha.
+   - Test at 1280 × 720 and 1600 × 900, in both presets:
+     - no control, legend item or label rect intersects the readout column;
+     - the drawing area is at least 150 px tall at 1600 × 900 (the existing test) and at least 110 px at
+       1280 × 720.
+4. **The cost of a redraw.**
+   - Draw at most about one row per pixel column of the plot: take every k-th row in the window, with k
+     from the window's row count and the plot width, and always keep the rows that start or end a cut,
+     fill or no-ground run.
+   - Build the shading as one polygon per run of cut, or of fill, instead of one per segment.
+   - The scenario's `perf` block accepts `ui` and `bottom_tab`.
+   - Report one local `terrain_synthetic` run whose perf block has `"ui": "visible"`,
+     `"bottom_tab": "profile"` and the Whole-line window. Do not commit that change.
+   - Test that the number of drawn rows never exceeds the plot width in pixels plus the kept run ends.
+5. **Degenerate polygons.**
+   - No polygon handed to `draw_colored_polygon` may have a repeated consecutive vertex or an area below
+     1e-6 (in its drawing units).
+   - Test on a sine-shaped profile whose formation crossings fall within 0.1 m of a row: every polygon
+     the helper returns gives a non-empty `Geometry2D.triangulate_polygon`.
+6. **Following playback.** Add a test with a small `PlaybackController` subclass that overrides
+   `lead_station()` and `alignment_id()`, bound with `bind_playback`:
+   - the panel takes the controller's alignment;
+   - after a frame, the readout follows a moved station;
+   - a move of less than one pixel causes no redraw.
+7. **Vertical scale.**
+   - The exaggeration selector offers "Fit", "1×", "5×" and "10×". The default stays 10×: a stable
+     ratio keeps the gradients comparable while the window slides during playback.
+   - "Fit" fits the rail, the ground and the formation level in the window, plus 10 % margin, with a
+     span of at least 2 m.
+   - A label beside the selector shows the effective factor, "≈ 38×", when "Fit" is chosen, or when the
+     fitted range overrides the chosen ratio by more than 5 %.
+   - The selectors have the tooltips "Window width" and "Vertical exaggeration".
+8. **Tick labels.**
+   - Each axis takes the decimals its tick step needs: the vertical axis shows "240" at a 20 m step and
+     "180.5" at a 0.5 m step.
+   - The km axis shows at least one decimal, and 3 at the 1 km window, as before.
+   - The "m" unit label does not touch the top tick label.
+9. **Small items.**
+   - The readout reads "Ground − rail: −0.40 m", with U+2212 for minus and "+" for plus, in the readout
+     and in `summary()`.
+   - Engineering's no-ground text colour reaches 4.5:1 against the panel background.
+   - Readout values that are too long end in an ellipsis and show the full text as a tooltip.
+   - `row_range` takes exactly one row either side of the window, and its test asserts that.
+   - Replace the colour test's assertion that cannot fail.
+   - Move the misplaced T-135 C comment in `test_capture_scenario.gd`.
+   - `test_ui_preset.gd` also asserts that the Layers header stays visible.
+10. **Accepted as they are.**
+    - Two requests for one key while one is loading (the first result is discarded).
+    - A late failure that overwrites `ground_profile_error()`.
+    - The tab focus ring.
+    - The pill under a larger font.
+    - A hover readout and click-to-seek go to T-141, the timeline bar.
+
+11. **After the fix round (architect, 2026-11-26).**
+    - **Accepted:**
+      - the readout keeps "Ground − rail −0.40 m" without a colon, which the existing test pins;
+      - "Fit" is the fourth choice;
+      - labels that do not fit are left out rather than moved.
+    - **One more fix.** The vertical axis showed two labels, 150 and 200, at a 50 m step in a 160 px plot.
+      That is too sparse to read heights from.
+      - Choose the step from 1, 2, 2.5 and 5 × 10ⁿ: the finest step whose labels are at least 1.2 font heights
+        apart.
+      - The test asserts at least 4 metre labels in a plot 150 px tall at the 5 km window and 10×.
+
+12. **Re-review (2026-11-26): pass with findings.** Fixed with Part C's client half, by the same worker:
+    - **Slivers at real station magnitudes.** At stations of about 13,000 m, float32 pixel polygons under about
+      0.006 px² are still refused by the engine. Raise `AREA_MIN_PIXELS` to 1e-2 px², or skip a polygon whose
+      `Geometry2D.triangulate_polygon` is empty. Add a test with stations from 13,000 m and crossings at
+      fractions from 1e-6 to 1 − 1e-6 of a segment.
+    - **Undecimated shading.** `band_runs` takes every row in the window, so the whole-line redraw is about
+      10 ms. Run it over the sampled rows. Compute `_vertical_extent` once per redraw; today
+      `_refresh_factor_label` computes it a second time.
+    - **Legend swatches.** They are filled before the theme applies, so they keep the fallback colours: the
+      no-ground swatch is dark grey on the dark Sandbox pill. Refresh them on `NOTIFICATION_THEME_CHANGED`.
+      Test: after a switch to Sandbox, each swatch equals its theme colour.
+    - **Stale controls height.** After a narrow → wide resize, the plot stays 27 px shorter, because
+      `_layout` reads the flow container's minimum size before its deferred sort. Connect
+      `_controls.minimum_size_changed` to a deferred `_layout`, and test the resize.
+    - **Dead helpers.** Delete `band_polygons`, `valid_runs`, `nice_ticks` and `tick_step`. Retarget their
+      tests to `band_runs`, `sampled_runs`, `ticks_at` and `spaced_step`. The shading test covers the fill
+      side too, and checks one polygon's area against a hand integral.
+    - **Accepted:**
+      - the cursor line over a plated label;
+      - the length of the panel file;
+      - the `background` theme token;
+      - two requests per project change.
+
+## Part C — surface models are not ground (F57, 2026-11-26)
+
+Part B's Kralupy capture imports Copernicus GLO-30 with a 2 km clip, as M3's "generic terrain fills
+everywhere detailed data is absent" requires. GLO-30 is a surface model (T-133): it follows treetops,
+rooftops and, over the Vltava, the water surface. `alignment.ground_profile` samples the whole stack, so
+where DMR 5G has no points, GLO-30 is taken as ground. At the bridge this reads ground 167.50 m, fill
+3.1 m² and no hatch. In a forest it would read the canopy as ground and report metres of false cut.
+
+**Decision (architect, 2026-11-26):** a surface model is display terrain only. Earthworks use bare-ground
+sources only. Where only a surface model covers the centreline, the station has no ground for earthworks,
+and the result says why. The 3D terrain, the tiles, the source map and the overlay are unchanged.
+
+### Contract
+
+- **The setting.** `ImportSettings.surface_model: bool = False`: the source is a surface model (it includes
+  vegetation and buildings), not bare ground.
+  - `ImportSettingsDTO` gains the same field with the same default, and a test checks that the defaults
+    are equal.
+  - It is recorded with the dataset's settings and round-trips like every other setting.
+- **Providers.** A provider may declare `surface_model = True` as a class attribute; read it with `getattr`
+  and a default of `False`, as `runner.py` already does for `title` and `format_id`.
+  - `CopernicusGlo30Provider` declares it.
+  - The runner records `surface_model = True` for such a provider's import whatever the request sent. The
+    flag describes the data, not a choice.
+  - Its `inspect` report suggests `surface_model=True`.
+- **`source.list`.** Each terrain entry gains `surface_model: bool`.
+- **The stack.**
+  - `StackSource` gains `surface_model: bool = False`, carried from the dataset's settings through
+    `_terrain_snapshot` and `_build_terrain`.
+  - `TerrainStack` gains `surface_model: tuple[bool, ...]`, aligned with `surfaces`.
+  - `TerrainStack.heights_and_source(e, n, *, bare_ground: bool = False)`. With `bare_ground=True`, surfaces
+    marked as surface models are skipped. The returned index still indexes `surfaces`, so it still indexes
+    `source_ids`.
+  - The default call is unchanged, and so are precedence, tiles and the source map.
+- **`alignment.ground_profile`.**
+  - It samples with `bare_ground=True`.
+  - For every flag-1 station it queries the full stack at the centreline. Where a surface model covers it,
+    the row's flags are `1 | 8` (9), and `source` is that surface model's index.
+  - `ground_h` stays NaN and both areas stay 0. Volumes and `no_ground_spans` treat the row exactly as
+    flag 1.
+  - Flag 8 never comes without flag 1.
+  - `domain/earthworks.py` does not change. The handler passes a bare-ground callable and sets flag 8
+    afterwards.
+- **Docs.**
+  - `docs/data-contracts/earthworks.md`: bit 8 in the flags table, "Flag 1 comes alone, or with 8", and a
+    short "Surface models" paragraph.
+  - `docs/data-contracts/import-framework.md`: the setting.
+  - `docs/protocol/ipc.md`: regenerated.
+- **Client (`profile_panel.gd`).**
+  - For a flag-9 row, the readout reads "Ground: surface model only" and the source's name, for example
+    "Copernicus GLO-30".
+  - The hatching and the legend are unchanged.
+  - A line covered only by a surface model must not read "No terrain covers this alignment": that check
+    tests flag 1 without flag 8.
+  - The import dialog needs no change in this part; a checkbox for files goes to the roadmap.
+
+### Deliverables
+
+| Path | Action |
+|---|---|
+| `backend/src/coypu_builder/domain/sources.py` | `ImportSettings.surface_model` |
+| `backend/src/coypu_builder/domain/terrain_surface.py` | `StackSource.surface_model`, `TerrainStack.surface_model`, `bare_ground` |
+| `backend/src/coypu_builder/io/providers/copernicus.py` | `surface_model = True`; the suggested setting |
+| `backend/src/coypu_builder/io/sources/runner.py` | the provider's flag wins |
+| `backend/src/coypu_builder/protocol/messages.py` | `ImportSettingsDTO.surface_model`, `source.list`'s `surface_model` |
+| `backend/src/coypu_builder/server/handlers.py` | snapshot, build, `ground_profile` with flag 8 |
+| `docs/data-contracts/earthworks.md`, `import-framework.md`, `docs/protocol/ipc.md` | as above |
+| `backend/tests/test_earthworks.py`, `test_terrain_surface.py` (or the existing stack tests), provider tests | the tests below |
+| `client/ui/profile_panel/profile_panel.gd`, `client/tests/unit/test_profile_panel.gd` | the readout |
+
+### Acceptance criteria
+
+1. `test_bare_ground_skips_surface_models`: a stack holding a bare-ground TIN over `x < 50` and a surface
+   model 5 m higher everywhere.
+   - With `bare_ground=True`: NaN and −1 where only the surface model covers, and the TIN's heights and
+     index elsewhere.
+   - The default call returns the surface model's heights in the gap, as before.
+2. `test_ground_profile_flags_surface_model_only_stations` (over the wire, synthetic files, one imported
+   with `surface_model: true`).
+   - Rows in the gap carry flags 9, NaN ground, zero areas and the surface model's index in `source`.
+   - The totals and `no_ground_spans` equal those of the same project without the surface model.
+   - `terrain.tile` heights in the gap still come from the surface model.
+3. `test_copernicus_import_is_always_a_surface_model`, with the existing provider test server.
+   - An import requesting `surface_model: false` is recorded as true.
+   - `source.list` says so.
+   - `inspect` suggests it.
+4. `test_import_settings_dto_defaults_match_the_domain` covers the new field. A file import defaults to
+   false, and `true` round-trips.
+5. Client: `test_surface_model_only_rows_read_surface_model_only`.
+6. Live, run locally with `COYPU_DATA` and reported, not on CI: in `terrain_kralupy`, which still imports
+   GLO-30, `kralupy_profile_bridge` shows the hatched span. The readout at km 16.700 reads "surface model
+   only", Copernicus GLO-30. Ground − rail at km 13.0, 14.0 and 16.0 is unchanged: +17.36, +11.11 and
+   +1.00 m.
+7. No regressions: both suites are green, with no previously passing test removed, skipped or weakened.
+   Goldens are unchanged, and `gen_protocol_docs.py --check` exits 0.
 
 ## Invariants
 
