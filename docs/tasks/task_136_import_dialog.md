@@ -769,6 +769,145 @@ tests in `test_ui_preset.gd` / `test_terrain_field.gd`, and `ui_shell.json` / `t
     - `test_imagery_warnings_show_once_and_clear`.
   - The `terrain_synthetic` boundaries shot and a Data sources shot show the swatches; judge them on the GPU.
 
+### Clarifications (Part C3, 2026-11-25, before the worker)
+
+1. **Deliverables, complete.**
+   - Client:
+     - `client/scene/terrain/terrain_material.gd` (the palette);
+     - `client/scene/terrain/terrain_field.gd` (swatch index, licence, warnings);
+     - `client/core/session.gd` (the warnings);
+     - `client/ui/shell/ui_shell.gd` (the popover);
+     - `client/ui/dialogs/import_dialog.gd` (the no-CRS filter).
+   - Client tests: `test_terrain_material.gd`, `test_ui_preset.gd`, `test_terrain_field.gd` and
+     `test_import_dialog.gd`.
+   - Backend: `backend/src/coypu_builder/io/sources/runner.py`, with one test in `backend/tests/test_import_framework.py`.
+   - Docs: the sentence in `docs/data-contracts/import-framework.md` that documents the warning.
+   - No capture file changes: the existing `terrain_synthetic` shots are enough (item 7).
+2. **One palette.** Today the shader computes the overlay colours itself (`hsv_to_rgb` and the literals
+   `0.618034`, `0.55`, `0.9`), and `TerrainMaterial.overlay_colour` computes them again. That is the "two
+   places" the contract forbids. Make the GDScript function the only source:
+   - **`overlay_colour(index)`** returns the colour quantised to 8 bits per channel (`Color8` of the HSV
+     colour), so a palette image can hold it exactly.
+   - **`TerrainMaterial.palette_texture() -> ImageTexture`** is static, built once and shared, like
+     `shared_shader()`. It is a 256 × 1 `Image.FORMAT_RGB8`: pixel `i` is `overlay_colour(i)` for `i` from 0 to
+     254, and pixel 255 is black and never read.
+   - **The shader** reads `uniform sampler2D palette_tex : source_color, filter_nearest, repeat_disable;` with
+     `texelFetch(palette_tex, ivec2(int(here), 0), 0).rgb`.
+     - `source_color` makes the shader read the palette as sRGB, like the albedo, so the tint on screen is
+       the swatch's colour. Before, the HSV value was taken as linear.
+     - `SHADER_CODE` no longer contains `hsv_to_rgb`, `0.618034`, `0.55` or `0.9`.
+     - Every material sets `palette_tex`: `for_images` and `for_boundaries`.
+   - Update the doc comment at the top of the file.
+3. **The swatch.**
+   - Each terrain entry from `_data_source_entries()` gains `"overlay_index"`: the source's position in the
+     field's `_source_ids` (the terrain listing's order, the same list each tile's `source_index` indexes in
+     a revision). An id the listing does not name gets `-1`. Imagery entries always get `-1`.
+   - The popover puts a 12 × 12 px `ColorRect` before the heading of each entry with an index of 0 or more.
+     Its colour is `TerrainMaterial.overlay_colour(index)`, and its tooltip is "Its colour in the source
+     boundaries overlay".
+   - The swatch shows whether or not the overlay is on, so the legend does not jump.
+   - Imagery rows and `-1` rows show no swatch and no gap. Keep the heading's text alignment the same in both
+     presets.
+4. **The licence line for a file source.**
+   - `_read_source_names` also keeps `licence` from `source.list` (C1 added it to `SourceSummary`), and each
+     entry gains `"licence"`.
+   - Under the attribution, the popover shows "Licensed under <licence>", in the notices' `HintLabel` style,
+     when all of these hold:
+     - the licence is not empty;
+     - it is not the placeholder `unknown`;
+     - none of the entry's notices already contains the licence text.
+   - `source.list` does not say whether a source came from a file or a provider. The third rule keeps a ČÚZK
+     provider row from showing the licence twice, because its notice already begins "Licensed under CC BY 4.0".
+5. **Imagery warnings.**
+   - **No source id.** `imagery.tiles` gives `warnings` as plain sentences without a source id, so the popover
+     cannot place them under a source. They all go under one "Imagery warnings" heading (`HintLabel`), after
+     the entries and also when there are none, one wrapped default-style label each.
+     - No protocol change. A per-source field goes to the roadmap if a review asks for it.
+   - **Collecting them.** A listing pass in `_list_imagery` collects the distinct warnings of its levels in
+     first-seen order. At the end of the pass the field calls `Session.set_imagery_warnings(warnings)`.
+     - While the Imagery layer is hidden, the field publishes an empty list, as `_data_source_entries` credits
+       no imagery then.
+     - A pass whose listing failed changes nothing.
+   - **The Session.** `Session.imagery_warnings() -> PackedStringArray` reads them back.
+     `set_imagery_warnings` stores a copy and emits `EventBus.data_sources_changed` only when the list changed.
+   - **The status bar.**
+     - It shows one message only when the warnings go from none to some: the first warning, plus " — N more in
+       Data sources" when there are more. Emit it through `EventBus.status_message`.
+     - Changes while some warnings remain do not show it again. The ČÚZK breaker warning ends in a countdown
+       ("retrying in 12 s") that changes with every listing, and comparing the text would repeat the message
+       each time.
+     - When the warnings clear, nothing is emitted: the status bar keeps whatever it shows, and the popover
+       clears.
+   - **Tests.** `test_imagery_warnings_show_once_and_clear` in `test_terrain_field.gd` drives three fake
+     listings:
+     - two warnings, which give one status message and both lines in the popover;
+     - the same two with a different countdown, which give no new message;
+     - none, which clears the popover and emits nothing.
+6. **The no-CRS warning.**
+   - **Backend.** In `runner.py`, add `NO_CRS_WARNING_PREFIX = "the source declares no coordinate reference
+     system"`. The inspect warning becomes `f"{NO_CRS_WARNING_PREFIX}; choose one in the import settings, it will
+     not be guessed"`.
+     - Leave the `CrsRequired` error at `runner.py:302` as it is. It is an error for callers of
+       `import.run`, and the dialog never shows it.
+     - `import-framework.md` states that the warning starts with this prefix, and that the prefix is stable
+       for clients.
+     - New test `test_no_crs_warning_has_the_stable_prefix_and_no_protocol_name`.
+   - **Client.** `import_dialog.gd` gets the same `NO_CRS_WARNING_PREFIX`. `_fill_report` skips the warnings
+     that begin with it, only when `declared_crs` is null and the red notice is shown.
+     - New test `test_no_crs_warning_is_not_repeated_under_the_notice`. A report with `declared_crs` null and
+       warnings `[prefix + "; …", "other"]` shows the notice once, shows "other", and does not show the
+       prefixed warning.
+7. **Shots.** Run `tools/capture.ps1 terrain_synthetic` and view these on the GPU:
+   - `synthetic_boundaries`: the tints match the swatches;
+   - `synthetic_data_sources` and `synthetic_data_sources_sandbox`: two terrain rows with swatches, and the
+     orthophoto row without one.
+   Each synthetic source has a recorded licence only if the scenario sets one; report what the rows show.
+8. **Counts.** gdUnit had 445 tests before and gains at least 4: swatch, warnings, the no-CRS filter, and the
+   palette guard `test_shader_reads_the_palette_not_its_own_colours`. pytest had 907 before and gains 1.
+   - Run ruff, `ruff format --check` and `gen_protocol_docs.py --check`.
+   - Check the CR count with `tr -cd '\r' < f | wc -c` on every changed file.
+
+### Review decisions (Part C3, 2026-11-26)
+
+The first build failed review on one blocker; the rest passed with findings. The GPU probe showed that
+`texelFetch` on the `source_color` RGB8 palette is decoded as sRGB in Forward+, so the tint on screen is
+exactly `overlay_colour`. The swatches (#e56767, #678ce5) match the tints in the shots. The sandbox run
+without swatches did not recur in three runs, and no race was found in the code.
+
+1. **Blocker: orphan nodes.** gdUnit exits 101 on orphans, and CI's `pipefail` turns that into a failure.
+   - `_refresh_data_popover` frees only the swatch row, so its swatch and label stay parentless until the frame
+     ends.
+   - Fix it in the production code, not by awaiting a frame in the tests: queue every descendant of a removed
+     row as well as the row.
+   - The full suite must report 0 orphans and exit 0.
+2. **A popover with only warnings.**
+   - The status-bar button shows when there are entries or imagery warnings. With warnings and no entries,
+     its text is "Imagery warnings".
+   - The popover's empty sentence shows only when there are neither entries nor warnings.
+   - Test: `test_warnings_only_popover_is_reachable`.
+3. **One level's warnings per pass.** The backend builds `imagery.tiles` warnings from the whole imagery
+   cache, not per level. The union across levels therefore adds nothing but duplicates: the breaker's countdown
+   can differ by a second between the levels of one pass.
+   - A pass keeps the warnings of the last level it listed.
+   - Stripping the digits to dedupe is rejected: it would merge distinct tile warnings ("tile 17/1234/5678",
+     "tile 17/1234/5679").
+4. **Tests to add.**
+   - `test_hiding_imagery_hides_its_warnings_without_a_message`: hiding the Imagery layer empties the
+     warnings, and showing it brings them back, both without a status message.
+   - `test_a_failed_imagery_listing_keeps_the_warnings`: E_BUSY, and a revision mismatch between levels.
+   - The sandbox swatch test also checks the size (12 × 12), the tooltip and `is_visible_in_tree()`.
+   - The warnings test disconnects its status listener in `after_test`, or behind an `is_connected` guard, so
+     a failed assertion cannot leave it connected.
+5. **Accepted as they are.**
+   - Warnings refresh only on a listing, so after ČÚZK recovers the popover keeps the old countdown until the
+     next relist. This goes to the roadmap as F56.
+   - "the world file declares no coordinate reference system" still shows under the red notice. It says where
+     the reader looked, so it adds information.
+   - The order-change tint is transient, and heals when the tiles refetch.
+   - `UNKNOWN_LICENCE` is duplicated on the client, which is acceptable for one placeholder.
+   - Rows with a swatch are indented, and rows without one are flush left (clarification 3).
+   - The popover's `HSeparator` draws nothing in either theme, which predates C3. It goes to F54's residue.
+
 ### Deliverables (Part C2; the original Part C)
 
 | Path | Action |

@@ -204,6 +204,133 @@ The request runs off the event loop (ADR 0003), and is `mutates: false`.
   `AlignmentEntry` and returned in `AlignmentSummary`. The Kralupy capture scenario sets it in its import
   call.
 
+### Clarifications (Part B, 2026-11-26, before the worker)
+
+The contract above was written before T-135 and T-136 built the shell, the terrain field and the capture
+driver as they stand. Where these items differ from the contract, they win.
+
+1. **Deliverables, complete.**
+   - New:
+     - `client/ui/profile_panel/profile_panel.gd`: the panel, drawn in `_draw`, plus a pure static helper for
+       the drawing maths so unit tests need no rendering;
+     - `client/tests/unit/test_profile_panel.gd`;
+     - `client/tests/integration/test_ground_profile_live.gd`;
+     - `.uid` files for each.
+   - Changed:
+     - `client/ui/shell/ui_shell.gd`: the tabs and the slot height;
+     - `client/core/session.gd`: `fetch_ground_profile` and its cache;
+     - `client/scene/main.gd`: hand the playback to the panel, and pass `profile_idealised`;
+     - `client/core/cli_args.gd`: the `--profile-idealised` flag;
+     - `tools/capture.ps1`, `client/tools/capture/scenario.gd`, `client/tools/capture/capture_driver.gd`:
+       the top-level `profile_idealised` key and the `bottom_tab` shot key;
+     - `client/tests/unit/test_capture_scenario.gd` and `client/tests/unit/test_cli_args.gd`;
+     - `client/tools/capture/scenarios/terrain_kralupy.json` and `terrain_synthetic.json`: the shots in item 8;
+     - both theme `.tres` files, if `TabContainer` needs styling;
+     - `client/README.md`: the Profile tab, in a short paragraph.
+   - No backend change: Part A is done (`d80c852`). If the backend seems wrong, report it; do not change it.
+2. **The tabs.**
+   - The bottom `DockPanel` keeps its id `&"timeline"`, so `panel(&"timeline")`, the capture driver and the
+     tests keep working. Its body hosts a `TabContainer` with **Timeline** (the existing placeholder text) and
+     **Profile**.
+   - The tab bar replaces the panel's title: no "Timeline" heading above the tabs. If `DockPanel` cannot hide
+     its header, add the smallest method for it (`set_header_visible(false)`) and list it.
+   - The selected tab is per session, not saved.
+   - Add `UiShell.profile_panel() -> ProfilePanel` and `UiShell.select_bottom_tab(name: StringName)` for
+     `&"timeline"` and `&"profile"`; the capture driver and the tests use them.
+3. **The height.** Today the docked bottom slot is `DOCK_BOTTOM_H` = 150 px, and the Sandbox pill is
+   `FLOAT_PILL_H` = 56 px. Neither leaves room for a profile.
+   - With **Profile** selected, the bottom slot is `PROFILE_H` = 260 px in Engineering, and the pill grows to
+     260 px in Sandbox. With **Timeline** selected, both keep today's heights.
+   - The 3D view gives up the space, as it does for the other docks.
+   - At 1600 × 900, the drawing area inside the Profile tab is at least 150 px tall in both presets. A test
+     measures it.
+4. **What the panel fetches.**
+   - `Session.fetch_ground_profile(alignment_id: String, spacing_m: float = 10.0) -> Dictionary` is a
+     coroutine. It returns the result fields plus the decoded blobs (`station`, `rail_h`, `ground_h` and the
+     areas as `PackedFloat64Array`; `source` and `flags` as `PackedByteArray`), or `{}` after emitting
+     `EventBus.backend_error` on failure.
+   - It caches by `(alignment_id, spacing_m)`. The cache is cleared on `EventBus.project_changed`,
+     `EventBus.alignments_changed` and `EventBus.sources_changed("terrain")`. The client does not track the
+     terrain revision, so these events stand in for it; the echoed `terrain_revision` is kept in the result
+     for the readout's tooltip.
+   - The panel fetches the whole alignment once at 10 m, which is about 1,800 rows for Kralupy, and draws a
+     window of it. It fetches only while the Profile tab is visible, and again when the cache is cleared.
+     While a fetch runs, the panel shows "Loading the ground profile…". On `{}` it shows "The ground profile
+     could not be computed" with the error's sentence, and a Retry button.
+5. **Which alignment.**
+   - The panel shows the alignment of the bound playback: `ProfilePanel.bind_playback(controller:
+     PlaybackController)`. `main.gd` calls it from `_wire_playback`, and the panel takes the id from the
+     controller's alignment table.
+   - Without a playback, it shows the first entry of `Session.alignments()` with the cursor at its start
+     station and no cursor line.
+   - With no alignment, it shows "Import an alignment to see its ground profile".
+   - With no terrain, so that every row has flag 1, the panel draws the rail and shows "No terrain covers
+     this alignment — import terrain to see the ground". The hatching is not drawn for the whole line.
+6. **The window and axes.**
+   - **Width.** A selector offers "1 km", "5 km" and "Whole line", default 5 km. The window is centred on the
+     cursor and clamped to the alignment's ends.
+   - **Vertical exaggeration.** 1×, 5× or 10×, default 10× (the contract). The vertical range fits the rail,
+     the ground and the formation level within the window, plus 10 % of margin.
+   - **Axes.** The horizontal axis is in km, with 3 decimals at 1 km and fewer at wider windows. The vertical
+     axis is in metres. Each axis has about 5 to 8 ticks, at round values.
+   - **Drawing.** Draw only the rows inside the window, plus one either side. The panel redraws when the
+     cursor moves by at least one pixel, or when the size, the window, the exaggeration or the data change.
+     It does not redraw every frame.
+7. **The cursor, the readout and the colours.**
+   - **Cursor.** `controller.lead_station()` is read in `_process`, only while the tab is visible. The
+     readout is interpolated linearly between the two rows around the cursor. A NaN ground or a flag-1 row
+     reads "no ground data".
+   - **Readout.** It shows the station ("km 13.000"), the rail height, the ground height, ground − rail (with
+     its sign, "+17.36 m"), the cut area, the fill area and the source name. It sits in a fixed column at
+     the right of the panel and does not cover the drawing.
+   - **Colours.** Cut and fill take colours from the theme: two new theme colours, or existing ones. The
+     legend reads "Cut", "Fill" and "No ground data (e.g. water)".
+   - **Idealised note.** The note shows for an alignment with `profile_idealised` true in its
+     `Session.alignments()` entry.
+   - **3D.** No 3D station cursor in this task; the train is the 3D cursor.
+8. **The capture.**
+   - **Marking the profile idealised.** The project is opened by `main.gd` from `--project`, not by an import
+     the scenario makes, so:
+     - a top-level scenario key `"profile_idealised": true` makes `capture.ps1` pass `--profile-idealised`;
+     - `cli_args.gd` parses the flag;
+     - `main.gd` passes `{"profile_idealised": true}` to `Session.import_coypu`, which gains an optional
+       params argument.
+   - **The `bottom_tab` shot key** takes `"timeline"` or `"profile"`, and the driver calls
+     `select_bottom_tab`.
+   - **`terrain_kralupy.json`** gets `"profile_idealised": true` and two shots with `"ui": "visible"`,
+     `"preset": "engineering"` and `"bottom_tab": "profile"`:
+     - `kralupy_profile_km13`, at the `time_s` of `kralupy_cutting_km13`: large cut and the note;
+     - `kralupy_profile_bridge`, at the `time_s` of `kralupy_cab_bridge`: the hatched span.
+   - **`terrain_synthetic.json`** gets `synthetic_profile_engineering` and `synthetic_profile_sandbox` at
+     `time_s` 873. They need no `COYPU_DATA` and are the shots a reviewer can always run.
+   - **Running them.** The Kralupy run needs `COYPU_DATA`. Set it inline for that one command, from
+     `CLAUDE.local.md`, and never write or print its value.
+   - **Judging.** View every shot on the GPU with the Read tool and describe it.
+   - **Performance.** The perf block runs before the shots with the Timeline tab selected, so it is not
+     affected. Report its numbers against the previous Kralupy run in `captures/`, if one exists.
+9. **The live test.** `test_ground_profile_live.gd` starts a real backend.
+   - It opens the Kralupy `.coypu` fixture with `profile_idealised`, imports
+     `client/tests/fixtures/terrain/synthetic_tin.xml` (EPSG:5514) and fetches the profile at 10 m.
+   - Then it checks:
+     - `station` is increasing;
+     - some rows have ground and some rows have flag 1 (the synthetic surface covers only part of the line);
+     - `cut_volume_m3 + fill_volume_m3 > 0`;
+     - the panel, given the result, draws without errors;
+     - the alignment entry has `profile_idealised == true`.
+10. **Unit tests.** Use a fake profile with no backend, and include at least:
+    - `test_tabs_switch_and_profile_grows_the_bottom_slot` (both presets);
+    - `test_window_is_centred_on_the_cursor_and_clamped`;
+    - `test_readout_interpolates_between_rows`;
+    - `test_no_ground_rows_read_no_ground_and_are_not_drawn_as_ground`;
+    - `test_cut_and_fill_are_shaded_where_their_areas_are_positive`;
+    - `test_exaggeration_scales_the_vertical_range`;
+    - `test_idealised_note_follows_the_alignment_flag`;
+    - `test_profile_cache_clears_on_terrain_import`;
+    - `test_no_alignment_and_no_terrain_messages`;
+    - `test_cli_parses_profile_idealised` and the new scenario keys in `test_capture_scenario.gd`.
+11. **M3 assessment.** The report assesses each M3 exit criterion in `ROADMAP.md` as met, partly met or not
+    met, and gives the evidence (a test, a shot or a figure) for each.
+
 ## Invariants
 
 - Earthworks read only the analysis surface, never display tiles.
