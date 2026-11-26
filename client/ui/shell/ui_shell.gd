@@ -24,10 +24,21 @@ const PANEL_TIMELINE := &"timeline"
 const DOCK_LEFT_W := 280.0
 const DOCK_RIGHT_W := 320.0
 const DOCK_BOTTOM_H := 150.0
+## The bottom slot's height with the Profile tab selected (T-137 B), in both presets; the Timeline keeps its own height.
+const PROFILE_H := 260.0
 const FLOAT_CARD_W := 300.0
 const FLOAT_MARGIN := 12.0
 const FLOAT_PILL_H := 56.0
 const PILL_RADIUS_PX := 28
+## The bottom slot's tabs (T-137 B): the names [method select_bottom_tab] takes.
+const BOTTOM_TAB_TIMELINE := &"timeline"
+const BOTTOM_TAB_PROFILE := &"profile"
+const _BOTTOM_TAB_INDEX := {BOTTOM_TAB_TIMELINE: 0, BOTTOM_TAB_PROFILE: 1}
+## The space the bottom tabs take around their page, in pixels, docked and floating: the tab bar sits in the same margin as
+## the page. The floating pill is 56 px high, so its margin is smaller.
+const _BOTTOM_MARGIN_PX := 8
+const _PILL_TABS_MARGIN_PX := 4
+const _TIMELINE_PLACEHOLDER := "Play, pause and scrub the run here, with stops and speed markers along the time axis."
 
 const _STATE_OK_COLOR := Color("16A34A")
 const _STATE_BAD_COLOR := Color("DC2626")
@@ -86,6 +97,8 @@ var _overlay: Control
 
 var _ribbon: Ribbon
 var _panels := {}                  # panel id -> DockPanel
+var _bottom_tabs: TabContainer     # the timeline panel's body: Timeline and Profile (T-137 B)
+var _profile_panel: ProfilePanel
 var _camera_manager: CameraManager
 
 var _status_backend: Label
@@ -126,13 +139,11 @@ func _ready() -> void:
 		PANEL_INSPECTOR, "Inspector",
 		"The properties of the selected object, such as an alignment, a station or a vehicle, will show here for review and editing."
 	)
-	_panels[PANEL_TIMELINE] = DockPanel.create(
-		PANEL_TIMELINE, "Timeline",
-		"Play, pause and scrub the run here, with stops and speed markers along the time axis."
-	)
+	_panels[PANEL_TIMELINE] = DockPanel.create(PANEL_TIMELINE, "Timeline", _TIMELINE_PLACEHOLDER)
 	_left_slot.add_child(_panels[PANEL_LAYERS])
 	_right_slot.add_child(_panels[PANEL_INSPECTOR])
 	_bottom_slot.add_child(_panels[PANEL_TIMELINE])
+	_build_bottom_tabs()
 
 	_export_dialog = EnvelopeExportDialog.new()
 	_export_dialog.exported.connect(_on_exported)
@@ -188,6 +199,32 @@ func ribbon() -> Ribbon:
 ## The one [DockPanel] of `id` (&"layers", &"inspector", &"timeline"), docked or floating alike.
 func panel(id: StringName) -> DockPanel:
 	return _panels.get(id)
+
+
+## The Profile tab of the bottom slot (T-137 B), which holds the panel's data and cursor.
+func profile_panel() -> ProfilePanel:
+	return _profile_panel
+
+
+## The bottom slot's tab bar: Timeline and Profile.
+func bottom_tabs() -> TabContainer:
+	return _bottom_tabs
+
+
+## The selected bottom tab, [constant BOTTOM_TAB_TIMELINE] or [constant BOTTOM_TAB_PROFILE]. Not saved: a new session
+## starts on the Timeline.
+func bottom_tab() -> StringName:
+	return BOTTOM_TAB_PROFILE if _bottom_tabs.current_tab == _BOTTOM_TAB_INDEX[BOTTOM_TAB_PROFILE] else BOTTOM_TAB_TIMELINE
+
+
+## Selects a bottom tab by name (T-137 B); the slot grows to [constant PROFILE_H] for the Profile tab. The capture driver and
+## the tests use this; an unknown name is an error and changes nothing.
+func select_bottom_tab(tab_name: StringName) -> void:
+	if not _BOTTOM_TAB_INDEX.has(tab_name):
+		push_error("UiShell: there is no bottom tab named '%s'" % tab_name)
+		return
+	_bottom_tabs.current_tab = _BOTTOM_TAB_INDEX[tab_name]
+	_on_bottom_tab_changed(_bottom_tabs.current_tab)
 
 
 func preset() -> UiPreset:
@@ -273,6 +310,7 @@ func apply_preset(id: StringName, opacity: float = -1.0) -> void:
 	_ribbon.set_compact(floating)
 	_ribbon.set_icon_size(_preset.icon_size_px)
 	(_panels[PANEL_TIMELINE] as DockPanel).set_pill(floating)
+	_fit_bottom_tabs(floating)
 	for panel_id: StringName in _panels:
 		var dock_panel: DockPanel = _panels[panel_id]
 		var radius := PILL_RADIUS_PX if panel_id == PANEL_TIMELINE else _preset.corner_radius_px
@@ -499,6 +537,54 @@ func show_capture_text(text: String) -> void:
 
 # --- internals --------------------------------------------------------------------------------------------
 
+## The timeline panel's body becomes a tab bar: Timeline (the placeholder moves into its page) and Profile. The title bar
+## goes, because the tab bar names the panel; the timeline's scroll does not scroll, since the slot is sized to its tab.
+func _build_bottom_tabs() -> void:
+	var timeline := _panels[PANEL_TIMELINE] as DockPanel
+	timeline.set_header_visible(false)
+	timeline.scroll().vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+
+	_bottom_tabs = TabContainer.new()
+	_bottom_tabs.name = "BottomTabs"
+	_bottom_tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_bottom_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var timeline_page := VBoxContainer.new()
+	timeline_page.name = "Timeline"
+	var placeholder := timeline.placeholder_label()
+	placeholder.get_parent().remove_child(placeholder)
+	timeline_page.add_child(placeholder)
+	_bottom_tabs.add_child(timeline_page)
+	_profile_panel = ProfilePanel.new()
+	_profile_panel.name = "Profile"
+	_bottom_tabs.add_child(_profile_panel)
+	_bottom_tabs.set_tab_title(_BOTTOM_TAB_INDEX[BOTTOM_TAB_TIMELINE], "Timeline")
+	_bottom_tabs.set_tab_title(_BOTTOM_TAB_INDEX[BOTTOM_TAB_PROFILE], "Profile")
+	timeline.body().add_child(_bottom_tabs)
+	_bottom_tabs.tab_changed.connect(_on_bottom_tab_changed)
+
+
+## The tabs' sizing for a style: the plain timeline text in both (the pill's title is the tab's now), and the margins the
+## tab bar and its page share.
+func _fit_bottom_tabs(floating: bool) -> void:
+	if _bottom_tabs == null:
+		return
+	var timeline := _panels[PANEL_TIMELINE] as DockPanel
+	timeline.placeholder_label().text = _TIMELINE_PLACEHOLDER
+	var margin := _PILL_TABS_MARGIN_PX if floating else _BOTTOM_MARGIN_PX
+	timeline.set_body_margins_px(margin, margin)
+
+
+## The height of the bottom slot (docked) or of the timeline pill (floating) for the selected tab (T-137 B).
+func _bottom_height(floating: bool) -> float:
+	if _bottom_tabs != null and _bottom_tabs.current_tab == _BOTTOM_TAB_INDEX[BOTTOM_TAB_PROFILE]:
+		return PROFILE_H
+	return FLOAT_PILL_H if floating else DOCK_BOTTOM_H
+
+
+func _on_bottom_tab_changed(_tab: int) -> void:
+	_queue_relayout()
+
+
 func _place(node: Control, slot: Control, floating: bool) -> void:
 	var target: Control = _floating_layer if floating else slot
 	if node.get_parent() != target:
@@ -534,11 +620,12 @@ func _relayout() -> void:
 		var ribbon_h := ribbon_min.y
 		var middle_h := height - ribbon_h - status_h
 		var centre_w := width - DOCK_LEFT_W - DOCK_RIGHT_W
+		var bottom_h := _bottom_height(false)
 		_set_rect(_ribbon_slot, Rect2(0.0, 0.0, width, ribbon_h))
 		_set_rect(_left_slot, Rect2(0.0, ribbon_h, DOCK_LEFT_W, middle_h))
 		_set_rect(_right_slot, Rect2(width - DOCK_RIGHT_W, ribbon_h, DOCK_RIGHT_W, middle_h))
-		_set_rect(_bottom_slot, Rect2(DOCK_LEFT_W, height - status_h - DOCK_BOTTOM_H, centre_w, DOCK_BOTTOM_H))
-		inner = Rect2(DOCK_LEFT_W, ribbon_h, centre_w, middle_h - DOCK_BOTTOM_H)
+		_set_rect(_bottom_slot, Rect2(DOCK_LEFT_W, height - status_h - bottom_h, centre_w, bottom_h))
+		inner = Rect2(DOCK_LEFT_W, ribbon_h, centre_w, middle_h - bottom_h)
 		ribbon_bottom = ribbon_h
 	else:
 		var bar_w := minf(ribbon_min.x, width - 2.0 * FLOAT_MARGIN)
@@ -548,7 +635,8 @@ func _relayout() -> void:
 		_set_rect(_panels[PANEL_LAYERS], Rect2(FLOAT_MARGIN, top, FLOAT_CARD_W, bottom - top))
 		_set_rect(_panels[PANEL_INSPECTOR], Rect2(width - FLOAT_MARGIN - FLOAT_CARD_W, top, FLOAT_CARD_W, bottom - top))
 		var pill_x := FLOAT_MARGIN * 2.0 + FLOAT_CARD_W
-		_set_rect(_panels[PANEL_TIMELINE], Rect2(pill_x, bottom - FLOAT_PILL_H, width - 2.0 * pill_x, FLOAT_PILL_H))
+		var pill_h := _bottom_height(true)
+		_set_rect(_panels[PANEL_TIMELINE], Rect2(pill_x, bottom - pill_h, width - 2.0 * pill_x, pill_h))
 		inner = Rect2(0.0, ribbon_bottom, width, height - ribbon_bottom - status_h)
 	# Data-driven: the preset says whether the view fills the window; otherwise it takes what the docks leave.
 	_set_rect(_view_container, Rect2(0.0, 0.0, width, height) if _preset.viewport_full_bleed else inner)

@@ -20,6 +20,9 @@ var _radius_px := 0
 var _margin: MarginContainer
 var _placeholder_text := ""
 var _pill := false
+var _header_shown := true
+## The body's top and bottom margins when a panel sets them (T-137 B); (-1, -1) keeps the style's own.
+var _body_margins := Vector2i(-1, -1)
 
 
 ## `id` names the slot (&"layers", &"inspector", &"timeline"); `placeholder` is the one line the body shows
@@ -87,13 +90,8 @@ static func shadow_scale(opacity: float) -> float:
 ## State is untouched; only visibility and margins change.
 func set_pill(pill: bool) -> void:
 	_pill = pill
-	_header.visible = not pill
-	var side := 24 if pill else 12
-	var vertical := 17 if pill else 12
-	_margin.add_theme_constant_override("margin_left", side)
-	_margin.add_theme_constant_override("margin_right", side)
-	_margin.add_theme_constant_override("margin_top", vertical)
-	_margin.add_theme_constant_override("margin_bottom", 0 if pill else 12)
+	_header.visible = _header_shown and not pill
+	_apply_margins()
 	_placeholder.autowrap_mode = TextServer.AUTOWRAP_OFF if pill else TextServer.AUTOWRAP_WORD_SMART
 	_placeholder.text = "%s   %s" % [_title_label.text, _placeholder_text] if pill else _placeholder_text
 	_placeholder.clip_text = pill
@@ -101,6 +99,32 @@ func set_pill(pill: bool) -> void:
 
 func is_pill() -> bool:
 	return _pill
+
+
+## Shows or hides the title bar of the panel. The bottom slot hides it: its tab bar names its tabs instead (T-137 B).
+func set_header_visible(shown: bool) -> void:
+	_header_shown = shown
+	_header.visible = shown and not _pill
+
+
+## Sets the body's top and bottom margins in pixels, for a panel whose body hosts tabs; the margins a pill or a docked
+## panel takes by default come back with [code]set_body_margins_px(-1, -1)[/code] (T-137 B).
+func set_body_margins_px(top: int, bottom: int) -> void:
+	_body_margins = Vector2i(top, bottom)
+	_apply_margins()
+
+
+func _apply_margins() -> void:
+	var side := 24 if _pill else 12
+	var top := 17 if _pill else 12
+	var bottom := 0 if _pill else 12
+	if _body_margins.x >= 0:
+		top = _body_margins.x
+		bottom = _body_margins.y
+	_margin.add_theme_constant_override("margin_left", side)
+	_margin.add_theme_constant_override("margin_right", side)
+	_margin.add_theme_constant_override("margin_top", top)
+	_margin.add_theme_constant_override("margin_bottom", bottom)
 
 
 ## Gives `control` its theme's "panel" box, adapted to the style: floating adds the translucent fill and the
@@ -163,6 +187,8 @@ func _build(panel_title: String, placeholder: String) -> void:
 	_margin = MarginContainer.new()
 	_margin.name = "Margin"
 	_margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# Fills the scroll's height, so a body that hosts tabs (T-137 B) gets the room the slot has for them.
+	_margin.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	for side in ["left", "top", "right", "bottom"]:
 		_margin.add_theme_constant_override("margin_" + side, 12)
 	_scroll.add_child(_margin)
@@ -170,6 +196,7 @@ func _build(panel_title: String, placeholder: String) -> void:
 	_body = VBoxContainer.new()
 	_body.name = "Body"
 	_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_body.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_margin.add_child(_body)
 
 	_placeholder_text = placeholder

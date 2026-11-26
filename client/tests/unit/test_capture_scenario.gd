@@ -501,6 +501,42 @@ func test_a_network_failure_is_a_skip_and_other_provider_errors_are_not() -> voi
 		assert_bool(Scenario.is_unreachable(message, "E_BAD_PARAMS")).append_failure_message("read as unreachable: %s" % message).is_false()
 
 
+## T-137 B: the project's vertical profile is idealised (`profile_idealised`), and a shot selects its bottom tab. Both need the
+## visible shell, as the preset does.
+func test_profile_idealised_and_bottom_tab_keys_are_read() -> void:
+	var scenario := Scenario.parse(
+		'{"project": "p.coypu", "profile_idealised": true, "shots": [{"name": "a", "camera": "orbit", "ui": "visible", "bottom_tab": "profile"}, {"name": "b", "camera": "orbit"}]}'
+	)
+	assert_array(scenario.errors()).is_empty()
+	assert_bool(scenario.profile_idealised).is_true()
+	assert_str(scenario.shots[0]["bottom_tab"]).is_equal("profile")
+	assert_bool(scenario.shots[1].has("bottom_tab")).is_false()
+	assert_bool(Scenario.parse('{"project": "p", "shots": [{"name": "a", "camera": "orbit"}]}').profile_idealised).is_false()
+
+
+func test_bottom_tab_and_profile_idealised_are_validated() -> void:
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "ui": "visible", "bottom_tab": "notes"}'), "bottom_tab must be one of")
+	_assert_error_mentions(_shot('{"name": "a", "camera": "orbit", "bottom_tab": "profile"}'), 'needs "ui": "visible"')
+	_assert_error_mentions(
+		Scenario.parse('{"project": "p", "profile_idealised": "yes", "shots": [{"name": "a", "camera": "orbit"}]}'),
+		"profile_idealised must be true or false"
+	)
+
+
+## T-137 B: the perf block takes `bottom_tab` as it takes `ui`, and it needs the visible shell like a shot does.
+func test_the_perf_block_takes_a_bottom_tab_with_the_visible_shell() -> void:
+	var visible := Scenario.parse(
+		'{"project": "p.coypu", "shots": [{"name": "a", "camera": "orbit"}], "perf": {"camera": "cab", "time_s": 0, "rate": 1, "duration_s": 5, "ui": "visible", "bottom_tab": "profile"}}'
+	)
+	assert_str(visible.perf["bottom_tab"]).is_equal("profile")
+	for message: String in visible.errors():
+		assert_bool(message.contains("bottom_tab")).append_failure_message("unexpected error: %s" % message).is_false()
+	_assert_error_mentions(
+		Scenario.parse('{"project": "p.coypu", "shots": [{"name": "a", "camera": "orbit"}], "perf": {"camera": "cab", "time_s": 0, "duration_s": 5, "bottom_tab": "profile"}}'),
+		'bottom_tab needs "ui": "visible"'
+	)
+
+
 ## T-135 Part C: the Kralupy scenario is valid, keeps `${COYPU_DATA}` unexpanded for tools/capture.ps1 to fill in, and its
 ## perf block stays inside the run.
 func test_the_kralupy_terrain_scenario_is_valid() -> void:
@@ -509,8 +545,14 @@ func test_the_kralupy_terrain_scenario_is_valid() -> void:
 	var scenario := Scenario.parse(text)
 	assert_array(scenario.errors()).is_empty()
 	assert_int(scenario.imports.size()).is_equal(3)
-	assert_int(scenario.shots.size()).is_equal(6)
+	assert_int(scenario.shots.size()).is_equal(8)
 	assert_str(scenario.shots[5]["name"]).is_equal("kralupy_corridor")
+	assert_bool(scenario.profile_idealised).is_true()
+	assert_str(scenario.shots[6]["name"]).is_equal("kralupy_profile_km13")
+	assert_str(scenario.shots[6]["bottom_tab"]).is_equal("profile")
+	assert_str(scenario.shots[6]["ui"]).is_equal("visible")
+	assert_str(scenario.shots[7]["name"]).is_equal("kralupy_profile_bridge")
+	assert_str(scenario.shots[7]["bottom_tab"]).is_equal("profile")
 	assert_bool(scenario.has_perf()).is_true()
 	assert_bool(scenario.perf["first"]).is_true()
 	var names := scenario.path_variables()
@@ -541,6 +583,19 @@ func test_scene_fraction_max_is_a_fraction_and_bounds_the_shot() -> void:
 	assert_str(Scenario.scene_fraction_problem(0.03, 0.15)).is_empty()
 	assert_str(Scenario.scene_fraction_problem(0.15, 0.15)).is_empty()
 	assert_bool(Scenario.scene_fraction_problem(0.51, 0.15).contains("scene fills more of the frame")).is_true()
+
+
+func test_the_synthetic_scenario_has_the_profile_shots_and_no_idealised_note() -> void:
+	var text := FileAccess.get_file_as_string("res://tools/capture/scenarios/terrain_synthetic.json")
+	var scenario := Scenario.parse(text)
+	assert_array(scenario.errors()).is_empty()
+	assert_bool(scenario.profile_idealised).is_false()
+	var profile_shots := 0
+	for shot in scenario.shots:
+		if shot.get("bottom_tab", "") == "profile":
+			profile_shots += 1
+			assert_float(float(shot["time_s"])).is_equal_approx(873.0, 1e-9)
+	assert_int(profile_shots).is_equal(2)
 
 
 func test_the_synthetic_scenario_bounds_its_from_below_shot() -> void:

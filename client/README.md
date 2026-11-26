@@ -340,6 +340,15 @@ T-140: the product frame around the 3D view. `scene/main.tscn` instances `ui/she
   The icons in `assets/icons/` are original line artwork drawn for this project (MIT, see the `LICENSE` beside
   them); no third-party asset is bundled.
 
+**Profile tab (T-137 B).** The bottom slot is a `TabContainer` of Timeline and Profile (`UiShell.select_bottom_tab`,
+`profile_panel()`); the tab bar replaces the timeline's title, and the Profile tab takes 260 px in both styles.
+`ui/profile_panel/profile_panel.gd` draws the rail, the ground line with its gaps, cut and fill, and the no-ground
+spans, from `Session.fetch_ground_profile` (the backend's `alignment.ground_profile`, cached per alignment until the
+project, the alignments or the terrain change). It follows the bound playback's lead station, with a readout in its
+own column, a 1 km, 5 km or whole-line window, and 1×, 5×, 10× or Fit exaggeration (Fit fits the data, and the label
+beside the selector gives the factor shown). The controls wrap to a second row in a narrow plot. Its drawing maths are
+static, so the unit tests need no rendering.
+
 ## Capturing screenshots
 
 `tools\capture.ps1` runs the real app (real backend, real window, desktop GPU) through a scenario file and

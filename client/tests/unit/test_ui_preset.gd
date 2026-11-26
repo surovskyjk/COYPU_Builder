@@ -331,8 +331,18 @@ func test_sandbox_timeline_is_a_real_pill_and_the_view_is_full_bleed() -> void:
 	shell.apply_preset(UiPreset.ENGINEERING)
 	await get_tree().process_frame
 	assert_bool(timeline.is_pill()).is_false()
-	assert_bool(timeline.get_node("Column/Header").visible).is_true()
+	# T-137 B: the bottom slot's tab bar names the timeline, so the docked timeline has no title bar.
+	assert_bool(timeline.get_node("Column/Header").visible).is_false()
 	assert_float(timeline.size.y).is_equal_approx(UiShell.DOCK_BOTTOM_H, 0.5)
+	# Only the timeline's title bar goes: the Layers panel keeps its header in both presets.
+	assert_bool(shell.panel(UiShell.PANEL_LAYERS).get_node("Column/Header").visible).append_failure_message(
+		"the Layers header is hidden in Engineering"
+	).is_true()
+	shell.apply_preset(UiPreset.SANDBOX)
+	await get_tree().process_frame
+	assert_bool(shell.panel(UiShell.PANEL_LAYERS).get_node("Column/Header").visible).append_failure_message(
+		"the Layers header is hidden in Sandbox"
+	).is_true()
 
 
 func test_export_result_reaches_the_status_bar() -> void:

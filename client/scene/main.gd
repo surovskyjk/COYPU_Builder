@@ -29,6 +29,9 @@ extends Node
 ##
 ## T-135 adds [TerrainField] under the world root, on the "terrain" layer, fed the active camera (it follows the
 ## camera mode switch). Nothing else changes here.
+##
+## T-137 B: `--profile-idealised` marks the project's vertical profile as idealised when it is imported (the import
+## params take it), and the playback is handed to the shell's Profile tab, so the cursor follows playback there too.
 
 ## Emitted once, when the corridor is built and -- if the project has a run -- playback is wired.
 signal scene_ready()
@@ -36,6 +39,7 @@ signal scene_ready()
 @onready var _shell: UiShell = $UiShell
 
 var _project_path := ""
+var _profile_idealised := false
 var _world: Node
 
 var _corridor: TrackCorridor
@@ -57,6 +61,7 @@ var _scene_ready_emitted := false
 func _ready() -> void:
 	var args := CliArgs.from_cmdline()
 	_project_path = args.get("project", "")
+	_profile_idealised = args.get("profile_idealised", false)
 
 	var capture_scenario: String = args.get("capture", "")
 	_shell.use_settings(UserSettings.new() if not capture_scenario.is_empty() else UserSettings.for_user())
@@ -139,12 +144,15 @@ func _bootstrap_session() -> void:
 	var lower_path := _project_path.to_lower()
 	if lower_path.ends_with(".xml"):
 		await Backend.request("project.new", {})
-		var imported := await Backend.request("import.landxml", {"path": _project_path})
+		var landxml_params := {"path": _project_path}
+		if _profile_idealised:
+			landxml_params["profile_idealised"] = true
+		var imported := await Backend.request("import.landxml", landxml_params)
 		if imported.type != "res":
 			push_error("main: import.landxml failed: %s" % str(imported.error))
 	elif lower_path.ends_with(".coypu"):
 		await Backend.request("project.new", {})
-		var imported := await Session.import_coypu(_project_path)
+		var imported := await Session.import_coypu(_project_path, {"profile_idealised": true} if _profile_idealised else {})
 		if not imported:
 			push_error("main: import.coypu failed for '%s'" % _project_path)
 	var got := await Backend.request("project.get", {})
@@ -224,6 +232,7 @@ func _wire_playback(run_summary: Dictionary) -> void:
 	_timeline.pause()
 
 	_camera_manager.bind_subject(_trainset_node, _playback)
+	_shell.profile_panel().bind_playback(_playback)
 
 
 func _handle_playback_key(keycode: Key) -> void:

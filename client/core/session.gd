@@ -49,12 +49,25 @@ var _data_sources: Array[Dictionary] = []
 ## The imagery warnings of the last listing, published by [TerrainField] (T-136 Part C3); empty while none apply.
 var _imagery_warnings := PackedStringArray()
 
+## "alignment_id|spacing_m" -> the decoded `alignment.ground_profile` result (T-137 B). Cleared when the project, the
+## alignments or the terrain change: the client does not track the terrain revision, so these events stand in for it.
+var _ground_profiles: Dictionary = {}
+## Bumped on every clear, so a fetch that was in flight when the cache was cleared is not stored.
+var _ground_profile_generation := 0
+var _ground_profile_error := ""
+## Test seam (T-137 B): `(params: Dictionary) -> IpcEnvelope or null`, asked first for `alignment.ground_profile`, as the
+## terrain seam is. Nothing in the application sets it.
+var _ground_profile_override := Callable()
+
 var _entities := EntityRegistry.new()
 var _layers := LayerState.new()
 
 
 func _ready() -> void:
 	_layers.layer_changed.connect(_on_layer_changed)
+	EventBus.project_changed.connect(_clear_ground_profiles)
+	EventBus.alignments_changed.connect(_clear_ground_profiles)
+	EventBus.sources_changed.connect(_on_ground_profile_sources_changed)
 
 
 func project_id() -> String:
@@ -408,11 +421,76 @@ func create_trainset(spec_key: String, units: int = 1, name: String = "") -> Var
 	return envelope.result
 
 
+## Coroutine. `alignment.ground_profile` (T-137 B) at `spacing_m` for one alignment: the ground line, cut and fill per
+## station and the volumes, as a dictionary of the result's fields (`terrain_revision`, `template`, `source_names`,
+## `attributions`, `no_ground_spans`, ...) plus the decoded blobs: `station`, `rail_h`, `ground_h`, `cut_area` and `fill_area`
+## as [PackedFloat64Array], `source` and `flags` as [PackedByteArray]. Cached by alignment and spacing until the project,
+## the alignments or the terrain change. Resolves to `{}` and emits [signal EventBus.backend_error] on failure, and the
+## sentence of that failure is then [method ground_profile_error].
+func fetch_ground_profile(alignment_id: String, spacing_m: float = 10.0) -> Dictionary:
+	var key := "%s|%s" % [alignment_id, str(spacing_m)]
+	if _ground_profiles.has(key):
+		return _ground_profiles[key]
+
+	var generation := _ground_profile_generation
+	var envelope := await _ground_profile_request({"alignment_id": alignment_id, "spacing_m": spacing_m})
+	if envelope.type != "res":
+		var message := String(envelope.error.get("message", ""))
+		_ground_profile_error = message
+		EventBus.backend_error.emit(envelope.error.get("code", "E_INTERNAL"), message)
+		return {}
+
+	_ground_profile_error = ""
+	var profile := _decode_ground_profile(envelope)
+	if generation == _ground_profile_generation:
+		_ground_profiles[key] = profile
+	return profile
+
+
+## The sentence of the last failed [method fetch_ground_profile], or "" after a success.
+func ground_profile_error() -> String:
+	return _ground_profile_error
+
+
+## Test seam (T-137 B): see [member _ground_profile_override]. An invalid Callable restores the backend.
+func set_ground_profile_request_override(override: Callable) -> void:
+	_ground_profile_override = override
+
+
+func _ground_profile_request(params: Dictionary) -> IpcEnvelope:
+	if _ground_profile_override.is_valid():
+		var replaced: Variant = await _ground_profile_override.call(params)
+		if replaced is IpcEnvelope:
+			return replaced
+	return await Backend.request("alignment.ground_profile", params)
+
+
+func _decode_ground_profile(envelope: IpcEnvelope) -> Dictionary:
+	var profile: Dictionary = envelope.result.duplicate(true)
+	for blob_name: String in ["station", "rail_h", "ground_h", "cut_area", "fill_area"]:
+		profile[blob_name] = envelope.blobs.get(blob_name, PackedFloat64Array())
+	profile["source"] = envelope.blobs.get("source", PackedByteArray())
+	profile["flags"] = envelope.blobs.get("flags", PackedByteArray())
+	return profile
+
+
+func _clear_ground_profiles() -> void:
+	_ground_profiles.clear()
+	_ground_profile_generation += 1
+
+
+func _on_ground_profile_sources_changed(kind: String) -> void:
+	if kind == "terrain":
+		_clear_ground_profiles()
+
+
 ## Coroutine. Imports a `.coypu` archive (its LandXML alignment(s), kinematics runs and stops) into the
-## current project, replacing [method alignments] and [method runs]. Returns `false` and emits
-## [signal EventBus.backend_error] on failure rather than hanging.
-func import_coypu(path: String) -> bool:
-	var envelope := await Backend.request("import.coypu", {"path": path})
+## current project, replacing [method alignments] and [method runs]. `params` adds to `{"path": path}` (T-137 B:
+## `profile_idealised`). Returns `false` and emits [signal EventBus.backend_error] on failure rather than hanging.
+func import_coypu(path: String, params: Dictionary = {}) -> bool:
+	var request := params.duplicate()
+	request["path"] = path
+	var envelope := await Backend.request("import.coypu", request)
 	if envelope.type != "res":
 		EventBus.backend_error.emit(envelope.error.get("code", "E_INTERNAL"), envelope.error.get("message", ""))
 		return false

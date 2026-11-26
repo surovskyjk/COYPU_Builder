@@ -1,5 +1,6 @@
 {
   "project": "backend/tests/fixtures/kralupy/kralupy_neratovice_092.coypu",
+  "profile_idealised": true,
   "resolution": [1600, 900],
   "ready_timeout_s": 900,
   "imports": [
@@ -46,7 +47,9 @@
     {"name": "kralupy_cab_bridge", "camera": "cab", "time_s": 1024.18, "settle_frames": 90},
     {"name": "kralupy_boundaries", "camera": "orbit", "time_s": 900.0, "orbit_zoom_notches": 22, "orbit_drag_px": [0, -126], "settle_frames": 90, "source_boundaries": true},
     {"name": "kralupy_data_sources", "camera": "orbit", "time_s": 900.0, "settle_frames": 90, "ui": "visible", "preset": "engineering", "dialog": "data_sources"},
-    {"name": "kralupy_corridor", "camera": "orbit", "time_s": 550.0, "orbit_zoom_notches": 16, "orbit_drag_px": [-120, -300], "settle_frames": 90, "source_boundaries": true}
+    {"name": "kralupy_corridor", "camera": "orbit", "time_s": 550.0, "orbit_zoom_notches": 16, "orbit_drag_px": [-120, -300], "settle_frames": 90, "source_boundaries": true},
+    {"name": "kralupy_profile_km13", "camera": "orbit", "time_s": 800.22, "settle_frames": 90, "ui": "visible", "preset": "engineering", "bottom_tab": "profile"},
+    {"name": "kralupy_profile_bridge", "camera": "orbit", "time_s": 1024.18, "settle_frames": 90, "ui": "visible", "preset": "engineering", "bottom_tab": "profile"}
   ],
   "perf": {"camera": "cab", "time_s": 761.24, "rate": 4.0, "duration_s": 70.0, "first": true}
 }

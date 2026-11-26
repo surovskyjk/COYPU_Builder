@@ -909,6 +909,26 @@ expand_margin_right = 1
 expand_margin_bottom = 1
 anti_aliasing = true
 
+[sub_resource type="StyleBoxEmpty" id="tab_panel"]
+
+[sub_resource type="StyleBoxFlat" id="tab_selected"]
+bg_color = Color(0.1059, 0.1333, 0.1686, 0.97)
+border_width_bottom = 2
+border_color = Color(0.36, 0.6, 1, 1)
+content_margin_left = 10.0
+content_margin_top = 2.0
+content_margin_right = 10.0
+content_margin_bottom = 2.0
+anti_aliasing = true
+
+[sub_resource type="StyleBoxFlat" id="tab_unselected"]
+bg_color = Color(0.1059, 0.1333, 0.1686, 0.0)
+content_margin_left = 10.0
+content_margin_top = 2.0
+content_margin_right = 10.0
+content_margin_bottom = 2.0
+anti_aliasing = true
+
 [resource]
 default_font_size = 14
 Label/colors/font_color = Color(0.9098, 0.9294, 0.9529, 1)
@@ -1097,3 +1117,23 @@ Window/constants/title_height = 36
 Window/constants/resize_margin = 4
 Window/font_sizes/font_size = 15
 Window/constants/title_outline_size = 0
+ProfilePanel/base_type = &"Control"
+ProfilePanel/colors/rail = Color(0.9098, 0.9294, 0.9529, 1)
+ProfilePanel/colors/ground = Color(0.95, 0.66, 0.3, 1)
+ProfilePanel/colors/cut = Color(1, 0.55, 0.3, 0.5)
+ProfilePanel/colors/fill = Color(0.35, 0.65, 1, 0.5)
+ProfilePanel/colors/no_ground = Color(0.6039, 0.6549, 0.7098, 1)
+ProfilePanel/colors/background = Color(0.0667, 0.0863, 0.1137, 1)
+ProfilePanel/colors/grid = Color(0.7176, 0.7608, 0.8078, 0.16)
+ProfilePanel/colors/cursor = Color(0.36, 0.6, 1, 1)
+ProfilePanel/colors/formation = Color(0.55, 0.85, 0.6, 1)
+TabContainer/colors/font_selected_color = Color(0.9098, 0.9294, 0.9529, 1)
+TabContainer/colors/font_unselected_color = Color(0.6039, 0.6549, 0.7098, 1)
+TabContainer/colors/font_hovered_color = Color(0.9098, 0.9294, 0.9529, 1)
+TabContainer/colors/font_disabled_color = Color(0.6039, 0.6549, 0.7098, 1)
+TabContainer/styles/panel = SubResource("tab_panel")
+TabContainer/styles/tabbar_background = SubResource("tab_panel")
+TabContainer/styles/tab_selected = SubResource("tab_selected")
+TabContainer/styles/tab_unselected = SubResource("tab_unselected")
+TabContainer/styles/tab_hovered = SubResource("tab_unselected")
+TabContainer/styles/tab_disabled = SubResource("tab_unselected")

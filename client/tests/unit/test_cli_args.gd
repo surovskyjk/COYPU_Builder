@@ -32,6 +32,14 @@ func test_flags_can_appear_in_any_order() -> void:
 	assert_bool(result.has("attach")).is_false()
 
 
+## T-137 B: `--profile-idealised` is a switch, read as `profile_idealised`, and absent unless given.
+func test_cli_parses_profile_idealised() -> void:
+	var result := CliArgs.parse(PackedStringArray(["--profile-idealised", "--project", "p.coypu"]))
+	assert_bool(result.get("profile_idealised", false)).is_true()
+	assert_str(result.get("project", "")).is_equal("p.coypu")
+	assert_bool(CliArgs.parse(PackedStringArray(["--project", "p.coypu"])).has("profile_idealised")).is_false()
+
+
 func test_empty_args_yield_empty_dictionary() -> void:
 	var result := CliArgs.parse(PackedStringArray())
 	assert_that(result).is_equal({})

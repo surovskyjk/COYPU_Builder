@@ -67,6 +67,11 @@ func lead_station() -> float:
 	return _lead_station
 
 
+## The alignment the bound table was baked from (T-137 B: the Profile tab shows the same alignment), or "" when unbound.
+func alignment_id() -> String:
+	return _table.alignment_id() if _table != null else ""
+
+
 func current_speed() -> float:
 	return _speed
 

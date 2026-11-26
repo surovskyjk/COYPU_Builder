@@ -58,10 +58,13 @@ if (-not $godot) { throw "Godot not installed; run tools\install_godot.ps1 first
 # read just gets default resolution and no project instead of failing here.
 $resolution = @(1600, 900)
 $project = ""
+# T-137 B: a scenario that marks the project's vertical profile as idealised passes --profile-idealised to the app.
+$profileIdealised = $false
 try {
     $parsed = [System.IO.File]::ReadAllText($scenarioPath) | ConvertFrom-Json
     if ($parsed.resolution -and @($parsed.resolution).Count -eq 2) { $resolution = @($parsed.resolution) }
     if ($parsed.project -is [string]) { $project = $parsed.project }
+    if ($parsed.profile_idealised -eq $true) { $profileIdealised = $true }
 } catch {
     Write-Host "note: could not read the scenario here ($($_.Exception.Message)); the app will report it"
 }
@@ -154,6 +157,7 @@ if ($project) {
     $projectPath = if ([System.IO.Path]::IsPathRooted($project)) { $project } else { Join-Path $root $project }
     $argList += @("--project", (Quote $projectPath))
 }
+if ($profileIdealised) { $argList += "--profile-idealised" }
 $argList += @("--capture", (Quote $captureScenarioPath), "--capture-out", (Quote $Out))
 
 $stdoutLog = Join-Path $Out "godot_stdout.log"

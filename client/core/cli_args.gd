@@ -10,10 +10,12 @@ extends RefCounted
 ## argument: a session token never travels on a command line (ADR 0010).
 ##
 ## `--capture <scenario.json>` and `--capture-out <dir>` (T-125) switch the app into scripted screenshot mode;
-## see `tools/capture/capture_driver.gd`.
+## see `tools/capture/capture_driver.gd`. `--profile-idealised` (T-137 B) is a switch: the project's vertical profile
+## is marked idealised when it is imported.
 
 const _SWITCHES := {
 	"--attach": "attach",
+	"--profile-idealised": "profile_idealised",
 }
 
 const _FLAGS := {

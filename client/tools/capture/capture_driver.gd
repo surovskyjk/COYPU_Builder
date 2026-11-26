@@ -252,6 +252,8 @@ func _capture_shot(shot: Dictionary, timeline: TimelineState, playback: Playback
 		await _drive_orbit(shot.get("orbit_zoom_notches", 0), shot.get("orbit_drag_px", Vector2.ZERO))
 	await _frames(shot["settle_frames"])
 	await _wait_for_terrain(shot["name"])
+	if shot.get("bottom_tab", "timeline") == "profile":
+		await _wait_for_profile(String(shot["name"]))
 	await RenderingServer.frame_post_draw
 
 	var entry := {
@@ -264,6 +266,9 @@ func _capture_shot(shot: Dictionary, timeline: TimelineState, playback: Playback
 		"source_boundaries": _shell.source_boundaries(),
 		"attribution": _shell.attribution_text(),
 	}
+	if shot.get("bottom_tab", "timeline") == "profile":
+		entry["bottom_tab"] = "profile"
+		entry["profile"] = _shell.profile_panel().summary()
 	entry["memory"] = _memory_stats()
 	var image := get_viewport().get_texture().get_image()
 	var saved: int = ERR_CANT_CREATE if image == null else image.save_png(_out_dir.path_join(entry["file"]))
@@ -317,11 +322,18 @@ func _record_perf(block: Dictionary, timeline: TimelineState) -> void:
 		await _pose_ui({"ui": "hidden"})
 		_manifest_perf_baseline = await _measure_perf(block, timeline, "perf baseline (ui hidden)")
 	await _pose_ui(block)
+	# T-137 B: a perf block on the Profile tab is timed once the panel has its profile, so the frames show the drawn profile.
+	var profile_tab: bool = block.get("bottom_tab", UiShell.BOTTOM_TAB_TIMELINE) == UiShell.BOTTOM_TAB_PROFILE
+	if profile_tab:
+		await _wait_for_profile("perf")
 	_manifest_perf = await _measure_perf(block, timeline, "perf")
 	if block["ui"] == "visible":
 		_manifest_perf["ui"] = "visible"
 		_manifest_perf["preset"] = block["preset"]
 		_manifest_perf["panel_opacity"] = _shell.panel_opacity()
+	if profile_tab:
+		_manifest_perf["bottom_tab"] = "profile"
+		_manifest_perf["profile_window_m"] = _shell.profile_panel().window_width_m()
 
 
 ## T-135 Part B: a shot of a scene that imports terrain waits until the terrain field has settled, every selected tile
@@ -339,6 +351,21 @@ func _wait_for_terrain(shot_name: String) -> void:
 			_errors.append("shot '%s': the terrain did not settle within %.0f s" % [shot_name, TERRAIN_SETTLE_TIMEOUT_S])
 			return
 		await get_tree().process_frame
+	await _frames(3)
+
+
+## T-137 B: a shot of the Profile tab waits until the panel has its profile, or has failed to get one (a failure is recorded). At
+## most the terrain's settle timeout.
+func _wait_for_profile(shot_name: String) -> void:
+	var panel := _shell.profile_panel()
+	var deadline := Time.get_ticks_msec() + int(TERRAIN_SETTLE_TIMEOUT_S * 1000.0)
+	while not panel.settled():
+		if Time.get_ticks_msec() > deadline:
+			_errors.append("shot '%s': the ground profile did not arrive within %.0f s" % [shot_name, TERRAIN_SETTLE_TIMEOUT_S])
+			return
+		await get_tree().process_frame
+	if panel.state() == ProfilePanel.State.FAILED:
+		_errors.append("shot '%s': the ground profile could not be computed: %s" % [shot_name, panel.error_text()])
 	await _frames(3)
 
 
@@ -416,6 +443,8 @@ func _pose_ui(block: Dictionary, shot_name := "") -> void:
 	_shell.close_dialogs()
 	_shell.show_capture_text("")
 	_shell.set_source_boundaries(bool(block.get("source_boundaries", false)))
+	# T-137 B: every block states its bottom tab, so the Timeline is selected unless the block asks for the Profile.
+	_shell.select_bottom_tab(StringName(block.get("bottom_tab", UiShell.BOTTOM_TAB_TIMELINE)))
 	if block["ui"] != "visible":
 		_shell.set_chrome_visible(false)
 		await _frames(2)

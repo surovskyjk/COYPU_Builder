@@ -14,6 +14,8 @@ const CAMERAS: Array[String] = ["orbit", "wayside", "cab"]
 const UI_MODES: Array[String] = ["hidden", "visible"]
 const PRESETS: Array[String] = ["engineering", "sandbox"]
 const DIALOGS: Array[String] = ["envelope_export", "settings", "data_sources", "import"]
+## T-137 B: the bottom slot's tabs a shot can select (`bottom_tab`), as [method UiShell.select_bottom_tab] names them.
+const BOTTOM_TABS: Array[String] = ["timeline", "profile"]
 ## T-136 Part C2: the steps of an `import_dialog` block, and the keys each part of it takes.
 const IMPORT_STEPS: Array[String] = ["online", "report", "settings", "result"]
 const _IMPORT_DIALOG_KEYS: Array[String] = ["step", "files", "settings", "crs_query", "provider"]
@@ -55,17 +57,17 @@ const LUMA_STD_MIN := 0.005
 const LUMA_MEAN_MIN := 0.05
 const LUMA_MEAN_MAX := 0.95
 
-const _TOP_KEYS: Array[String] = ["project", "resolution", "ready_timeout_s", "imports", "shots", "perf"]
+const _TOP_KEYS: Array[String] = ["project", "resolution", "ready_timeout_s", "imports", "shots", "perf", "profile_idealised"]
 const _SHOT_KEYS: Array[String] = [
 	"name", "camera", "time_s", "focus_station_m", "settle_frames", "orbit_zoom_notches", "orbit_drag_px",
 	"ui", "preset", "panel_opacity", "dialog", "dialog_offset_px", "overlay_text", "source_boundaries",
-	"scene_fraction_max", "import_dialog",
+	"scene_fraction_max", "import_dialog", "bottom_tab",
 ]
 ## `baseline: true` makes the driver record the same run once with the UI hidden first (manifest `perf_baseline`),
 ## so the cost of the visible shell is a difference within one run.
 ## `first: true` runs the perf block before the shots (T-135 Part B), so it can stream terrain the shots would load.
 const _PERF_KEYS: Array[String] = [
-	"camera", "time_s", "rate", "duration_s", "ui", "preset", "panel_opacity", "baseline", "first",
+	"camera", "time_s", "rate", "duration_s", "ui", "preset", "panel_opacity", "bottom_tab", "baseline", "first",
 ]
 
 ## Basename of the scenario file; set by the caller (the text itself carries no name).
@@ -83,6 +85,9 @@ var perf: Dictionary = {}
 ## T-135 Part B: the `import.run` parameter objects the driver issues after the project loads and before the scene
 ## is ready (each is inspected first). Paths are relative to the repository. Empty when the file has none.
 var imports: Array[Dictionary] = []
+## T-137 B: the project's vertical profile is idealised (`--profile-idealised`), which `capture.ps1` passes for a scenario that
+## sets it. Read by the capture only; the Profile tab shows the note it marks.
+var profile_idealised := false
 
 var _errors := PackedStringArray()
 
@@ -266,6 +271,12 @@ func _read(root: Dictionary) -> void:
 	if root.has("resolution"):
 		_read_resolution(root["resolution"])
 
+	if root.has("profile_idealised"):
+		if root["profile_idealised"] is bool:
+			profile_idealised = root["profile_idealised"]
+		else:
+			_errors.append("profile_idealised must be true or false, got %s" % JSON.stringify(root["profile_idealised"]))
+
 	if root.has("ready_timeout_s"):
 		var timeout: Variant = _number("ready_timeout_s", root["ready_timeout_s"])
 		if timeout != null:
@@ -387,8 +398,9 @@ func _read_shots(raw_shots: Array) -> void:
 		shots.append(shot)
 
 
-## Reads the T-140 keys `ui`, `preset`, `panel_opacity` (and `dialog` when `allow_dialog`) of `raw` into `target`.
-## They describe the visible shell, so any of the last three without `"ui": "visible"` is an error.
+## Reads the T-140 keys `ui`, `preset`, `panel_opacity` (and `dialog` when `allow_dialog`) of `raw` into `target`, and the T-137 B
+## key `bottom_tab`, which a perf block takes too. They describe the visible shell, so any of the last four without `"ui": "visible"`
+## is an error.
 func _read_ui(label: String, raw: Dictionary, target: Dictionary, allow_dialog: bool) -> void:
 	if raw.has("ui"):
 		if raw["ui"] is String and UI_MODES.has(raw["ui"]):
@@ -426,8 +438,13 @@ func _read_ui(label: String, raw: Dictionary, target: Dictionary, allow_dialog: 
 			target["overlay_text"] = raw["overlay_text"]
 		else:
 			_errors.append("%s: overlay_text must be a non-empty string" % label)
+	if raw.has("bottom_tab"):
+		if raw["bottom_tab"] is String and BOTTOM_TABS.has(raw["bottom_tab"]):
+			target["bottom_tab"] = raw["bottom_tab"]
+		else:
+			_errors.append("%s: bottom_tab must be one of %s, got %s" % [label, ", ".join(BOTTOM_TABS), JSON.stringify(raw["bottom_tab"])])
 	if target.get("ui", DEFAULT_UI) == "hidden":
-		for key in ["preset", "panel_opacity", "dialog"]:
+		for key in ["preset", "panel_opacity", "dialog", "bottom_tab"]:
 			if raw.has(key):
 				_errors.append("%s: %s needs \"ui\": \"visible\"" % [label, key])
 
